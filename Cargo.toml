@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["crates/iron-oxide-domain"]
+
+[workspace.package]
+edition = "2024"
+publish = false
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
