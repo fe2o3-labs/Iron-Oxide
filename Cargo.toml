@@ -7,6 +7,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 publish = false
+license = "AGPL-3.0-only"
+repository = "https://github.com/guizmaii-opensource/Iron-Oxide"
 
 [workspace.dependencies]
 # Pinned exactly: the `dx` CLI must be the same version as the `dioxus` crates (see README).
