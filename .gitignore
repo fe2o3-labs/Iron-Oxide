@@ -1,0 +1,31 @@
+# Rust / Dioxus build output
+/target/
+target/
+/dist/
+dist/
+
+# Environment files: never commit real secrets. Only the placeholder template is tracked.
+.env
+.env.*
+!.env.example
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local tooling
+.remember/
+
+# Node (Tailwind or other asset tooling, if ever used)
+node_modules/
+
+# Editors and OS
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
