@@ -1,0 +1,5 @@
+# The workspace denies `clippy::unwrap_used`, `clippy::expect_used` and `clippy::panic`
+# (see `[workspace.lints]` in the root Cargo.toml). Tests may use them.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
