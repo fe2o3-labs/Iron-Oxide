@@ -1,0 +1,12 @@
+[package]
+name = "iron-oxide-domain"
+description = "Pure domain logic for Iron Oxide: no Dioxus, web-sys or sqlx dependencies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
