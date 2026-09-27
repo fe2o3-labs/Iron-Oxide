@@ -1,0 +1,191 @@
+# Backups and point-in-time restore
+
+Runbook for recovering the Iron Oxide database. It covers what Neon keeps, how to restore it, and how to rehearse the restore.
+
+Setup (decisions #38 and #39): Postgres on **Neon, AWS Frankfurt (`eu-central-1`)**, app on **Fly.io, region `fra`**. The app connects through the **direct (non-pooled) endpoint**.
+
+Placeholders used below:
+
+| Placeholder     | Meaning                                                                                                      |
+| --------------- | ------------------------------------------------------------------------------------------------------------ |
+| `<app>`         | Fly app name (not chosen yet)                                                                                |
+| `<prod-branch>` | Neon root branch the app uses (`production` if the project was created in the Console, `main` via CLI/API)   |
+| `<project-id>`  | Neon project ID (Console, **Settings**), or run `neon set-context --project-id <project-id>` once            |
+| `<ts>`          | Restore point, RFC 3339 in **UTC**, e.g. `2026-09-28T12:05:00Z`                                              |
+
+## 1. What Neon keeps
+
+Neon doesn't take nightly backups. It keeps the write-ahead log (WAL) for a **history window**, and you can restore a root branch to any moment inside that window, down to the millisecond ("instant restore", i.e. PITR).
+
+As of 2026-09-28:
+
+| Plan   | Default history window | Maximum                   | History storage cost |
+| ------ | ---------------------- | ------------------------- | -------------------- |
+| Free   | 6 hours                | 6 hours (capped at 1 GB)  | free                 |
+| Launch | 1 day                  | 7 days                    | $0.20 / GB-month     |
+| Scale  | 1 day                  | 30 days                   | $0.20 / GB-month     |
+
+Sources (read 2026-09-28):
+
+- History window: <https://neon.com/docs/postgres/backup-restore/history-window>
+- Plans: <https://neon.com/docs/introduction/plans>
+- Instant restore: <https://neon.com/docs/postgres/backup-restore/branch-restore>
+
+Things to know:
+
+- **Only root branches** (e.g. `<prod-branch>`) can be restored to a point in time. Child branches cannot.
+- A restore covers **all databases on the branch**. It **overwrites** them and does not merge.
+- Object Storage and Neon Functions are not part of the timeline, so a restore doesn't touch them.
+- On Free, 6 hours means a mistake noticed the next morning **cannot be undone**.
+
+**Recommendation:** before any real user data matters, move to **Launch** and set the history window to **7 days**. Upgrading alone leaves it at the 1-day default. Set it in the Console under **Settings → Postgres → History window**: move the slider to 7 days, then **Save**. The cost is the retained WAL at $0.20/GB-month, which is tiny for this app.
+
+## 2. Before you restore
+
+1. **Stop the bleeding.** If the app is still doing damage (a bad deploy or a runaway job), stop it:
+
+   ```bash
+   fly scale count 0 -a <app>
+   ```
+
+2. **Find the restore point in UTC.** Neon takes RFC 3339 timestamps, and `Z` means UTC. Paris is UTC+2 in summer and UTC+1 in winter.
+   - `fly logs -a <app>` prints UTC timestamps. Look for the bad deploy or request.
+   - Look at `created_at`/`updated_at` columns near the incident.
+   - Use **Time Travel** to query the past read-only, and bisect until you find the last good moment. You can do this from the Console (**SQL Editor**, clock icon) or from the CLI:
+
+     ```bash
+     neon connection-string <prod-branch>@2026-09-28T12:05:00Z --psql -- -c "select count(*) from <table>"
+     ```
+
+   - Convert a local time to UTC:
+
+     ```bash
+     # macOS (BSD date)
+     date -u -r "$(TZ=Europe/Paris date -j -f '%Y-%m-%d %H:%M:%S' '2026-09-28 14:05:00' +%s)" +%Y-%m-%dT%H:%M:%SZ
+     # GNU date (Linux, or `gdate` from Homebrew coreutils)
+     date -u -d 'TZ="Europe/Paris" 2026-09-28 14:05' +%Y-%m-%dT%H:%M:%SZ
+     # both print 2026-09-28T12:05:00Z
+     ```
+
+   Pick a time **just before** the bad change. Everything written after `<ts>` is dropped from the restored branch, though it stays in the backup branch.
+
+3. **Think about migrations.** Migrations run automatically when the app starts.
+   - If you restore to a point **before a migration**, the database's migration table goes back too. The next boot **re-runs that migration**.
+   - If the incident *was* a bad migration, restoring and then booting the same image repeats the damage. Deploy a fixed release first, or keep the app scaled to 0 until one is ready.
+   - Rolling the **code** back to an older release while the database keeps a newer schema can make the migrator refuse to start, because it sees "applied migration missing from source". Check how the migrator is configured before relying on a code rollback.
+
+## 3. Restore
+
+There are two paths:
+
+- **A. Inspect first** (recommended when unsure): restore into a new branch, check it, then restore production in place.
+- **B. In place**: restore `<prod-branch>` directly. The old state is kept automatically as a backup branch.
+
+The connection string **does not change** with an in-place restore, because Neon moves the compute over to the restored branch. You only change `DATABASE_URL` in the fallback at the end of path A.
+
+### A. Restore into a new branch and inspect
+
+**Console:** **Branches** → **New branch**. Set **Parent branch** to `<prod-branch>` and choose **Past data**. Pick the date and time, name the branch `restore-check`, and create it.
+
+**CLI** (install with `npm i -g neon@latest` or `brew install neonctl`, then run `neon login`; syntax checked against `neon` 6.2.3):
+
+```bash
+# --parent accepts a timestamp; the parent is then the project's default branch (<prod-branch>)
+neon branches create --name restore-check --parent 2026-09-28T12:05:00Z
+```
+
+**Verify** (see [section 4](#4-verify)) with:
+
+```bash
+neon connection-string restore-check --psql
+```
+
+Once the data looks right, apply the same `<ts>` to production **in place (path B)**. Production then stays a root branch, keeps PITR, and keeps its connection string. Afterwards, delete `restore-check`:
+
+```bash
+neon branches delete restore-check
+```
+
+If only a few rows were lost and you want to keep the writes made since, don't restore at all. Copy the missing rows from `restore-check` into `<prod-branch>` instead, with `pg_dump --data-only -t <table>` or `\copy`.
+
+**Fallback: run the app on the new branch.** Use this only if an in-place restore is impossible. `restore-check` is a **child branch**, so while production runs on it you **lose point-in-time restore**. Treat it as temporary.
+
+```bash
+# Direct endpoint: never pass --pooled (decision #39). $(...) keeps the password out of your shell history.
+fly secrets set DATABASE_URL="$(neon connection-string restore-check)" -a <app>
+```
+
+`fly secrets set` rolls out a new release that restarts the machines, so no separate restart is needed. If you used `--stage`, run `fly secrets deploy -a <app>`.
+
+### B. Restore production in place
+
+**Console:**
+
+1. Select `<prod-branch>` and open **Postgres database → Backup & Restore → Restore from history**.
+2. Pick the timestamp, or switch to LSN. Use the built-in **Time Travel Assist** query box to check the data at that point.
+3. Click **Next**, review the summary, then click **Restore**.
+
+**CLI:**
+
+```bash
+neon branches restore <prod-branch> ^self@2026-09-28T12:05:00Z \
+  --preserve-under-name <prod-branch>_before_restore_20260928
+```
+
+`--preserve-under-name` is mandatory for `^self`. The pre-restore state is kept as a root branch with that name (the Console names it `<prod-branch>_old_<timestamp>`).
+
+- **Undo the restore:** restore `<prod-branch>` again, using that backup branch as the source:
+
+  ```bash
+  neon branches restore <prod-branch> <prod-branch>_before_restore_20260928
+  ```
+
+- Open connections drop for a few seconds during the restore. The restore itself takes seconds.
+- Restart the app so it opens fresh connections, or scale it back up if you stopped it:
+
+  ```bash
+  fly apps restart <app>        # or: fly scale count 1 -a <app>
+  ```
+
+## 4. Verify
+
+Run these checks against the restored branch (`restore-check`, or `<prod-branch>` after path B):
+
+- [ ] The data you expected to recover is back. Spot-check the affected user/table with the query you used to find `<ts>`.
+- [ ] Nothing newer than `<ts>` is present, e.g. `select max(created_at) from <table>` is `<= <ts>`.
+- [ ] `select version, description, success from _sqlx_migrations order by version desc limit 5;` shows the migration level you expect (see [migrations](#2-before-you-restore)).
+- [ ] The app boots. `fly logs -a <app>` shows migrations applied (or none pending) and no errors.
+- [ ] Log in and exercise the main flows end to end (read existing data, write something new).
+- [ ] Once confident, delete the backup branch (Console → **Branches**) to stop paying for its storage. Some backup branches cannot be deleted; see the instant-restore docs.
+
+## 5. Restore drill
+
+Do this once before real data matters, then after any change to the database setup. Use a throwaway timestamp; it's safe because path A doesn't touch production.
+
+- [ ] Note the plan and current history window (Console → **Settings → Postgres**).
+- [ ] Pick `<ts>` about 1 hour ago and convert it to UTC.
+- [ ] Create `restore-check` from `<ts>` (path A) and connect with `psql`.
+- [ ] Verify a row written after `<ts>` is absent and an older row is present.
+- [ ] Optional, on a non-production project or branch: do an in-place restore (path B) and then undo it.
+- [ ] Delete `restore-check` and any backup branches you created.
+- [ ] Log the drill below.
+
+| Date (UTC) | Who | Plan / history window | Path tested | Time to restored & verified | Notes |
+| ---------- | --- | --------------------- | ----------- | --------------------------- | ----- |
+|            |     |                       |             |                             |       |
+
+## 6. Extra: logical backup with `pg_dump`
+
+PITR only reaches as far back as the history window, and it lives inside Neon. For an off-Neon copy (before risky changes, before leaving Neon, or for long-term archiving), take a logical dump.
+
+```bash
+# Direct endpoint only: pg_dump over the pooler is not supported. pg_dump's major version must match the server's (`show server_version;`).
+pg_dump -Fc -v -d "$(neon connection-string <prod-branch>)" -f ~/iron-oxide-backups/iron-oxide-$(date -u +%Y%m%dT%H%M%SZ).dump
+
+# Restore into an empty database or branch:
+pg_restore -v --no-owner -d "<target connection string>" ~/iron-oxide-backups/<file>.dump
+```
+
+> **Never commit dumps.** They contain user data (accounts, emails, workout history) and this repository is **public**. Write them outside the repo, keep them encrypted, and delete old ones.
+
+Docs: <https://neon.com/docs/manage/backup-pg-dump> (read 2026-09-28).
