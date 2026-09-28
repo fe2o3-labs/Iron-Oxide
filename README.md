@@ -243,6 +243,8 @@ cargo test -p iron-oxide-app --features server -- --ignored
 `clippy::unwrap_used`, `clippy::expect_used` and `clippy::panic` are denied workspace-wide, but
 allowed in tests (`clippy.toml`).
 
+To try the app on the iOS Simulator, the Android Emulator or a real phone, see [docs/dev/mobile-testing.md](docs/dev/mobile-testing.md).
+
 ## Release build
 
 ```sh
