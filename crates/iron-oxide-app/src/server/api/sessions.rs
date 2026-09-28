@@ -34,7 +34,7 @@ use sqlx::PgPool;
 
 use super::{ApiError, offset_date_time, timestamp};
 use crate::api::sessions::{
-    PlannedExercise, SessionPlan, SessionSummary, SessionView, SessionWithSets,
+    NextSessionPlan, PlannedExercise, SessionPlan, SessionSummary, SessionView, SessionWithSets,
 };
 use crate::server::db::{
     self,
@@ -75,30 +75,77 @@ pub async fn start(
             "Another session is in progress. Finish or abandon it first.",
         ));
     }
-    let program_id = db::active_program::get(pool, owner)
-        .await?
-        .ok_or_else(|| ApiError::conflict("Choose a program first."))?;
-    let version = db::programs::latest_version(pool, owner, program_id).await?;
-    let program = parse_program(&version.document)?;
-    let history = db::sessions::list_in_program(pool, owner, program_id)
-        .await?
-        .into_iter()
-        .map(|session| domain_session(&session))
-        .collect::<Result<Vec<_>, _>>()?;
-    let day = next_day(&program.rotation, &history).map_err(|error| {
-        tracing::warn!(%error, "cannot pick the next day");
-        ApiError::conflict(
-            "This program repeats a day in its rotation, which is not supported yet.",
-        )
-    })?;
+    let next = Next::load(pool, owner).await?;
     let new = db::sessions::NewSession {
         id: id.into(),
-        program_version_id: version.id,
-        day_id: day.as_str().to_owned(),
+        program_version_id: next.version,
+        day_id: next.day.as_str().to_owned(),
         started_at: started,
     };
     db::sessions::start(pool, owner, &new).await?;
     get(pool, owner, id).await
+}
+
+/// What the user trains next: the active program's latest version and the next day of its
+/// rotation.
+struct Next {
+    program_id: ids::ProgramId,
+    version: ProgramVersionId,
+    program: Program,
+    day: DayId,
+}
+
+impl Next {
+    async fn load(pool: &PgPool, owner: UserId) -> Result<Self, ApiError> {
+        let program_id = db::active_program::get(pool, owner)
+            .await?
+            .ok_or_else(|| ApiError::conflict("Choose a program first."))?;
+        let version = db::programs::latest_version(pool, owner, program_id).await?;
+        let program = parse_program(&version.document)?;
+        let history = db::sessions::list_in_program(pool, owner, program_id)
+            .await?
+            .iter()
+            .map(domain_session)
+            .collect::<Result<Vec<_>, _>>()?;
+        let day = next_day(&program.rotation, &history)
+            .map_err(|error| {
+                tracing::warn!(%error, "cannot pick the next day");
+                ApiError::conflict(
+                    "This program repeats a day in its rotation, which is not supported yet.",
+                )
+            })?
+            .clone();
+        Ok(Self {
+            program_id,
+            version: version.id,
+            program,
+            day,
+        })
+    }
+}
+
+/// The plan of the user's next session, before starting it: the next day of the active program
+/// and its targets from every completed session so far.
+pub async fn next_plan(pool: &PgPool, owner: UserId) -> Result<NextSessionPlan, ApiError> {
+    let next = Next::load(pool, owner).await?;
+    let day = next
+        .program
+        .day(&next.day)
+        .ok_or_else(|| ApiError::internal("the rotation names a day the program lacks"))?
+        .clone();
+    let mut context = Context::load(pool, owner, next.program_id).await?;
+    let mut exercises = Vec::with_capacity(day.exercises.len());
+    for exercise in day.exercises {
+        let targets = context.targets(pool, owner, &exercise, Bound::All).await?;
+        exercises.push(PlannedExercise { exercise, targets });
+    }
+    Ok(NextSessionPlan {
+        program_id: next.program_id.into(),
+        program_version_id: next.version.into(),
+        day: next.day,
+        day_name: day.name,
+        exercises,
+    })
 }
 
 /// The public message when a client id comes back with other content.
@@ -131,10 +178,20 @@ pub async fn save_set(
     set: &LoggedSet<Timestamp>,
 ) -> Result<(), ApiError> {
     let row = repo_set(session_id, set)?;
-    let mut log = load_log(pool, owner, session_id).await?;
-    // The domain's rules first (same id and values, ended session, completed before the start),
-    // then the repository, which settles races: a concurrent finish or duplicate.
-    log.add_set(set.clone())?;
+    let (session, sets) = load_parts(pool, owner, session_id).await?;
+    // A retry is recognised on the stored values as they are, before `lenient_log` clamps them.
+    if let Some(stored) = sets.iter().find(|stored| stored.id == set.id) {
+        return if stored == set {
+            Ok(())
+        } else {
+            Err(ApiError::conflict(
+                "This set was already saved with different values.",
+            ))
+        };
+    }
+    // The domain's rules (ended session, completed before the start), then the repository, which
+    // settles races: a concurrent finish or duplicate, the id used in another session.
+    lenient_log(session, sets)?.add_set(set.clone())?;
     db::sets::upsert_idempotent(pool, owner, &row).await?;
     Ok(())
 }
@@ -170,7 +227,7 @@ pub async fn plan(
     session_id: SessionId,
 ) -> Result<SessionPlan, ApiError> {
     let stored = db::sessions::get(pool, owner, session_id.into()).await?;
-    let mut context = Context::load(pool, owner, &stored).await?;
+    let mut context = Context::load(pool, owner, stored.program_id).await?;
     let program = context
         .program(pool, owner, stored.program_version_id)
         .await?;
@@ -247,7 +304,7 @@ async fn summary(
     }
 
     // Progression: each exercise of the day this session did working sets of.
-    let mut context = Context::load(pool, owner, &stored).await?;
+    let mut context = Context::load(pool, owner, stored.program_id).await?;
     let Some(program) = context
         .program(pool, owner, stored.program_version_id)
         .await?
@@ -279,6 +336,8 @@ async fn summary(
 enum Bound {
     /// Strictly before this session: the targets it was planned with.
     Before(Cursor),
+    /// Every completed session: the next session's targets.
+    All,
     /// Up to and including it: what it changed.
     Through(Cursor),
 }
@@ -287,6 +346,7 @@ impl Bound {
     fn includes(self, session: &WorkoutSession) -> bool {
         let key = (session.started_at, session.id);
         match self {
+            Self::All => true,
             Self::Before(cursor) => key < (cursor.started_at, cursor.id),
             Self::Through(cursor) => key <= (cursor.started_at, cursor.id),
         }
@@ -307,19 +367,14 @@ struct Context {
 }
 
 impl Context {
-    async fn load(
-        pool: &PgPool,
-        owner: UserId,
-        session: &WorkoutSession,
-    ) -> Result<Self, ApiError> {
-        let sessions: Vec<WorkoutSession> =
-            db::sessions::list_in_program(pool, owner, session.program_id)
-                .await?
-                .into_iter()
-                .filter(|session| session.status == db::sessions::SessionStatus::Completed)
-                .collect();
+    async fn load(pool: &PgPool, owner: UserId, program: ids::ProgramId) -> Result<Self, ApiError> {
+        let sessions: Vec<WorkoutSession> = db::sessions::list_in_program(pool, owner, program)
+            .await?
+            .into_iter()
+            .filter(|session| session.status == db::sessions::SessionStatus::Completed)
+            .collect();
         let mut sets: HashMap<ids::SessionId, Vec<LoggedSet<Timestamp>>> = HashMap::new();
-        for set in db::sets::completed_in_program(pool, owner, session.program_id).await? {
+        for set in db::sets::completed_in_program(pool, owner, program).await? {
             sets.entry(set.session_id)
                 .or_default()
                 .push(domain_set(&set)?);
@@ -441,13 +496,23 @@ async fn load_log(
     owner: UserId,
     id: SessionId,
 ) -> Result<SessionLog<Timestamp>, ApiError> {
+    let (session, sets) = load_parts(pool, owner, id).await?;
+    lenient_log(session, sets)
+}
+
+/// `owner`'s session `id` and its sets, as stored.
+async fn load_parts(
+    pool: &PgPool,
+    owner: UserId,
+    id: SessionId,
+) -> Result<(Session<Timestamp>, Vec<LoggedSet<Timestamp>>), ApiError> {
     let stored = db::sessions::get(pool, owner, id.into()).await?;
     let sets = db::sets::list_for_session(pool, owner, stored.id)
         .await?
         .iter()
         .map(domain_set)
         .collect::<Result<Vec<_>, _>>()?;
-    lenient_log(domain_session(&stored)?, sets)
+    Ok((domain_session(&stored)?, sets))
 }
 
 /// The stored session and sets as a [`SessionLog`].
@@ -582,6 +647,7 @@ mod tests {
     const GET: &str = "/api/sessions/get";
     const IN_PROGRESS: &str = "/api/sessions/in-progress";
     const PLAN: &str = "/api/sessions/plan";
+    const NEXT_PLAN: &str = "/api/sessions/next-plan";
     const SAVE_SET: &str = "/api/sessions/save-set";
     const FINISH: &str = "/api/sessions/finish";
 
@@ -970,6 +1036,7 @@ mod tests {
             (START, json!({ "session_id": session, "started_at": t(0) })),
             (GET, json!({ "session_id": session })),
             (IN_PROGRESS, json!({})),
+            (NEXT_PLAN, json!({})),
             (PLAN, json!({ "session_id": session })),
             (SAVE_SET, json!({ "session_id": session, "set": set })),
             (
@@ -1381,6 +1448,46 @@ mod tests {
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
     #[ignore = "needs Postgres"]
+    async fn next_plan_previews_the_next_session(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let mut a = api.user("A").await;
+        let result: Result<NextSessionPlan, _> = call(&mut a, NEXT_PLAN, json!({})).await;
+        assert_eq!(
+            assert_status(result, StatusCode::CONFLICT),
+            "Choose a program first."
+        );
+
+        let program = active_program(&api, &a).await;
+        let first: NextSessionPlan = call(&mut a, NEXT_PLAN, json!({})).await.unwrap();
+        assert_eq!(
+            (first.day.as_str(), first.day_name.as_str()),
+            ("a", "Day A")
+        );
+        assert_eq!(first.program_id, program);
+        squat_session(&mut a, 0, 5, 100.0, SessionOutcome::Completed).await;
+
+        let next: NextSessionPlan = call(&mut a, NEXT_PLAN, json!({})).await.unwrap();
+        assert_eq!(next.day.as_str(), "b");
+        let squat_next = next.exercises[0].targets.ready().unwrap();
+        assert_eq!(squat_next.source, TargetSource::Progression);
+        assert!(
+            squat_next
+                .working
+                .iter()
+                .all(|target| target.weight == Some(kg(102.5)))
+        );
+        // Starting it gives the same day, version and targets.
+        let id = SessionId::new_v7();
+        let started = start(&mut a, id, t(60)).await.unwrap();
+        assert_eq!(
+            (started.day.clone(), started.program_version_id),
+            (next.day.clone(), next.program_version_id)
+        );
+        assert_eq!(plan(&mut a, id).await.unwrap().exercises, next.exercises);
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
     async fn past_sessions_are_judged_against_their_own_prescription(db: PgPool) {
         let api = TestApi::new(db).await;
         let mut a = api.user("A").await;
@@ -1595,6 +1702,31 @@ mod tests {
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
     #[ignore = "needs Postgres"]
+    async fn a_set_stored_outside_its_session_still_retries_and_summarises(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let mut a = api.user("A").await;
+        active_program(&api, &a).await;
+        let id = SessionId::new_v7();
+        start(&mut a, id, t(10)).await.unwrap();
+        // Written straight to the repository (a client clock behind the server's session start).
+        let early = set(squat(), 0, 5, 100.0, t(5));
+        db::sets::upsert_idempotent(&api.db, a.id, &repo_set(id, &early).unwrap())
+            .await
+            .unwrap();
+        save(&mut a, id, &early).await.unwrap();
+        let summary = finish(&mut a, id, SessionOutcome::Completed, t(20))
+            .await
+            .unwrap();
+        assert_eq!(
+            summary.volume,
+            iron_oxide_domain::Volume::of(kg(100.0), Reps::new(5))
+        );
+        save(&mut a, id, &early).await.unwrap();
+        assert!(plan(&mut a, id).await.is_ok());
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
     async fn concurrent_duplicate_save_sets_create_one_row(db: PgPool) {
         let api = TestApi::new(db).await;
         let mut a = api.user("A").await;
@@ -1720,6 +1852,30 @@ mod tests {
             "b",
             "B's sessions do not move A's rotation"
         );
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn another_users_history_never_reaches_the_next_plan(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let (mut a, mut b) = api.users_a_and_b().await;
+        active_program(&api, &a).await;
+        squat_session(&mut a, 0, 5, 100.0, SessionOutcome::Completed).await;
+        let program_b = active_program(&api, &b).await;
+        let next: NextSessionPlan = call(&mut b, NEXT_PLAN, json!({})).await.unwrap();
+        assert_eq!(next.program_id, program_b);
+        assert_eq!(next.day.as_str(), "a", "B's rotation, not A's");
+        let squat_next = next.exercises[0].targets.ready().unwrap();
+        assert_eq!(squat_next.source, TargetSource::ProgramDefault);
+        assert!(
+            squat_next
+                .working
+                .iter()
+                .all(|target| target.weight == Some(kg(100.0)))
+        );
+        // And A's next plan is A's.
+        let a_next: NextSessionPlan = call(&mut a, NEXT_PLAN, json!({})).await.unwrap();
+        assert_eq!(a_next.day.as_str(), "b");
     }
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]

@@ -67,7 +67,24 @@ pub struct SessionPlan {
     pub exercises: Vec<PlannedExercise>,
 }
 
-/// One exercise of a [`SessionPlan`].
+/// The user's next session before it starts: the next day of the active program's rotation, in
+/// its latest version, and the targets from every completed session so far. Starting the session
+/// then gives the same day, and its [`SessionPlan`] the same targets.
+#[cfg_attr(
+    not(feature = "server"),
+    allow(dead_code, reason = "decoded by the home screen (#28)")
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextSessionPlan {
+    pub program_id: ProgramId,
+    pub program_version_id: ProgramVersionId,
+    pub day: DayId,
+    pub day_name: String,
+    /// The day's exercises, in program order.
+    pub exercises: Vec<PlannedExercise>,
+}
+
+/// One exercise of a [`SessionPlan`] or [`NextSessionPlan`].
 #[cfg_attr(
     not(feature = "server"),
     allow(dead_code, reason = "decoded by the session screen (#28)")
@@ -80,8 +97,9 @@ pub struct PlannedExercise {
     pub targets: NextTargets,
 }
 
-/// The end-of-session summary. It only depends on stored data up to this session, so a retried
-/// `finish_session` returns the same summary.
+/// The end-of-session summary, computed from stored data up to this session: a retried
+/// `finish_session` returns the same summary, unless the user changed a training max or their unit
+/// in between (which `changes` and `needs_training_max` depend on).
 #[cfg_attr(
     not(feature = "server"),
     allow(dead_code, reason = "decoded by the summary screen (#32)")
@@ -131,6 +149,13 @@ pub async fn get_in_progress_session() -> Result<Option<SessionWithSets>, Server
 #[post("/api/sessions/plan", state: Extension<AppState>, user: AuthUser)]
 pub async fn get_session_plan(session_id: SessionId) -> Result<SessionPlan, ServerFnError> {
     Ok(sessions::plan(&state.db, user.owner(), session_id).await?)
+}
+
+/// The plan of the user's next session, before starting it (the "today" screen). `409` when no
+/// program is active.
+#[post("/api/sessions/next-plan", state: Extension<AppState>, user: AuthUser)]
+pub async fn get_next_session_plan() -> Result<NextSessionPlan, ServerFnError> {
+    Ok(sessions::next_plan(&state.db, user.owner()).await?)
 }
 
 /// Logs a set in one of the user's in-progress sessions. Idempotent on `set.id`: the same set again

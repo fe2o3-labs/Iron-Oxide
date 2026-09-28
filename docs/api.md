@@ -137,6 +137,7 @@ and look like a conflict. The retry queue (#30) re-sends exactly the same body.
 | `start_session(session_id, started_at)` | `/api/sessions/start` | Starts a session of the active program's latest version, on the next day of its rotation. Returns a `SessionView`. |
 | `get_session(session_id)` | `/api/sessions/get` | One session (`SessionView`) |
 | `get_in_progress_session()` | `/api/sessions/in-progress` | The most recently started session in progress, with its sets in the order they were completed, or `null` |
+| `get_next_session_plan()` | `/api/sessions/next-plan` | Today's plan before starting: the next day of the active program (latest version) and its targets from every completed session. `409` with no active program. |
 | `get_session_plan(session_id)` | `/api/sessions/plan` | The session's day (name, exercises in program order). For each exercise: its definition in the session's version, and the progression engine's `NextTargets`, computed from the history before the session. |
 | `save_set(session_id, set)` | `/api/sessions/save-set` | Logs a `LoggedSet<Timestamp>` |
 | `finish_session(session_id, outcome, finished_at)` | `/api/sessions/finish` | Ends the session (`completed`, `skipped` or `abandoned`) and returns a `SessionSummary` |
@@ -169,7 +170,8 @@ Rules:
 - **Finishing.** The domain's `SessionLog::end` checks the time: not before the start or before a
   logged set (`422`). A retry with the same outcome and time returns the same summary. Another
   outcome or time is `409`. The summary is computed from stored data up to and including the
-  session, so a retry made later gets the same one. It contains:
+  session, so a retry made later gets the same one, unless the training max or the unit changed in
+  between: `changes` and `needs_training_max` depend on them. It contains:
   - `volume`: the working sets, weighted and not timed, through `From<&LoggedSet> for
     Option<PerformedSet>`.
   - `prs`: completed sessions only. They are compared with every earlier completed session of
