@@ -212,8 +212,8 @@ Epley formula.
   inventory as a plain list. The server validates them with the domain (`Weight::from_kg`,
   `PlateInventory::new`: no zero, duplicate or off-grid plate, at most 50 pairs and 16 sizes), and
   the default rest must be at most one hour. A typed `Weight` or `PlateInventory` argument would
-  fail while the body is decoded, before the function runs, which Dioxus reports as a `500` with
-  the decoding error.
+  fail while the body is decoded, before the function runs, and only give the generic
+  `422 Invalid request.` without saying which value is wrong.
 - **Defaults only when nothing was saved.** A user who saves an empty plate inventory keeps an
   empty one; the defaults apply only while there is no `user_settings` row
   (`settings::find` returns `None`).

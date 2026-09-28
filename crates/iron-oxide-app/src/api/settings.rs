@@ -48,7 +48,8 @@ impl Settings {
 
 /// What [`update_settings`] saves: the same fields as [`Settings`], but the values the user types
 /// travel unchecked (weights as kg numbers, the plate inventory as a plain list) and the server
-/// validates them, so a bad one gets a `422` with the reason instead of a decoding error.
+/// validates them, so a bad one gets a `422` that says what is wrong instead of the generic
+/// `422 Invalid request.` of an argument that does not decode.
 ///
 /// The JSON is the same as [`Settings`]' (a [`Weight`] is a kg number), and converting a
 /// [`Weight`] to kg and back is exact.

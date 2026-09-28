@@ -382,6 +382,14 @@ mod tests {
             (error.status.as_u16(), error.message.as_str()),
             (422, "Bar weight: weight must be at most 2000 kg.")
         );
+        // A value that does not even decode (an unknown unit) is the generic 422.
+        let mut bad_unit = serde_json::to_value(custom()).unwrap();
+        bad_unit["unit"] = json!("stone");
+        let error = a.call_err(UPDATE, json!({ "settings": bad_unit })).await;
+        assert_eq!(
+            (error.status.as_u16(), error.message.as_str()),
+            (422, "Invalid request.")
+        );
         assert_eq!(settings_of(&mut a).await, before);
     }
 
