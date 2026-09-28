@@ -82,5 +82,5 @@
       ]
     }
   ],
-  "rotation": ["upper", "lower", "upper", "lower", "lower"]
+  "rotation": ["upper", "lower"]
 }
