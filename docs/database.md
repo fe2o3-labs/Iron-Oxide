@@ -208,6 +208,11 @@ types mirror them field for field, and switch to them once they are merged.
 Rules that span rows and are checked by the domain (`SessionLog`, #54) before a write, not by the
 database: a set completed before its session started or after it ended.
 
+The history reads for #18 are `sessions::list_in_program` (the rotation and progression input:
+every session of a program, oldest first), `sets::completed_in_program` (the sets of its completed
+sessions) and `sets::completed_for_exercises_before` (the personal-record history, any program,
+strictly before a session).
+
 ## Built-in programs
 
 `programs::BUILTIN_PROGRAMS` is the list seeded at every startup (`AppState::init`), after the

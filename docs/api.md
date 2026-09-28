@@ -128,6 +128,70 @@ Timestamps that are part of what is saved (`started_at`, `completed_at`, `finish
 the client, in the request. If the server stamped `now()`, a retry would carry a different time
 and look like a conflict. The retry queue (#30) re-sends exactly the same body.
 
+## Endpoints
+
+### Sessions and sets (#18, `src/api/sessions.rs`)
+
+| Function | Route | What it does |
+|---|---|---|
+| `start_session(session_id, started_at)` | `/api/sessions/start` | Starts a session of the active program's latest version, on the next day of its rotation. Returns a `SessionView`. |
+| `get_session(session_id)` | `/api/sessions/get` | One session (`SessionView`) |
+| `get_in_progress_session()` | `/api/sessions/in-progress` | The most recently started session in progress, with its sets in the order they were completed, or `null` |
+| `get_session_plan(session_id)` | `/api/sessions/plan` | The session's day (name, exercises in program order). For each exercise: its definition in the session's version, and the progression engine's `NextTargets`, computed from the history before the session. |
+| `save_set(session_id, set)` | `/api/sessions/save-set` | Logs a `LoggedSet<Timestamp>` |
+| `finish_session(session_id, outcome, finished_at)` | `/api/sessions/finish` | Ends the session (`completed`, `skipped` or `abandoned`) and returns a `SessionSummary` |
+
+Rules:
+
+- **Starting.** The day is `next_day(rotation, history)`, where the history is every session of
+  the active program, across all its versions.
+  - A retry (same id, same `started_at`) returns the session it created, even after it ended. The
+    day is never recomputed.
+  - The same id with another `started_at` is `409`.
+  - `409` when another session is in progress: the user must finish or abandon it first. Two
+    devices starting at the same instant can both get through. The user then ends one of the two
+    sessions.
+  - `409` with no active program.
+  - `409` for a rotation that repeats a day. Programs allow it, but `next_day` does not support it
+    yet.
+- **Sets.** The domain's `SessionLog::add_set` decides first; then the repository's upsert settles
+  races.
+  - The same set again is `200`, even after the session ended.
+  - The same id with other values is `409`, also when that id was logged in another session.
+  - A new set in an ended session is `409`.
+  - A set completed before the session started is `422`.
+  - Values the database refuses (a weight above the limit) are `422`.
+  - `set_index` numbers the sets of one exercise and kind (warm-up or working) from 0. The
+    prescribed working sets are `0..n`. Extras (a top single, back-off sets) are `n` and up. A
+    skipped working set leaves a gap.
+  - The exercise does not have to be on the session's day, so an added exercise is fine. Only the
+    day's exercises get targets and progression.
+- **Finishing.** The domain's `SessionLog::end` checks the time: not before the start or before a
+  logged set (`422`). A retry with the same outcome and time returns the same summary. Another
+  outcome or time is `409`. The summary is computed from stored data up to and including the
+  session, so a retry made later gets the same one. It contains:
+  - `volume`: the working sets, weighted and not timed, through `From<&LoggedSet> for
+    Option<PerformedSet>`.
+  - `prs`: completed sessions only. They are compared with every earlier completed session of
+    **any** program.
+  - `changes`: completed sessions only. The `ProgressionChange` for each exercise of the day that
+    the session has working sets of.
+  - `needs_training_max`: the day's exercises loaded as a percentage of a training max the user
+    has not entered.
+- **History given to the progression engine**, as agreed on #12 and #18:
+  - completed sessions of the session's program, all versions, that started before the planned
+    session (by start, then id);
+  - each session judged against its own prescription, meaning the exercise on its day in the
+    version it was run from;
+  - for a training-max exercise, only the sets completed after the training max's `set_at`;
+  - the training max the engine returns is only displayed. It is never stored.
+
+  A stored version that no longer parses leaves its sessions unjudged (`Prescription` `None`).
+  Stored sets that fall outside their session's time span, because of client clocks or a set saved
+  while its session was finishing, have their time clamped into the span for the domain. The time
+  plays no part in the rules applied to stored data, and refusing them would block the session for
+  good.
+
 ## Tests
 
 Server functions are tested through the real router, as signed-in users, with

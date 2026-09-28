@@ -206,12 +206,7 @@ async fn summary(
         .iter()
         .map(domain_set)
         .collect::<Result<Vec<_>, _>>()?;
-    let performed = |exercise: Option<&ExerciseId>| {
-        sets.iter()
-            .filter(move |set| exercise.is_none_or(|id| &set.exercise == id))
-            .filter_map(Option::<PerformedSet>::from)
-    };
-    let volume = session_volume(performed(None));
+    let volume = session_volume(sets.iter().filter_map(performed));
     let mut summary = SessionSummary {
         volume,
         prs: Vec::new(),
@@ -240,11 +235,13 @@ async fn summary(
         let history = earlier
             .iter()
             .filter(|set| &set.exercise == exercise)
-            .filter_map(Option::<PerformedSet>::from);
+            .filter_map(performed);
         summary.prs.extend(detect_prs(
             exercise,
             history,
-            performed(Some(exercise)),
+            sets.iter()
+                .filter(|set| &set.exercise == exercise)
+                .filter_map(performed),
             E1rmFormula::default(),
         ));
     }
@@ -375,8 +372,9 @@ impl Context {
         let training_max = self
             .training_maxes
             .iter()
-            .find(|max| max.exercise_id == exercise.id.as_str());
-        let since = match (exercise.load, training_max) {
+            .find(|max| max.exercise_id == exercise.id.as_str())
+            .cloned();
+        let since = match (exercise.load, &training_max) {
             (Some(Load::PercentOfTrainingMax(_)), Some(max)) => Some(max.set_at),
             _ => None,
         };
@@ -425,6 +423,11 @@ impl Context {
             &history,
         ))
     }
+}
+
+/// The set for the statistics (`None` for body-weight and timed sets).
+fn performed(set: &LoggedSet<Timestamp>) -> Option<PerformedSet> {
+    set.into()
 }
 
 /// `time` as a timestamp, or the earliest one when it does not fit (only a corrupt value would).
@@ -572,6 +575,9 @@ mod tests {
         db::{testing as db_testing, training_maxes},
     };
 
+    /// Builds a request body around an id.
+    type BodyOf = Box<dyn Fn(Uuid) -> Value>;
+
     const START: &str = "/api/sessions/start";
     const GET: &str = "/api/sessions/get";
     const IN_PROGRESS: &str = "/api/sessions/in-progress";
@@ -672,11 +678,19 @@ mod tests {
         user.call(path, body).await
     }
 
-    async fn start(user: &mut TestUser, id: SessionId, at: Timestamp) -> Result<SessionView, CallError> {
+    async fn start(
+        user: &mut TestUser,
+        id: SessionId,
+        at: Timestamp,
+    ) -> Result<SessionView, CallError> {
         call(user, START, json!({ "session_id": id, "started_at": at })).await
     }
 
-    async fn save(user: &mut TestUser, session: SessionId, set: &LoggedSet<Timestamp>) -> Result<(), CallError> {
+    async fn save(
+        user: &mut TestUser,
+        session: SessionId,
+        set: &LoggedSet<Timestamp>,
+    ) -> Result<(), CallError> {
         call(user, SAVE_SET, json!({ "session_id": session, "set": set })).await
     }
 
@@ -699,7 +713,13 @@ mod tests {
     }
 
     /// A working set of `exercise`: `reps` at `weight` kg, set number `index`, at `at`.
-    fn set(exercise: ExerciseId, index: u16, reps: u16, weight: f64, at: Timestamp) -> LoggedSet<Timestamp> {
+    fn set(
+        exercise: ExerciseId,
+        index: u16,
+        reps: u16,
+        weight: f64,
+        at: Timestamp,
+    ) -> LoggedSet<Timestamp> {
         LoggedSet {
             id: SetId::new_v7(),
             exercise,
@@ -724,19 +744,28 @@ mod tests {
         let view = start(user, id, t(minute)).await.unwrap();
         for index in 0..3 {
             let at = t(minute + 1 + i64::from(index));
-            save(user, id, &set(squat(), index, reps, weight, at)).await.unwrap();
+            save(user, id, &set(squat(), index, reps, weight, at))
+                .await
+                .unwrap();
         }
         let summary = finish(user, id, outcome, t(minute + 10)).await.unwrap();
         (view, summary)
     }
 
-    async fn stored_sets(api: &TestApi, user: &TestUser, session: SessionId) -> Vec<db::sets::LoggedSet> {
+    async fn stored_sets(
+        api: &TestApi,
+        user: &TestUser,
+        session: SessionId,
+    ) -> Vec<db::sets::LoggedSet> {
         db::sets::list_for_session(&api.db, user.id, session.into())
             .await
             .unwrap()
     }
 
-    fn assert_status<T: std::fmt::Debug>(result: Result<T, CallError>, status: StatusCode) -> String {
+    fn assert_status<T: std::fmt::Debug>(
+        result: Result<T, CallError>,
+        status: StatusCode,
+    ) -> String {
         match result {
             Err(error) if error.status == status => error.message,
             other => panic!("expected {status}, got {other:?}"),
@@ -768,14 +797,27 @@ mod tests {
     #[test]
     fn view_converts_every_status() {
         for (stored_status, expected) in [
-            (db::sessions::SessionStatus::InProgress, SessionStatus::InProgress),
-            (db::sessions::SessionStatus::Completed, SessionStatus::Completed),
+            (
+                db::sessions::SessionStatus::InProgress,
+                SessionStatus::InProgress,
+            ),
+            (
+                db::sessions::SessionStatus::Completed,
+                SessionStatus::Completed,
+            ),
             (db::sessions::SessionStatus::Skipped, SessionStatus::Skipped),
-            (db::sessions::SessionStatus::Abandoned, SessionStatus::Abandoned),
+            (
+                db::sessions::SessionStatus::Abandoned,
+                SessionStatus::Abandoned,
+            ),
         ] {
             assert_eq!(view(stored("a", stored_status)).unwrap().status, expected);
         }
-        for outcome in [SessionOutcome::Completed, SessionOutcome::Skipped, SessionOutcome::Abandoned] {
+        for outcome in [
+            SessionOutcome::Completed,
+            SessionOutcome::Skipped,
+            SessionOutcome::Abandoned,
+        ] {
             assert_eq!(
                 status(db::sessions::SessionStatus::from(repo_outcome(outcome))),
                 SessionStatus::from(outcome)
@@ -787,13 +829,15 @@ mod tests {
     fn a_stored_day_that_is_not_a_slug_is_an_internal_error() {
         let error = view(stored("Day A", db::sessions::SessionStatus::InProgress)).unwrap_err();
         assert_eq!(error.public().0, 500);
-        let error = domain_session(&stored("Day A", db::sessions::SessionStatus::InProgress)).unwrap_err();
+        let error =
+            domain_session(&stored("Day A", db::sessions::SessionStatus::InProgress)).unwrap_err();
         assert_eq!(error.public().0, 500);
     }
 
     #[test]
     fn a_stored_ended_session_without_an_end_is_an_internal_error() {
-        let error = domain_session(&stored("a", db::sessions::SessionStatus::Completed)).unwrap_err();
+        let error =
+            domain_session(&stored("a", db::sessions::SessionStatus::Completed)).unwrap_err();
         assert_eq!(error.public().0, 500);
     }
 
@@ -859,9 +903,15 @@ mod tests {
         let api = TestApi::new(db).await;
         let mut a = api.user("A").await;
         let session = db_testing::session(&api.db, a.id).await;
-        db::sessions::finish(&api.db, a.id, session, db::sessions::SessionOutcome::Completed, db_testing::at(90))
-            .await
-            .unwrap();
+        db::sessions::finish(
+            &api.db,
+            a.id,
+            session,
+            db::sessions::SessionOutcome::Completed,
+            db_testing::at(90),
+        )
+        .await
+        .unwrap();
         let view: SessionView = call(&mut a, GET, json!({ "session_id": session.as_uuid() }))
             .await
             .unwrap();
@@ -869,7 +919,10 @@ mod tests {
         assert_eq!(view.day.as_str(), "a");
         assert_eq!(view.status, SessionStatus::Completed);
         assert_eq!(view.started_at.epoch_millis(), 1_790_000_000_000);
-        assert_eq!(view.finished_at.map(Timestamp::epoch_millis), Some(1_790_000_090_000));
+        assert_eq!(
+            view.finished_at.map(Timestamp::epoch_millis),
+            Some(1_790_000_090_000)
+        );
     }
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
@@ -881,9 +934,18 @@ mod tests {
             (GET, json!({ "session_id": "not-a-uuid" })),
             (GET, json!({ "session_id": 5 })),
             (GET, json!({})),
-            (START, json!({ "session_id": SessionId::new_v7(), "started_at": "noon" })),
-            (FINISH, json!({ "session_id": SessionId::new_v7(), "outcome": "won", "finished_at": 1 })),
-            (SAVE_SET, json!({ "session_id": SessionId::new_v7(), "set": { "id": "x" } })),
+            (
+                START,
+                json!({ "session_id": SessionId::new_v7(), "started_at": "noon" }),
+            ),
+            (
+                FINISH,
+                json!({ "session_id": SessionId::new_v7(), "outcome": "won", "finished_at": 1 }),
+            ),
+            (
+                SAVE_SET,
+                json!({ "session_id": SessionId::new_v7(), "set": { "id": "x" } }),
+            ),
         ] {
             let error = a.call_err(path, body).await;
             assert_eq!(
@@ -910,11 +972,18 @@ mod tests {
             (IN_PROGRESS, json!({})),
             (PLAN, json!({ "session_id": session })),
             (SAVE_SET, json!({ "session_id": session, "set": set })),
-            (FINISH, json!({ "session_id": session, "outcome": "completed", "finished_at": t(9) })),
+            (
+                FINISH,
+                json!({ "session_id": session, "outcome": "completed", "finished_at": t(9) }),
+            ),
         ] {
             testing::assert_unauthorized_when_signed_out(&api, path, body).await;
         }
-        assert!(stored_sets(&api, &a, SessionId::from_uuid(session)).await.is_empty());
+        assert!(
+            stored_sets(&api, &a, SessionId::from_uuid(session))
+                .await
+                .is_empty()
+        );
     }
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
@@ -935,22 +1004,23 @@ mod tests {
         assert_eq!(second.day.as_str(), "b");
         let third = start(&mut a, SessionId::new_v7(), t(120)).await.unwrap();
         assert_eq!(third.day.as_str(), "b");
-        finish(&mut a, third.id, SessionOutcome::Skipped, t(121)).await.unwrap();
+        finish(&mut a, third.id, SessionOutcome::Skipped, t(121))
+            .await
+            .unwrap();
         let fourth = start(&mut a, SessionId::new_v7(), t(180)).await.unwrap();
         assert_eq!(fourth.day.as_str(), "a");
-        finish(&mut a, fourth.id, SessionOutcome::Abandoned, t(181)).await.unwrap();
+        finish(&mut a, fourth.id, SessionOutcome::Abandoned, t(181))
+            .await
+            .unwrap();
 
         // Another program starts at its first day: the history is filtered to the active program.
-        let (_, other, _) = db::programs::create(
-            &api.db,
-            a.id,
-            db_testing::creation(),
-            "Other",
-            &document(5),
-        )
-        .await
-        .unwrap();
-        db::active_program::set(&api.db, a.id, other.id).await.unwrap();
+        let (_, other, _) =
+            db::programs::create(&api.db, a.id, db_testing::creation(), "Other", &document(5))
+                .await
+                .unwrap();
+        db::active_program::set(&api.db, a.id, other.id)
+            .await
+            .unwrap();
         let fifth = start(&mut a, SessionId::new_v7(), t(240)).await.unwrap();
         assert_eq!(fifth.day.as_str(), "a");
         assert_eq!(fifth.program_id, other.id.into());
@@ -974,14 +1044,25 @@ mod tests {
     async fn start_session_needs_an_active_program_and_no_other_session_in_progress(db: PgPool) {
         let api = TestApi::new(db).await;
         let mut a = api.user("A").await;
-        let message = assert_status(start(&mut a, SessionId::new_v7(), t(0)).await, StatusCode::CONFLICT);
+        let message = assert_status(
+            start(&mut a, SessionId::new_v7(), t(0)).await,
+            StatusCode::CONFLICT,
+        );
         assert_eq!(message, "Choose a program first.");
 
         active_program(&api, &a).await;
         let current = start(&mut a, SessionId::new_v7(), t(0)).await.unwrap();
-        let message = assert_status(start(&mut a, SessionId::new_v7(), t(1)).await, StatusCode::CONFLICT);
-        assert_eq!(message, "Another session is in progress. Finish or abandon it first.");
-        finish(&mut a, current.id, SessionOutcome::Abandoned, t(2)).await.unwrap();
+        let message = assert_status(
+            start(&mut a, SessionId::new_v7(), t(1)).await,
+            StatusCode::CONFLICT,
+        );
+        assert_eq!(
+            message,
+            "Another session is in progress. Finish or abandon it first."
+        );
+        finish(&mut a, current.id, SessionOutcome::Abandoned, t(2))
+            .await
+            .unwrap();
         start(&mut a, SessionId::new_v7(), t(3)).await.unwrap();
     }
 
@@ -992,11 +1073,17 @@ mod tests {
         let mut a = api.user("A").await;
         let mut doc = document(5);
         doc["rotation"] = json!(["a", "b", "a"]);
-        let (_, program, _) = db::programs::create(&api.db, a.id, db_testing::creation(), "R", &doc)
+        let (_, program, _) =
+            db::programs::create(&api.db, a.id, db_testing::creation(), "R", &doc)
+                .await
+                .unwrap();
+        db::active_program::set(&api.db, a.id, program.id)
             .await
             .unwrap();
-        db::active_program::set(&api.db, a.id, program.id).await.unwrap();
-        assert_status(start(&mut a, SessionId::new_v7(), t(0)).await, StatusCode::CONFLICT);
+        assert_status(
+            start(&mut a, SessionId::new_v7(), t(0)).await,
+            StatusCode::CONFLICT,
+        );
     }
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
@@ -1010,7 +1097,10 @@ mod tests {
 
         let id = SessionId::new_v7();
         let view = start(&mut a, id, t(0)).await.unwrap();
-        let sets = [set(squat(), 0, 5, 100.0, t(2)), set(squat(), 1, 5, 100.0, t(1))];
+        let sets = [
+            set(squat(), 0, 5, 100.0, t(2)),
+            set(squat(), 1, 5, 100.0, t(1)),
+        ];
         for set in &sets {
             save(&mut a, id, set).await.unwrap();
         }
@@ -1024,7 +1114,9 @@ mod tests {
             })
         );
 
-        finish(&mut a, id, SessionOutcome::Completed, t(3)).await.unwrap();
+        finish(&mut a, id, SessionOutcome::Completed, t(3))
+            .await
+            .unwrap();
         let none: Option<SessionWithSets> = call(&mut a, IN_PROGRESS, json!({})).await.unwrap();
         assert_eq!(none, None);
     }
@@ -1039,8 +1131,14 @@ mod tests {
         start(&mut a, id, t(10)).await.unwrap();
 
         let early = set(squat(), 0, 5, 100.0, t(9));
-        let message = assert_status(save(&mut a, id, &early).await, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(message, "A set cannot be completed before its session started.");
+        let message = assert_status(
+            save(&mut a, id, &early).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+        assert_eq!(
+            message,
+            "A set cannot be completed before its session started."
+        );
         // A value the database refuses: a slug is fine, a weight above the maximum is not.
         let heavy = json!({
             "session_id": id,
@@ -1049,7 +1147,9 @@ mod tests {
         });
         assert!(a.call_err(SAVE_SET, heavy).await.status.is_client_error());
 
-        finish(&mut a, id, SessionOutcome::Completed, t(20)).await.unwrap();
+        finish(&mut a, id, SessionOutcome::Completed, t(20))
+            .await
+            .unwrap();
         let after = set(squat(), 0, 5, 100.0, t(15));
         let message = assert_status(save(&mut a, id, &after).await, StatusCode::CONFLICT);
         assert_eq!(message, "This session has already ended.");
@@ -1064,21 +1164,43 @@ mod tests {
         active_program(&api, &a).await;
         let id = SessionId::new_v7();
         start(&mut a, id, t(10)).await.unwrap();
-        save(&mut a, id, &set(squat(), 0, 5, 100.0, t(15))).await.unwrap();
+        save(&mut a, id, &set(squat(), 0, 5, 100.0, t(15)))
+            .await
+            .unwrap();
 
-        let message = assert_status(finish(&mut a, id, SessionOutcome::Completed, t(9)).await, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(message, "A session cannot end before its sets were completed.");
-        assert_status(finish(&mut a, id, SessionOutcome::Completed, t(14)).await, StatusCode::UNPROCESSABLE_ENTITY);
+        let message = assert_status(
+            finish(&mut a, id, SessionOutcome::Completed, t(9)).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+        assert_eq!(
+            message,
+            "A session cannot end before its sets were completed."
+        );
+        assert_status(
+            finish(&mut a, id, SessionOutcome::Completed, t(14)).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
 
-        let summary = finish(&mut a, id, SessionOutcome::Completed, t(20)).await.unwrap();
+        let summary = finish(&mut a, id, SessionOutcome::Completed, t(20))
+            .await
+            .unwrap();
         assert_eq!(summary.session.status, SessionStatus::Completed);
         assert_eq!(summary.session.finished_at, Some(t(20)));
         // A retry, even much later, gets the same summary.
         squat_session(&mut a, 60, 5, 150.0, SessionOutcome::Completed).await;
-        assert_eq!(finish(&mut a, id, SessionOutcome::Completed, t(20)).await.unwrap(), summary);
+        assert_eq!(
+            finish(&mut a, id, SessionOutcome::Completed, t(20))
+                .await
+                .unwrap(),
+            summary
+        );
         // Another outcome or time is a conflict.
-        for (outcome, at) in [(SessionOutcome::Abandoned, t(20)), (SessionOutcome::Completed, t(21))] {
-            let message = assert_status(finish(&mut a, id, outcome, at).await, StatusCode::CONFLICT);
+        for (outcome, at) in [
+            (SessionOutcome::Abandoned, t(20)),
+            (SessionOutcome::Completed, t(21)),
+        ] {
+            let message =
+                assert_status(finish(&mut a, id, outcome, at).await, StatusCode::CONFLICT);
             assert_eq!(message, "This session has already ended.");
         }
         let stored = db::sessions::get(&api.db, a.id, id.into()).await.unwrap();
@@ -1096,47 +1218,100 @@ mod tests {
         // index 3 (an extra: it changes neither the verdict nor the base).
         let id = SessionId::new_v7();
         start(&mut a, id, t(0)).await.unwrap();
-        let warm = LoggedSet { warm_up: true, ..set(squat(), 0, 5, 60.0, t(1)) };
+        let warm = LoggedSet {
+            warm_up: true,
+            ..set(squat(), 0, 5, 60.0, t(1))
+        };
         save(&mut a, id, &warm).await.unwrap();
         for index in 0..3 {
-            save(&mut a, id, &set(squat(), index, 5, 100.0, t(2 + i64::from(index)))).await.unwrap();
+            save(
+                &mut a,
+                id,
+                &set(squat(), index, 5, 100.0, t(2 + i64::from(index))),
+            )
+            .await
+            .unwrap();
         }
-        save(&mut a, id, &set(squat(), 3, 0, 120.0, t(6))).await.unwrap();
+        save(&mut a, id, &set(squat(), 3, 0, 120.0, t(6)))
+            .await
+            .unwrap();
         let plank = LoggedSet {
             weight: None,
             duration: Some(Seconds::new(30)),
             ..set(ExerciseId::new("plank").unwrap(), 0, 1, 0.0, t(7))
         };
         save(&mut a, id, &plank).await.unwrap();
-        let summary = finish(&mut a, id, SessionOutcome::Completed, t(10)).await.unwrap();
+        let summary = finish(&mut a, id, SessionOutcome::Completed, t(10))
+            .await
+            .unwrap();
         // 3 × 5 × 100 kg; the warm-up, the failed single and the plank add nothing.
-        assert_eq!(summary.volume, iron_oxide_domain::Volume::of(kg(1_500.0), Reps::new(1)));
-        assert!(summary.prs.is_empty(), "nothing to beat yet: {:?}", summary.prs);
+        assert_eq!(
+            summary.volume,
+            iron_oxide_domain::Volume::of(kg(100.0), Reps::new(15))
+        );
+        assert!(
+            summary.prs.is_empty(),
+            "nothing to beat yet: {:?}",
+            summary.prs
+        );
         assert_eq!(summary.changes.len(), 1);
         assert_eq!(summary.changes[0].exercise, squat());
-        assert_eq!(summary.changes[0].kind, ChangeKind::WeightIncrease { from: kg(100.0), to: kg(102.5) });
+        assert_eq!(
+            summary.changes[0].kind,
+            ChangeKind::WeightIncrease {
+                from: kg(100.0),
+                to: kg(102.5)
+            }
+        );
         assert!(summary.needs_training_max.is_empty());
 
         // Second session (day b): heavier squats set records; the bench needs a training max.
         let id = SessionId::new_v7();
         start(&mut a, id, t(60)).await.unwrap();
         for index in 0..3 {
-            save(&mut a, id, &set(squat(), index, 5, 102.5, t(61 + i64::from(index)))).await.unwrap();
+            save(
+                &mut a,
+                id,
+                &set(squat(), index, 5, 102.5, t(61 + i64::from(index))),
+            )
+            .await
+            .unwrap();
         }
-        save(&mut a, id, &set(bench(), 0, 5, 60.0, t(65))).await.unwrap();
-        let summary = finish(&mut a, id, SessionOutcome::Completed, t(70)).await.unwrap();
-        let squat_prs: Vec<&PrKind> = summary.prs.iter().filter(|pr| pr.exercise == squat()).map(|pr| &pr.kind).collect();
+        save(&mut a, id, &set(bench(), 0, 5, 60.0, t(65)))
+            .await
+            .unwrap();
+        let summary = finish(&mut a, id, SessionOutcome::Completed, t(70))
+            .await
+            .unwrap();
+        let squat_prs: Vec<&PrKind> = summary
+            .prs
+            .iter()
+            .filter(|pr| pr.exercise == squat())
+            .map(|pr| &pr.kind)
+            .collect();
         assert!(
             squat_prs.iter().any(|kind| matches!(kind, PrKind::HeaviestWeight { previous, .. } if *previous == kg(100.0))),
             "{squat_prs:?}"
         );
-        assert!(summary.prs.iter().all(|pr| pr.exercise == squat()), "no bench history, no bench PR");
+        assert!(
+            summary.prs.iter().all(|pr| pr.exercise == squat()),
+            "no bench history, no bench PR"
+        );
         assert_eq!(summary.needs_training_max, vec![bench()]);
-        assert_eq!(summary.changes[0].kind, ChangeKind::WeightIncrease { from: kg(102.5), to: kg(105.0) });
+        assert_eq!(
+            summary.changes[0].kind,
+            ChangeKind::WeightIncrease {
+                from: kg(102.5),
+                to: kg(105.0)
+            }
+        );
 
         // An abandoned session has a volume but no records or changes.
         let (_, abandoned) = squat_session(&mut a, 120, 5, 200.0, SessionOutcome::Abandoned).await;
-        assert_eq!(abandoned.volume, iron_oxide_domain::Volume::of(kg(3_000.0), Reps::new(1)));
+        assert_eq!(
+            abandoned.volume,
+            iron_oxide_domain::Volume::of(kg(200.0), Reps::new(15))
+        );
         assert!(abandoned.prs.is_empty() && abandoned.changes.is_empty());
     }
 
@@ -1152,19 +1327,38 @@ mod tests {
         let first = plan(&mut a, id).await.unwrap();
         assert_eq!(first.day_name, "Day A");
         assert_eq!(
-            first.exercises.iter().map(|planned| planned.exercise.id.as_str()).collect::<Vec<_>>(),
+            first
+                .exercises
+                .iter()
+                .map(|planned| planned.exercise.id.as_str())
+                .collect::<Vec<_>>(),
             ["back-squat", "plank"]
         );
         let targets = squat_targets(&first);
         assert_eq!(targets.source, TargetSource::ProgramDefault);
         assert_eq!(targets.working.len(), 3);
-        assert!(targets.working.iter().all(|target| target.weight == Some(kg(100.0))));
+        assert!(
+            targets
+                .working
+                .iter()
+                .all(|target| target.weight == Some(kg(100.0)))
+        );
         for index in 0..3 {
-            save(&mut a, id, &set(squat(), index, 5, 100.0, t(1 + i64::from(index)))).await.unwrap();
+            save(
+                &mut a,
+                id,
+                &set(squat(), index, 5, 100.0, t(1 + i64::from(index))),
+            )
+            .await
+            .unwrap();
         }
-        finish(&mut a, id, SessionOutcome::Completed, t(10)).await.unwrap();
+        finish(&mut a, id, SessionOutcome::Completed, t(10))
+            .await
+            .unwrap();
         // The plan of a session never changes: it only looks at what came before it.
-        assert_eq!(plan(&mut a, id).await.unwrap(), first);
+        let again = plan(&mut a, id).await.unwrap();
+        assert_eq!(again.exercises, first.exercises);
+        assert_eq!(again.session.status, SessionStatus::Completed);
 
         let id = SessionId::new_v7();
         start(&mut a, id, t(60)).await.unwrap();
@@ -1172,9 +1366,17 @@ mod tests {
         assert_eq!(second.day_name, "Day B");
         let targets = squat_targets(&second);
         assert_eq!(targets.source, TargetSource::Progression);
-        assert!(targets.working.iter().all(|target| target.weight == Some(kg(102.5))));
+        assert!(
+            targets
+                .working
+                .iter()
+                .all(|target| target.weight == Some(kg(102.5)))
+        );
         let bench_targets = &second.exercises[1].targets;
-        assert_eq!(bench_targets, &NextTargets::NeedsTrainingMax { exercise: bench() });
+        assert_eq!(
+            bench_targets,
+            &NextTargets::NeedsTrainingMax { exercise: bench() }
+        );
     }
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
@@ -1186,12 +1388,20 @@ mod tests {
         // Done as prescribed by version 1 (3 × 5): a success.
         squat_session(&mut a, 0, 5, 100.0, SessionOutcome::Completed).await;
         // Version 2 asks for 3 × 8 on day a. Judged against it, 3 × 5 would be a failure.
-        db::programs::add_version(&api.db, a.id, program.into(), &document(8)).await.unwrap();
+        db::programs::add_version(&api.db, a.id, program.into(), &document(8))
+            .await
+            .unwrap();
         let id = SessionId::new_v7();
         let view = start(&mut a, id, t(60)).await.unwrap();
         assert_eq!(view.day.as_str(), "b");
         let targets = squat_targets(&plan(&mut a, id).await.unwrap()).clone();
-        assert!(targets.working.iter().all(|target| target.weight == Some(kg(102.5))), "{targets:?}");
+        assert!(
+            targets
+                .working
+                .iter()
+                .all(|target| target.weight == Some(kg(102.5))),
+            "{targets:?}"
+        );
     }
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
@@ -1205,9 +1415,17 @@ mod tests {
         let early = SessionId::new_v7();
         start(&mut a, early, t(60)).await.unwrap();
         for index in 0..3 {
-            save(&mut a, early, &set(bench(), index, 5, 70.0, t(61 + i64::from(index)))).await.unwrap();
+            save(
+                &mut a,
+                early,
+                &set(bench(), index, 5, 70.0, t(61 + i64::from(index))),
+            )
+            .await
+            .unwrap();
         }
-        finish(&mut a, early, SessionOutcome::Completed, t(70)).await.unwrap();
+        finish(&mut a, early, SessionOutcome::Completed, t(70))
+            .await
+            .unwrap();
 
         training_maxes::set(
             &api.db,
@@ -1228,18 +1446,45 @@ mod tests {
         let plan = plan(&mut a, id).await.unwrap();
         let bench_targets = plan.exercises[1].targets.ready().unwrap();
         assert_eq!(bench_targets.source, TargetSource::ProgramDefault);
-        assert!(bench_targets.working.iter().all(|target| target.weight == Some(kg(80.0))));
+        assert!(
+            bench_targets
+                .working
+                .iter()
+                .all(|target| target.weight == Some(kg(80.0)))
+        );
         assert_eq!(bench_targets.training_max, Some(kg(100.0)));
 
         // After a successful session, the effective training max goes up (display only).
         for index in 0..3 {
-            save(&mut a, id, &set(bench(), index, 5, 80.0, t(181 + i64::from(index)))).await.unwrap();
+            save(
+                &mut a,
+                id,
+                &set(bench(), index, 5, 80.0, t(181 + i64::from(index))),
+            )
+            .await
+            .unwrap();
         }
-        let summary = finish(&mut a, id, SessionOutcome::Completed, t(190)).await.unwrap();
-        let change = summary.changes.iter().find(|change| change.exercise == bench()).unwrap();
-        assert_eq!(change.kind, ChangeKind::TrainingMaxIncrease { from: kg(100.0), to: kg(102.5) });
+        let summary = finish(&mut a, id, SessionOutcome::Completed, t(190))
+            .await
+            .unwrap();
+        let change = summary
+            .changes
+            .iter()
+            .find(|change| change.exercise == bench())
+            .unwrap();
+        assert_eq!(
+            change.kind,
+            ChangeKind::TrainingMaxIncrease {
+                from: kg(100.0),
+                to: kg(102.5)
+            }
+        );
         let stored = training_maxes::list(&api.db, a.id).await.unwrap();
-        assert_eq!(stored[0].weight_ng, kg(100.0).as_nanograms(), "never stored back");
+        assert_eq!(
+            stored[0].weight_ng,
+            kg(100.0).as_nanograms(),
+            "never stored back"
+        );
     }
 
     // --- Idempotency (#25) ----------------------------------------------------------------------
@@ -1257,13 +1502,19 @@ mod tests {
         assert_eq!(message, ID_REUSED);
 
         // After the session ended (and the rotation moved on), a retry still returns it.
-        save(&mut a, id, &set(squat(), 0, 5, 100.0, t(1))).await.unwrap();
-        finish(&mut a, id, SessionOutcome::Completed, t(5)).await.unwrap();
+        save(&mut a, id, &set(squat(), 0, 5, 100.0, t(1)))
+            .await
+            .unwrap();
+        finish(&mut a, id, SessionOutcome::Completed, t(5))
+            .await
+            .unwrap();
         let retried = start(&mut a, id, t(0)).await.unwrap();
         assert_eq!(retried.id, id);
         assert_eq!(retried.day.as_str(), "a");
         assert_eq!(retried.status, SessionStatus::Completed);
-        let all = db::sessions::list(&api.db, a.id, None, None, 100).await.unwrap();
+        let all = db::sessions::list(&api.db, a.id, None, None, 100)
+            .await
+            .unwrap();
         assert_eq!(all.len(), 1);
     }
 
@@ -1285,12 +1536,16 @@ mod tests {
             match task.await.unwrap() {
                 Ok(view) => views.push(view),
                 // A lost race is a retryable 503, never a duplicate or a conflict.
-                Err(error) => assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE, "{error:?}"),
+                Err(error) => {
+                    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE, "{error:?}")
+                }
             }
         }
         assert!(!views.is_empty());
         assert!(views.iter().all(|view| view == &views[0]));
-        let all = db::sessions::list(&api.db, a.id, None, None, 100).await.unwrap();
+        let all = db::sessions::list(&api.db, a.id, None, None, 100)
+            .await
+            .unwrap();
         assert_eq!(all.len(), 1);
     }
 
@@ -1306,21 +1561,35 @@ mod tests {
         for _ in 0..5 {
             save(&mut a, id, &logged).await.unwrap();
         }
-        assert_eq!(stored_sets(&api, &a, id).await, vec![repo_set(id, &logged).unwrap()]);
+        assert_eq!(
+            stored_sets(&api, &a, id).await,
+            vec![repo_set(id, &logged).unwrap()]
+        );
 
-        let changed = LoggedSet { reps: Reps::new(4), ..logged.clone() };
+        let changed = LoggedSet {
+            reps: Reps::new(4),
+            ..logged.clone()
+        };
         let message = assert_status(save(&mut a, id, &changed).await, StatusCode::CONFLICT);
         assert_eq!(message, "This set was already saved with different values.");
         // The same set id in another session of the user is a conflict too.
-        finish(&mut a, id, SessionOutcome::Completed, t(5)).await.unwrap();
+        finish(&mut a, id, SessionOutcome::Completed, t(5))
+            .await
+            .unwrap();
         let other = SessionId::new_v7();
         start(&mut a, other, t(10)).await.unwrap();
-        let moved = LoggedSet { completed_at: t(11), ..logged.clone() };
+        let moved = LoggedSet {
+            completed_at: t(11),
+            ..logged.clone()
+        };
         assert_status(save(&mut a, other, &moved).await, StatusCode::CONFLICT);
 
         // A retry after the session ended still succeeds, and changes nothing.
         save(&mut a, id, &logged).await.unwrap();
-        assert_eq!(stored_sets(&api, &a, id).await, vec![repo_set(id, &logged).unwrap()]);
+        assert_eq!(
+            stored_sets(&api, &a, id).await,
+            vec![repo_set(id, &logged).unwrap()]
+        );
         assert!(stored_sets(&api, &a, other).await.is_empty());
     }
 
@@ -1344,7 +1613,10 @@ mod tests {
                 assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE, "{error:?}");
             }
         }
-        assert_eq!(stored_sets(&api, &a, id).await, vec![repo_set(id, &logged).unwrap()]);
+        assert_eq!(
+            stored_sets(&api, &a, id).await,
+            vec![repo_set(id, &logged).unwrap()]
+        );
     }
 
     // --- Isolation ------------------------------------------------------------------------------
@@ -1366,22 +1638,30 @@ mod tests {
         );
 
         let new_set = set(squat(), 1, 5, 100.0, t(2));
-        let bodies: [(&str, Box<dyn Fn(Uuid) -> Value>); 4] = [
+        let bodies: [(&str, BodyOf); 4] = [
             (GET, Box::new(|id| json!({ "session_id": id }))),
             (PLAN, Box::new(|id| json!({ "session_id": id }))),
-            (SAVE_SET, Box::new(move |id| json!({ "session_id": id, "set": new_set }))),
+            (
+                SAVE_SET,
+                Box::new(move |id| json!({ "session_id": id, "set": new_set })),
+            ),
             (
                 FINISH,
-                Box::new(|id| json!({ "session_id": id, "outcome": "abandoned", "finished_at": t(3) })),
+                Box::new(
+                    |id| json!({ "session_id": id, "outcome": "abandoned", "finished_at": t(3) }),
+                ),
             ),
         ];
         for (path, body) in &bodies {
             testing::assert_not_found_for_other_user(&mut b, path, id.as_uuid(), body).await;
         }
         // Even A's own set, resent by B into A's session.
-        testing::assert_not_found_for_other_user(&mut b, SAVE_SET, id.as_uuid(), |id| {
-            json!({ "session_id": id, "set": logged })
-        })
+        testing::assert_not_found_for_other_user(
+            &mut b,
+            SAVE_SET,
+            id.as_uuid(),
+            |id| json!({ "session_id": id, "set": logged }),
+        )
         .await;
         let none: Option<SessionWithSets> = call(&mut b, IN_PROGRESS, json!({})).await.unwrap();
         assert_eq!(none, None);
@@ -1418,16 +1698,28 @@ mod tests {
         };
         save(&mut b, a_first.id, &reused).await.unwrap();
         let b_plan = plan(&mut b, a_first.id).await.unwrap();
-        assert_eq!(squat_targets(&b_plan).source, TargetSource::ProgramDefault, "A's history is not B's");
-        let b_summary = finish(&mut b, a_first.id, SessionOutcome::Completed, t(70)).await.unwrap();
+        assert_eq!(
+            squat_targets(&b_plan).source,
+            TargetSource::ProgramDefault,
+            "A's history is not B's"
+        );
+        let b_summary = finish(&mut b, a_first.id, SessionOutcome::Completed, t(70))
+            .await
+            .unwrap();
         assert!(b_summary.prs.is_empty(), "A's records are not B's");
 
         // A's session and sets did not move.
-        let a_after = db::sessions::get(&api.db, a.id, a_first.id.into()).await.unwrap();
+        let a_after = db::sessions::get(&api.db, a.id, a_first.id.into())
+            .await
+            .unwrap();
         assert_eq!(a_after.started_at, offset_date_time(t(0)).unwrap());
         assert_eq!(stored_sets(&api, &a, a_first.id).await, a_sets);
         let a_next = start(&mut a, SessionId::new_v7(), t(120)).await.unwrap();
-        assert_eq!(a_next.day.as_str(), "b", "B's sessions do not move A's rotation");
+        assert_eq!(
+            a_next.day.as_str(),
+            "b",
+            "B's sessions do not move A's rotation"
+        );
     }
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
@@ -1438,7 +1730,10 @@ mod tests {
         active_program(&api, &a).await;
         start(&mut a, SessionId::new_v7(), t(0)).await.unwrap();
         // B has no program and no session in progress of their own.
-        let message = assert_status(start(&mut b, SessionId::new_v7(), t(1)).await, StatusCode::CONFLICT);
+        let message = assert_status(
+            start(&mut b, SessionId::new_v7(), t(1)).await,
+            StatusCode::CONFLICT,
+        );
         assert_eq!(message, "Choose a program first.");
     }
 }
