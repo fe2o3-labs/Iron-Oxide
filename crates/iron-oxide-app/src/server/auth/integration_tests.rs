@@ -390,17 +390,69 @@ async fn sign_out_deletes_the_session_server_side(db: PgPool) {
 
 #[sqlx::test]
 #[ignore = "needs Postgres"]
-async fn a_request_loaded_before_sign_out_cannot_resurrect_the_session(db: PgPool) {
+async fn saving_a_deleted_session_does_not_resurrect_it(db: PgPool) {
+    // A request that loaded the session before a sign-out in another tab saves it afterwards
+    // (e.g. the idle-expiry touch): the store must not recreate it.
+    use tower_sessions::{
+        SessionStore,
+        session::{Id, Record},
+    };
+    let store = super::session::PgSessionStore::new(db.clone());
+    let mut record = Record {
+        id: Id::default(),
+        data: Default::default(),
+        expiry_date: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+    };
+    store.create(&mut record).await.unwrap();
+    assert!(store.load(&record.id).await.unwrap().is_some());
+    store.delete(&record.id).await.unwrap();
+    store.save(&record).await.unwrap();
+    assert!(store.load(&record.id).await.unwrap().is_none());
+    assert_eq!(session_rows(&db).await, 0);
+
+    // An expired session is not loaded, nor extended by a save.
+    let mut expired = Record {
+        id: Id::default(),
+        data: Default::default(),
+        expiry_date: time::OffsetDateTime::now_utc() - time::Duration::seconds(1),
+    };
+    store.create(&mut expired).await.unwrap();
+    assert!(store.load(&expired.id).await.unwrap().is_none());
+    expired.expiry_date = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+    store.save(&expired).await.unwrap();
+    assert!(store.load(&expired.id).await.unwrap().is_none());
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn concurrent_google_finishes_of_one_ceremony_cannot_both_succeed(db: PgPool) {
+    // Both requests carry the same session (and so the same ceremony id): only the database
+    // delete makes the ceremony single-use here.
     let app = TestApp::new(db.clone()).await;
     let mut browser = app.browser();
-    sign_up(&mut browser, &mut Passkey::new(), "a").await;
-    let mut other_tab = browser.clone();
-    let () = browser.call(SIGN_OUT, json!({})).await.unwrap();
-    // A request from another tab with the old cookie writes to the session (idle touch)...
-    sqlx::query("SELECT 1").execute(&db).await.unwrap();
-    let _ = me(&mut other_tab).await;
-    // ...and must not recreate it.
-    assert_eq!(session_rows(&db).await, 0);
+    let url = google_begin(&mut browser, "SignIn").await;
+    let state = query_param(&url, "state");
+    for (code, subject) in [("c1", "sub-a"), ("c2", "sub-b")] {
+        app.google.grant(
+            code,
+            Grant {
+                code_challenge: query_param(&url, "code_challenge"),
+                claims: app.google.claims(&url, subject),
+                sign_with_unpublished_key: false,
+            },
+        );
+    }
+    let (mut a, mut b) = (browser.clone(), browser.clone());
+    let (ra, rb) = tokio::join!(
+        a.call::<Me>(GOOGLE_FINISH, json!({ "code": "c1", "state": state })),
+        b.call::<Me>(GOOGLE_FINISH, json!({ "code": "c2", "state": state }))
+    );
+    assert_eq!(usize::from(ra.is_ok()) + usize::from(rb.is_ok()), 1);
+    let users: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(users, 1);
 }
 
 #[sqlx::test]
