@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Iron Oxide</title>
+  <defs>
+    <linearGradient id="rust" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f08a4b"/>
+      <stop offset="0.55" stop-color="#e8703a"/>
+      <stop offset="1" stop-color="#b3362b"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#141619"/>
+  <circle cx="256" cy="256" r="208" fill="url(#rust)"/>
+  <circle cx="256" cy="256" r="193.4" fill="none" stroke="#8a2a20" stroke-opacity="0.55" stroke-width="7.3"/>
+  <path d="M176.6 154.4A129 129 0 0 1 335.4 154.4" fill="none" stroke="#141619" stroke-width="41.6" stroke-linecap="round"/>
+  <path d="M383.7 238.1A129 129 0 0 1 304.3 375.6" fill="none" stroke="#141619" stroke-width="41.6" stroke-linecap="round"/>
+  <path d="M207.7 375.6A129 129 0 0 1 128.3 238.1" fill="none" stroke="#141619" stroke-width="41.6" stroke-linecap="round"/>
+  <circle cx="256" cy="256" r="70.7" fill="#272b30" stroke="#f4efe8" stroke-opacity="0.9" stroke-width="9.4"/>
+  <circle cx="256" cy="256" r="31.2" fill="#141619"/>
+</svg>

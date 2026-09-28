@@ -15,7 +15,27 @@ repository = "https://github.com/guizmaii-opensource/Iron-Oxide"
 dioxus = { version = "=0.7.10" }
 iron-oxide-domain = { path = "crates/iron-oxide-domain" }
 
-# Dev-dependencies for server-side tests.
+# Server-only dependencies (enabled by the app's `server` feature, never compiled to wasm).
+base64 = "0.23.1"
+dotenvy = "0.15.7"
+secrecy = "0.10.3"
+# Held back on 0.8 (0.9.0 is the latest): `tower-sessions-sqlx-store` 0.15 (Postgres sessions, #5)
+# depends on sqlx 0.8, and the session store must share our `PgPool` type.
+sqlx = { version = "0.8.6", default-features = false, features = [
+  "runtime-tokio",
+  "tls-rustls-ring-webpki",
+  "postgres",
+  "macros",
+  "migrate",
+  "uuid",
+  "time",
+] }
+thiserror = "2.0.21"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter"] }
+url = "2.5.8"
+
+# Dev-dependencies for tests (tokio: the app also enables runtime features for its server build).
+serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["macros", "rt"] }
 tower = { version = "0.5.3", features = ["util"] }
 
