@@ -1,0 +1,40 @@
+# Rust / Dioxus build output
+/target/
+target/
+/dist/
+dist/
+
+# Environment files: never commit real secrets. Only the placeholder template is tracked.
+.env
+.env.*
+!.env.example
+
+# Private keys, certificates and credential files
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
+*.jks
+id_rsa*
+id_ecdsa*
+id_ed25519*
+.netrc
+credentials.json
+# direnv: holds exported environment variables, often secrets
+.envrc
+
+# Local tooling
+.remember/
+
+# Node (Tailwind or other asset tooling, if ever used)
+node_modules/
+
+# Editors and OS
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
