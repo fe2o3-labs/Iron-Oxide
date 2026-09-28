@@ -144,16 +144,17 @@ impl TryFrom<i64> for Seconds {
 }
 
 impl fmt::Display for Seconds {
-    /// `m:ss` under an hour, `h:mm:ss` from one hour.
+    /// `m:ss` under an hour, `h:mm:ss` from one hour. Width, fill and alignment are honoured.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let hours = self.0 / 3_600;
         let minutes = self.0 % 3_600 / 60;
         let seconds = self.0 % 60;
-        if hours == 0 {
-            write!(f, "{minutes}:{seconds:02}")
+        let text = if hours == 0 {
+            format!("{minutes}:{seconds:02}")
         } else {
-            write!(f, "{hours}:{minutes:02}:{seconds:02}")
-        }
+            format!("{hours}:{minutes:02}:{seconds:02}")
+        };
+        crate::display::pad(f, &text)
     }
 }
 
@@ -233,6 +234,13 @@ mod tests {
             "duration must be at most 4294967295 s"
         );
         assert_eq!(
+            Seconds::try_from(-1_i64).unwrap_err(),
+            ValueError::Negative {
+                quantity: Quantity::Seconds,
+                value: -1.0
+            }
+        );
+        assert_eq!(
             Seconds::try_from(-5_i64).unwrap_err().to_string(),
             "duration must not be negative (got -5)"
         );
@@ -246,6 +254,15 @@ mod tests {
         assert_eq!(Seconds::new(3_599).to_string(), "59:59");
         assert_eq!(Seconds::new(3_600).to_string(), "1:00:00");
         assert_eq!(Seconds::new(3_723).to_string(), "1:02:03");
+    }
+
+    #[test]
+    fn display_honours_width_fill_and_alignment() {
+        assert_eq!(format!("{:>6}|", Seconds::new(90)), "  1:30|");
+        assert_eq!(format!("{:<6}|", Seconds::new(90)), "1:30  |");
+        assert_eq!(format!("{:^8}|", Seconds::new(90)), "  1:30  |");
+        assert_eq!(format!("{:0>5}", Seconds::new(5)), "00:05");
+        assert_eq!(format!("{:3}", Seconds::new(3_723)), "1:02:03");
     }
 
     #[test]
