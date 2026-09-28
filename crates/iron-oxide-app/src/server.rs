@@ -5,13 +5,17 @@ pub mod config;
 pub mod db;
 pub mod dotenv;
 pub mod logging;
+pub mod rate_limit;
 pub mod state;
 
-use std::{future::IntoFuture, process::ExitCode, sync::Arc, time::Duration};
+use std::{future::IntoFuture, net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
 
 use dioxus::logger::tracing;
 use dioxus::server::axum::{
-    self, Extension, Router, http::StatusCode, middleware::from_fn, routing::get,
+    self, Extension, Router,
+    http::StatusCode,
+    middleware::{from_fn, from_fn_with_state},
+    routing::get,
 };
 use tokio::net::TcpListener;
 
@@ -90,6 +94,7 @@ async fn run(config: Arc<Config>) -> Result<(), ServeError> {
         log_filter = config.log_filter.as_deref().unwrap_or("(default)"),
         shutdown_grace_secs = config.shutdown_grace.as_secs(),
         cookie_secure = config.auth.cookie_secure,
+        client_ip_source = %config.rate_limit.client_ip,
         "configuration loaded"
     );
 
@@ -106,7 +111,9 @@ async fn run(config: Arc<Config>) -> Result<(), ServeError> {
     tracing::info!(%addr, "listening");
 
     let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = axum::serve(listener, router(state.clone(), auth))
+    // The peer address is the per-IP rate limits' client IP (or vouches for Fly-Client-IP).
+    let app = router(state.clone(), auth).into_make_service_with_connect_info::<SocketAddr>();
+    let server = axum::serve(listener, app)
         .with_graceful_shutdown(async {
             // Resolves when told to drain (or if the sender is dropped).
             let _ = drain_rx.await;
@@ -201,12 +208,19 @@ impl ShutdownSignals {
 
 /// Full server router: the Dioxus application merged with the custom routes, with the shared
 /// state attached to every request (server functions included).
+///
+/// Layers, outermost first: the per-IP rate limit (before anything touches the session or the
+/// database), the state, the CSRF check, the session, then the per-user rate limit.
 pub fn router(state: AppState, auth: auth::AuthState) -> Router {
+    let limiter = rate_limit::RateLimiter::new(&state.config.rate_limit);
     let app = dioxus::server::router(App)
         .merge(custom_routes())
-        .layer(from_fn(missing_assets_are_not_found));
+        .layer(from_fn(missing_assets_are_not_found))
+        .layer(from_fn_with_state(limiter.clone(), rate_limit::per_user));
     // Sign-in (#5): sessions, the CSRF check and the Google callback around the app.
-    auth::install(app, auth, state.db.clone()).layer(Extension(state))
+    auth::install(app, auth, state.db.clone())
+        .layer(Extension(state))
+        .layer(from_fn_with_state(limiter, rate_limit::per_ip))
 }
 
 /// Routes served by axum directly, outside of Dioxus. They read [`AppState`] from the

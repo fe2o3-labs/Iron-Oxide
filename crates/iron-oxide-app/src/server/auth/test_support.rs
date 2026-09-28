@@ -3,6 +3,7 @@
 
 use std::{
     collections::HashMap,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -10,7 +11,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64URL};
 use dioxus::server::axum::{
     self, Router,
     body::{Body, to_bytes},
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderMap, Request, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -29,7 +30,10 @@ use webauthn_rs_proto::{
 };
 
 use super::AuthState;
-use crate::server::{AppState, Config, router};
+use crate::server::{AppState, Config, rate_limit::RateLimitConfig, router};
+
+/// The client address browsers connect from unless a test picks another one.
+pub const DEFAULT_PEER: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
 pub const ORIGIN: &str = "http://localhost:8080";
 pub const CLIENT_ID: &str = "test-client.apps.googleusercontent.com";
@@ -72,9 +76,15 @@ pub struct TestApp {
 
 impl TestApp {
     pub async fn new(db: PgPool) -> Self {
+        Self::with_rate_limit(db, RateLimitConfig::default()).await
+    }
+
+    /// The app with other rate limits or client-IP source.
+    pub async fn with_rate_limit(db: PgPool, rate_limit: RateLimitConfig) -> Self {
         ensure_public_dir();
         let google = MockGoogle::start().await;
-        let config = config();
+        let mut config = config();
+        config.rate_limit = rate_limit;
         let auth = AuthState::with_google_issuer(&config, &google.issuer).unwrap();
         let state = AppState {
             config: Arc::new(config),
@@ -93,6 +103,8 @@ impl TestApp {
             cookie: None,
             origin: Some(ORIGIN.to_owned()),
             fetch_site: Some("same-origin".to_owned()),
+            peer: Some(DEFAULT_PEER),
+            headers: Vec::new(),
         }
     }
 }
@@ -112,6 +124,10 @@ pub struct Browser {
     pub cookie: Option<String>,
     pub origin: Option<String>,
     pub fetch_site: Option<String>,
+    /// The TCP peer address the server sees (`None`: no connection info, as with `oneshot`).
+    pub peer: Option<IpAddr>,
+    /// Extra headers sent with every request.
+    pub headers: Vec<(&'static str, String)>,
 }
 
 impl Browser {
@@ -126,7 +142,11 @@ impl Browser {
         response
     }
 
-    fn request(&self, method: &str, path: &str) -> dioxus::server::axum::http::request::Builder {
+    pub fn request(
+        &self,
+        method: &str,
+        path: &str,
+    ) -> dioxus::server::axum::http::request::Builder {
         let mut builder = Request::builder()
             .method(method)
             .uri(path)
@@ -139,6 +159,12 @@ impl Browser {
         }
         if let Some(site) = &self.fetch_site {
             builder = builder.header("sec-fetch-site", site);
+        }
+        for (name, value) in &self.headers {
+            builder = builder.header(*name, value);
+        }
+        if let Some(peer) = self.peer {
+            builder = builder.extension(ConnectInfo(SocketAddr::new(peer, 50_000)));
         }
         builder
     }
