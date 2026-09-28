@@ -1,0 +1,140 @@
+name: Deploy
+
+# Pushes to `main` deploy to Fly.io; pull requests only build the production image.
+# First-time setup (Fly app, secrets, FLY_API_TOKEN): docs/operations/deploy.md.
+on:
+  push:
+    branches: [main]
+  # No branch filter: stacked PRs (whose base is not `main`) get the image build too.
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Builds the Dockerfile on amd64, the architecture Fly runs, so a broken image fails the PR
+  # instead of the production deploy. Nothing is pushed and no secret is used.
+  image:
+    name: Docker image build
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-image-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the production image
+        run: docker build --tag iron-oxide:ci .
+      - name: Image size
+        run: docker image ls iron-oxide:ci
+      - name: Exactly one client bundle in the image
+        run: |
+          docker create --name iron-oxide-files iron-oxide:ci > /dev/null
+          files=$(docker export iron-oxide-files | tar -t)
+          docker rm iron-oxide-files > /dev/null
+          echo "$files" | grep '^app/'
+          test "$(echo "$files" | grep -c '^app/public/assets/.*\.wasm$')" -eq 1
+      # The server connects to Postgres (and runs the migrations) before it listens, so the
+      # container gets a real, throwaway database on a private network.
+      - name: Start Postgres
+        run: |
+          docker network create iron-oxide-ci
+          # Throwaway credentials for an ephemeral CI container; not a secret.
+          docker run --detach --name postgres --network iron-oxide-ci \
+            --env POSTGRES_USER=iron_oxide --env POSTGRES_PASSWORD=iron_oxide \
+            --env POSTGRES_DB=iron_oxide \
+            --health-cmd "pg_isready -U iron_oxide -d iron_oxide" --health-interval 2s \
+            postgres:18-alpine
+          for _ in $(seq 1 60); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' postgres)" = "healthy" ] && exit 0
+            sleep 1
+          done
+          docker logs postgres
+          exit 1
+      - name: Smoke test the container
+        run: |
+          # On failure, print both containers' logs right here (cleanup happens in the last step).
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then docker logs iron-oxide || true; docker logs postgres || true; fi' EXIT
+          docker run --detach --init --name iron-oxide --network iron-oxide-ci \
+            --publish 8080:8080 \
+            --env APP_BASE_URL=http://127.0.0.1:8080 \
+            --env DATABASE_URL=postgres://iron_oxide:iron_oxide@postgres:5432/iron_oxide \
+            iron-oxide:ci
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
+            sleep 1
+          done
+          set -x
+          test "$(curl -sSf http://127.0.0.1:8080/healthz)" = "ok"
+          curl -sSf http://127.0.0.1:8080/ | grep -q "Iron Oxide"
+          curl -sSf http://127.0.0.1:8080/api/server-time | grep -Eq '^[0-9]+$'
+          # /readyz (#3/#4) must report the database as reachable. It lands with the migrations
+          # directory; before that (and only then) the check is skipped. Once it exists, anything
+          # but exactly `ok` fails, including the app's HTML fallback page for a missing route.
+          if [ -d crates/iron-oxide-app/migrations ]; then
+            test "$(curl -sS http://127.0.0.1:8080/readyz)" = "ok"
+          else
+            echo "::notice::/readyz is not part of this checkout yet (no migrations directory); skipped"
+          fi
+      - name: Logs and cleanup
+        if: always()
+        run: |
+          docker logs iron-oxide || true
+          docker logs postgres || true
+          docker rm --force iron-oxide postgres || true
+          docker network rm iron-oxide-ci || true
+
+  deploy:
+    name: Deploy to Fly.io
+    # Only `main` is ever deployed, including manual runs (workflow_dispatch works on any branch).
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Never run two deploys at once, and never cancel one halfway.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    environment:
+      name: production
+    env:
+      # Deploy token scoped to the app, stored as a secret of the `production` environment, which
+      # only `main` may use (see docs/operations/deploy.md). `secrets` cannot be used
+      # in `if:` conditions, so the steps below test this variable instead.
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - name: Check that FLY_API_TOKEN is set
+        id: token
+        run: |
+          if [ -z "$FLY_API_TOKEN" ]; then
+            echo "::notice title=Deploy skipped::The FLY_API_TOKEN repository secret is not set. See docs/operations/deploy.md."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.token.outputs.present == 'true'
+        with:
+          persist-credentials: false
+      - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # 1.5
+        if: steps.token.outputs.present == 'true'
+        with:
+          # renovate: datasource=github-releases depName=superfly/flyctl extractVersion=^v(?<version>.+)$
+          version: 0.4.108
+      # Builds on Fly's remote builder (amd64) and waits for the health checks of fly.toml.
+      - name: fly deploy
+        if: steps.token.outputs.present == 'true'
+        run: flyctl deploy --remote-only
+      # Fly's own check only probes /healthz (liveness, no database). /readyz also checks the
+      # database, and is called once here, after each deploy, so Neon can still scale to zero.
+      - name: Smoke test the deployed app
+        if: steps.token.outputs.present == 'true'
+        run: |
+          app=$(sed -n 's/^app = "\(.*\)"$/\1/p' fly.toml)
+          base="https://${app}.fly.dev"
+          set -x
+          test "$(curl -sSf --retry 5 --retry-all-errors "$base/healthz")" = "ok"
+          # Exact body match: an unknown path would get the app's HTML page with a 200.
+          test "$(curl -sSf --retry 5 --retry-all-errors "$base/readyz")" = "ok"
+          curl -sSf "$base/" | grep -q "Iron Oxide"
