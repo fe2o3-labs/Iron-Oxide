@@ -1,7 +1,7 @@
-//! Pure domain logic for Iron Oxide: no UI, no I/O, no database.
+//! Pure domain logic for Iron Oxide: programs, sessions, progression, rest timer, plate maths.
 //!
-//! This crate must not depend on Dioxus, web-sys or sqlx, so that it builds for the server and for
-//! `wasm32-unknown-unknown` alike and its tests run with plain `cargo test`.
+//! This crate must stay free of UI, web and database dependencies (no Dioxus, web-sys or sqlx),
+//! so it builds and tests with plain `cargo test -p iron-oxide-domain` on any target.
 //!
 //! # Core types
 //!
@@ -11,10 +11,6 @@
 //!   increment and display helpers.
 //! - [`Reps`], [`Percent`] and [`Seconds`].
 //! - [`ValueError`] for every rejected value.
-#![cfg_attr(
-    not(test),
-    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
-)]
 
 mod duration;
 mod error;

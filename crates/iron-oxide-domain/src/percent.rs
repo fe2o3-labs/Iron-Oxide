@@ -111,7 +111,7 @@ impl fmt::Display for Percent {
         let fraction = self.0 % BASIS_POINTS_PER_PERCENT;
         if fraction == 0 {
             write!(f, "{whole}%")
-        } else if fraction % 10 == 0 {
+        } else if fraction.is_multiple_of(10) {
             write!(f, "{whole}.{}%", fraction / 10)
         } else {
             write!(f, "{whole}.{fraction:02}%")
