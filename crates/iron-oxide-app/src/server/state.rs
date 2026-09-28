@@ -21,6 +21,7 @@
 
 use std::sync::Arc;
 
+use iron_oxide_domain::program::builtin_programs;
 use sqlx::PgPool;
 
 use super::{
@@ -39,11 +40,15 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Connects to Postgres (retrying while a cold Neon compute wakes up) and applies the
-    /// pending migrations.
+    /// Connects to Postgres (retrying while a cold Neon compute wakes up), applies the pending
+    /// migrations and upserts the built-in programs.
     pub async fn init(config: Arc<Config>) -> Result<Self, DbError> {
         let db = db::connect(&config.database_url, RetryPolicy::STARTUP).await?;
         db::migrate(&db).await?;
+        let builtins = builtin_programs()?;
+        db::programs::seed_builtins(&db, &db::programs::builtin_seeds(&builtins))
+            .await
+            .map_err(DbError::Seed)?;
         Ok(Self { config, db })
     }
 }

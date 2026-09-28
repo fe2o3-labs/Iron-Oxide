@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT cls.relname AS \"table!\",\n                  EXISTS (\n                      SELECT 1 FROM pg_constraint con\n                      WHERE con.conrelid = cls.oid AND con.contype = 'f'\n                        AND con.conkey = ARRAY[att.attnum]\n                        AND con.confrelid = 'users'::regclass AND con.confdeltype = 'c'\n                  ) AS \"cascades!\",\n                  EXISTS (\n                      SELECT 1 FROM pg_index idx\n                      WHERE idx.indrelid = cls.oid AND idx.indkey[0] = att.attnum\n                  ) AS \"indexed!\"\n           FROM pg_class cls\n           JOIN pg_namespace ns ON ns.oid = cls.relnamespace\n           JOIN pg_attribute att ON att.attrelid = cls.oid\n           WHERE ns.nspname = 'public' AND cls.relkind = 'r'\n             AND att.attname = 'user_id' AND NOT att.attisdropped\n           ORDER BY 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "table!",
+        "type_info": "Name"
+      },
+      {
+        "ordinal": 1,
+        "name": "cascades!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 2,
+        "name": "indexed!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "2f1d3e9edddd5cf13249633a725c4713f4a158267530cc0db305a257011897fa"
+}

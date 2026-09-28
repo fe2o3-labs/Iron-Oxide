@@ -15,6 +15,28 @@ use sqlx::{
 
 use super::config::DatabaseUrl;
 
+// The repository: typed queries over the training tables. Every function that reads or writes a
+// user's data takes the caller's `UserId` and scopes every query by it (docs/database.md).
+#[allow(dead_code, reason = "called by the server functions of #18-#22")]
+pub mod active_program;
+pub mod error;
+#[allow(dead_code, reason = "called by the server functions of #18-#22")]
+pub mod ids;
+#[allow(dead_code, reason = "called by the server functions of #18-#22")]
+pub mod programs;
+#[cfg(test)]
+mod schema_tests;
+#[allow(dead_code, reason = "called by the server functions of #18-#22")]
+pub mod sessions;
+#[allow(dead_code, reason = "called by the server functions of #18-#22")]
+pub mod sets;
+#[allow(dead_code, reason = "called by the server functions of #18-#22")]
+pub mod settings;
+#[cfg(test)]
+pub(crate) mod testing;
+#[allow(dead_code, reason = "called by the server functions of #18-#22")]
+pub mod training_maxes;
+
 /// The migrations in `crates/iron-oxide-app/migrations`, embedded in the binary at compile time.
 pub static MIGRATOR: Migrator = sqlx::migrate!();
 
@@ -74,6 +96,10 @@ pub enum DbError {
     },
     #[error("could not run the database migrations: {0}")]
     Migrate(#[from] MigrateError),
+    #[error("a built-in program does not load: {0}")]
+    Builtins(#[from] iron_oxide_domain::program::BuiltinProgramError),
+    #[error("could not seed the built-in programs: {0}")]
+    Seed(#[source] error::RepoError),
 }
 
 /// Pool options shared by the app and the tests.
