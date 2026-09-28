@@ -4,10 +4,11 @@ target/
 /dist/
 dist/
 
-# Environment files: never commit real secrets. Only the placeholder template is tracked.
+# Environment files: never commit real secrets. Only the placeholder templates (*.example) are tracked.
 .env
 .env.*
 !.env.example
+!.env.*.example
 
 # Private keys, certificates and credential files
 *.pem
