@@ -117,7 +117,10 @@ the new machines refuse to start (the old ones keep serving). `WEBAUTHN_ORIGIN` 
 `GOOGLE_REDIRECT_URL` must match `APP_BASE_URL`, so change all three together when moving to the
 custom domain.
 
-`IP` and `PORT` are not secrets: they are set in `fly.toml` (`0.0.0.0`, `8080`).
+`IP` and `PORT` are not secrets: they are set in `fly.toml` (`0.0.0.0`, `8080`), as is
+`CLIENT_IP_SOURCE = "fly"`, which makes the rate limits key clients by the `Fly-Client-IP` header
+instead of the proxy's address (see [docs/rate-limiting.md](../rate-limiting.md)). Keep it: without
+it, every user shares one set of per-IP limits.
 
 List what is set (values are never shown) with `fly secrets list`.
 
