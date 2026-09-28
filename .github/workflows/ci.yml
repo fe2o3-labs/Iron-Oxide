@@ -134,6 +134,9 @@ jobs:
         run: cargo test -p iron-oxide-app --features server --locked
       - name: Domain crate builds and tests with plain cargo
         run: cargo test -p iron-oxide-domain --locked
+      # The service worker's caching rule, with the Node.js preinstalled on the runner (node:test).
+      - name: Service worker unit tests
+        run: node --test crates/iron-oxide-app/tests/sw/is_cacheable.test.mjs
 
   # Builds the whole workspace with SQLX_OFFLINE=true (set globally above), so a query whose
   # `.sqlx/` metadata is missing or stale fails CI without needing a database.
@@ -234,6 +237,16 @@ jobs:
           for f in $wasm_files; do
             curl -sSf -o /dev/null -w '%{content_type}\n' "http://127.0.0.1:8080/${f#public/}" | grep -q '^application/wasm'
           done
+          # PWA: the manifest and head tags are in the SSR page, and the static files are served at the root.
+          curl -sSf http://127.0.0.1:8080/ | grep -q '<link rel="manifest" href="/manifest.webmanifest"'
+          curl -sSf http://127.0.0.1:8080/ | grep -q 'navigator.serviceWorker.register(`/sw.js?build='
+          curl -sSf http://127.0.0.1:8080/manifest.webmanifest | grep -q '"short_name": "Fe2O3"'
+          curl -sSf 'http://127.0.0.1:8080/sw.js?build=ci' | grep -q 'CACHE_VERSION'
+          for icon in icons/icon-192.png icons/icon-512.png icons/icon-maskable-512.png icons/apple-touch-icon.png favicon.ico; do
+            curl -sSf -o /dev/null "http://127.0.0.1:8080/$icon"
+          done
+          # An unknown hashed asset is a 404, not the SSR page (the service worker must never cache HTML as JS/wasm).
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/assets/missing-dxh0.js)" = "404"
       - name: Server log
         if: always()
         run: cat "$RUNNER_TEMP/server.log" || true
