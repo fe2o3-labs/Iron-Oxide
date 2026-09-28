@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "name": "   ",
+  "description": "",
+  "days": [
+    {
+      "id": "a",
+      "name": "A",
+      "exercises": [
+        { "id": "squat", "name": "Squat", "work": { "reps": { "sets": 3, "reps": 5 } }, "rest": 60 },
+        { "id": "squat", "name": "Squat", "work": { "reps": { "sets": 3, "reps": 5 } }, "rest": 60 }
+      ]
+    },
+    { "id": "a", "name": "A again", "exercises": [] },
+    {
+      "id": "c",
+      "name": "C",
+      "exercises": [
+        { "id": "press", "name": "Press", "work": { "reps": { "sets": 3, "reps": 5 } }, "rest": 60 }
+      ]
+    }
+  ],
+  "rotation": ["a", "b"]
+}

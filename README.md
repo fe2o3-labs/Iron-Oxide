@@ -12,6 +12,8 @@ A strength-training PWA written in Rust with [Dioxus](https://dioxuslabs.com) fu
 | `crates/iron-oxide-app/migrations` | SQL migrations, embedded in the server and applied at startup. |
 | `.sqlx/` | Offline query metadata for the sqlx macros (see "Database"). |
 | `docker-compose.yml` | Local Postgres for development and tests. |
+| `programs/` | Built-in training programs (JSON), embedded in the domain crate. |
+| `schemas/program.schema.json` | JSON Schema of a program document, generated from the domain types. Regenerate with `UPDATE_SCHEMA=1 cargo test -p iron-oxide-domain program::schema`; a test fails when it is stale. |
 
 ## Pinned versions
 

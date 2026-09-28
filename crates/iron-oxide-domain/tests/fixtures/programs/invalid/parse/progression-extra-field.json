@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "name": "Extra field in a rule",
+  "days": [
+    {
+      "id": "a",
+      "name": "A",
+      "exercises": [
+        {
+          "id": "squat",
+          "name": "Squat",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "kg": 60 },
+          "rest": 60,
+          "progression": {
+            "add_when_top_of_range": { "increment": { "kg": 2.5 }, "every": 2 }
+          }
+        }
+      ]
+    }
+  ],
+  "rotation": ["a"]
+}

@@ -9,6 +9,7 @@
 //! Versions are never updated (a trigger rejects it): an upload adds a new version, and sessions
 //! keep pointing at the version they were run from.
 
+use iron_oxide_domain::program::BuiltinProgram;
 use sqlx::{
     PgExecutor, PgPool, Postgres, Transaction,
     types::{JsonValue, Uuid, time::OffsetDateTime},
@@ -95,19 +96,26 @@ impl TryFrom<VersionRow> for ProgramVersion {
 
 /// A built-in program to seed: the id, name and JSON of one of the programs in `programs/`.
 #[derive(Debug, Clone, Copy)]
-pub struct BuiltinSeed {
+pub struct BuiltinSeed<'a> {
     /// The stable slug, e.g. `full-body-3day`.
-    pub builtin_id: &'static str,
-    pub name: &'static str,
+    pub builtin_id: &'a str,
+    pub name: &'a str,
     /// The program document, as written in `programs/*.json`.
-    pub json: &'static str,
+    pub json: &'a str,
 }
 
-/// The built-in programs seeded at startup.
-///
-/// Empty until the program documents land (#56): they will come from the domain crate's
-/// `builtin_programs()` (id, name and `json()` of each), mapped to [`BuiltinSeed`]s.
-pub const BUILTIN_PROGRAMS: &[BuiltinSeed] = &[];
+/// The seeds of the domain crate's built-in programs (already parsed and validated by
+/// [`builtin_programs`](iron_oxide_domain::program::builtin_programs)), in display order.
+pub fn builtin_seeds(builtins: &[BuiltinProgram]) -> Vec<BuiltinSeed<'_>> {
+    builtins
+        .iter()
+        .map(|builtin| BuiltinSeed {
+            builtin_id: builtin.id().as_str(),
+            name: &builtin.program().name,
+            json: builtin.json(),
+        })
+        .collect()
+}
 
 /// Advisory lock key serialising concurrent seeds (two instances starting at once).
 const SEED_LOCK: i64 = 0x6972_6f6e_7365_6564; // "ironseed"
@@ -118,7 +126,7 @@ const SEED_LOCK: i64 = 0x6972_6f6e_7365_6564; // "ironseed"
 ///
 /// # Errors
 /// [`RepoError::Invalid`] when a seed's JSON does not parse or breaks a constraint.
-pub async fn seed_builtins(pool: &PgPool, seeds: &[BuiltinSeed]) -> Result<(), RepoError> {
+pub async fn seed_builtins(pool: &PgPool, seeds: &[BuiltinSeed<'_>]) -> Result<(), RepoError> {
     let mut tx = pool.begin().await?;
     sqlx::query!("SELECT pg_advisory_xact_lock($1)", SEED_LOCK)
         .execute(&mut *tx)
@@ -625,13 +633,15 @@ fn found(rows_affected: u64) -> Result<(), RepoError> {
 
 #[cfg(test)]
 mod tests {
+    use iron_oxide_domain::program::builtin_programs;
+
     use super::*;
     use crate::server::db::{
         MIGRATOR,
         testing::{self, creation, document, random_uuid},
     };
 
-    const STARTER: BuiltinSeed = BuiltinSeed {
+    const STARTER: BuiltinSeed<'static> = BuiltinSeed {
         builtin_id: "starter",
         name: "Starter",
         json: r#"{"schema_version": 1, "name": "Starter"}"#,
@@ -685,14 +695,49 @@ mod tests {
         assert!(list_builtins(&pool).await.unwrap().is_empty());
     }
 
+    #[test]
+    fn builtin_seeds_come_from_the_domain_builtins() {
+        let builtins = builtin_programs().unwrap();
+        let seeds = builtin_seeds(&builtins);
+        assert_eq!(seeds.len(), builtins.len());
+        let full_body = seeds
+            .iter()
+            .find(|seed| seed.builtin_id == "full-body-3day")
+            .unwrap();
+        assert_eq!(full_body.name, "Full-body 3-day barbell");
+        assert!(full_body.json.contains(r#""schema_version": 1"#));
+    }
+
     #[sqlx::test(migrator = "MIGRATOR")]
     #[ignore = "needs Postgres"]
-    async fn the_seed_hook_is_valid(pool: PgPool) {
-        seed_builtins(&pool, BUILTIN_PROGRAMS).await.unwrap();
-        assert_eq!(
-            list_builtins(&pool).await.unwrap().len(),
-            BUILTIN_PROGRAMS.len()
-        );
+    async fn the_domain_builtins_are_seeded(pool: PgPool) {
+        let builtins = builtin_programs().unwrap();
+        let seeds = builtin_seeds(&builtins);
+        seed_builtins(&pool, &seeds).await.unwrap();
+        // Seeding again at the next start changes nothing.
+        seed_builtins(&pool, &seeds).await.unwrap();
+        let stored = list_builtins(&pool).await.unwrap();
+        assert_eq!(stored.len(), builtins.len());
+        for builtin in &builtins {
+            let row = stored
+                .iter()
+                .find(|row| row.program.source_builtin_id.as_deref() == Some(builtin.id().as_str()))
+                .unwrap();
+            assert_eq!(row.program.name, builtin.program().name);
+            assert_eq!(row.latest.version, 1);
+            // The stored document is the program itself.
+            let program =
+                iron_oxide_domain::program::Program::from_json(&row.latest.document.to_string())
+                    .unwrap();
+            assert_eq!(&program, builtin.program());
+        }
+        // A user can copy it.
+        let user = testing::user(&pool).await;
+        let (_, copy, version) = copy_builtin(&pool, user, creation(), "full-body-3day")
+            .await
+            .unwrap();
+        assert_eq!(copy.name, "Full-body 3-day barbell");
+        assert_eq!(version.version, 1);
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]

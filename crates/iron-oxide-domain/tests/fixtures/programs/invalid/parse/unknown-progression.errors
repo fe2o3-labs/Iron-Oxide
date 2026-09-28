@@ -1,0 +1,1 @@
+days[0].exercises[0].progression: unknown variant `add_weekly`, expected one of `none`, `add_when_top_of_range`, `double_progression`, `training_max` (line 15, column 39)

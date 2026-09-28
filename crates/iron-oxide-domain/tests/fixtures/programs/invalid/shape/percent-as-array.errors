@@ -1,0 +1,1 @@
+days[0].exercises[0].load.percent_of_training_max: invalid type: sequence, expected f64 (line 21, column 39)

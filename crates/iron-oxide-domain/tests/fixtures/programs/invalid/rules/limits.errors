@@ -1,0 +1,12 @@
+days[0].exercises[0].work.reps.sets: must be between 1 and 20 (got 0)
+days[0].exercises[0].work.reps.reps: must be between 1 and 100 (got 0)
+days[0].exercises[0].rest: must be between 0 and 3600 (got 9000)
+days[0].exercises[0].load.kg: must be greater than zero
+days[0].exercises[1].work.reps.sets: must be between 1 and 20 (got 21)
+days[0].exercises[1].work.reps.reps.min: must be between 1 and 100 (got 0)
+days[0].exercises[1].work.reps.reps.max: must be between 1 and 100 (got 101)
+days[0].exercises[1].load.percent_of_training_max: must be above 0% and at most 150% (got 151%)
+days[0].exercises[2].work.hold.seconds: must be between 1 and 3600 (got 0)
+days[0].exercises[3].work.intervals.work: must be between 1 and 3600 (got 0)
+days[0].exercises[3].work.intervals.rest: must be between 0 and 3600 (got 3601)
+days[0].exercises[3].work.intervals.rounds: must be between 1 and 100 (got 0)
