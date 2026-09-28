@@ -11,12 +11,18 @@
 //!   increment and display helpers.
 //! - [`Reps`], [`Percent`] and [`Seconds`].
 //! - [`ValueError`] for every rejected value.
+//!
+//! # Strength statistics
+//!
+//! e1RM ([`E1rmFormula`]), [`Volume`], [`top_set`], personal records ([`ExerciseRecords`],
+//! [`PrEvent`]) and chart series ([`exercise_series`]), all computed from [`PerformedSet`] values.
 
 mod duration;
 mod error;
 mod ids;
 mod percent;
 mod reps;
+mod stats;
 mod units;
 mod weight;
 
@@ -25,5 +31,9 @@ pub use error::{Quantity, ValueError};
 pub use ids::{ExerciseId, ProgramId, ProgramVersionId, SessionId, SetId, UserId};
 pub use percent::Percent;
 pub use reps::Reps;
+pub use stats::{
+    E1rmFormula, ExerciseRecords, Lift, MAX_E1RM_REPS, PerformedSet, PrEvent, PrKind, SeriesPoint,
+    Volume, VolumeDisplay, detect_prs, estimate_1rm, exercise_series, session_volume, top_set,
+};
 pub use units::Unit;
 pub use weight::{Rounding, Weight, WeightDisplay};
