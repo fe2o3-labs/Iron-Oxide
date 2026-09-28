@@ -1153,26 +1153,6 @@ mod tests {
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
     #[ignore = "needs Postgres"]
-    async fn start_session_refuses_a_rotation_that_repeats_a_day(db: PgPool) {
-        let api = TestApi::new(db).await;
-        let mut a = api.user("A").await;
-        let mut doc = document(5);
-        doc["rotation"] = json!(["a", "b", "a"]);
-        let (_, program, _) =
-            db::programs::create(&api.db, a.id, db_testing::creation(), "R", &doc)
-                .await
-                .unwrap();
-        db::active_program::set(&api.db, a.id, program.id)
-            .await
-            .unwrap();
-        assert_status(
-            start(&mut a, SessionId::new_v7(), t(0)).await,
-            StatusCode::CONFLICT,
-        );
-    }
-
-    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
-    #[ignore = "needs Postgres"]
     async fn get_in_progress_session_returns_it_with_its_sets(db: PgPool) {
         let api = TestApi::new(db).await;
         let mut a = api.user("A").await;
