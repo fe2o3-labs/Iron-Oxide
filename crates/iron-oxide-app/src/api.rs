@@ -6,6 +6,7 @@
 //!
 //! Adding an area is one line here; Dioxus registers every server function it finds.
 
+pub mod billing;
 #[allow(
     dead_code,
     reason = "used by the UI screens that call the server functions (#29-#32)"

@@ -29,6 +29,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sqlx::{PgPool, types::Uuid};
 
+use crate::api::error::ApiFailure;
+use crate::server::api::errors_layer::tests::client_error;
 pub use crate::server::auth::test_support::CallError;
 use crate::server::{
     api::error::{NOT_FOUND, UNAUTHORIZED},
@@ -80,13 +82,30 @@ pub struct TestUser {
 
 impl TestUser {
     /// Calls the server function at `path` (a `POST` with `body` as its JSON arguments) and
-    /// decodes its result.
+    /// decodes its result. A failure is decoded as the Dioxus client does and classified as the
+    /// UI would show it: [`CallError::message`] is [`ApiFailure::classify`]'s message.
+    ///
+    /// [`ApiFailure::classify`]: crate::api::error::ApiFailure::classify
     pub async fn call<T: DeserializeOwned>(
         &mut self,
         path: &str,
         body: Value,
     ) -> Result<T, CallError> {
-        self.browser.call(path, body).await
+        let (status, bytes) = self.browser.post_json(path, body).await;
+        if status.is_success() {
+            return Ok(serde_json::from_slice(&bytes)
+                .unwrap_or_else(|e| panic!("{path}: {e}: {}", String::from_utf8_lossy(&bytes))));
+        }
+        let failure = ApiFailure::classify(&client_error(status, &bytes).await);
+        Err(CallError {
+            status,
+            message: failure.message,
+        })
+    }
+
+    /// The raw status and body of a call, to compare two answers byte for byte.
+    pub async fn call_raw(&mut self, path: &str, body: Value) -> (StatusCode, Vec<u8>) {
+        self.browser.post_json(path, body).await
     }
 
     /// Like [`TestUser::call`], for a call that must fail. Panics with the result if it succeeds.
@@ -112,6 +131,12 @@ pub async fn assert_not_found_for_other_user(
 ) {
     let with_owners_id = other.call_err(path, body(owners_id)).await;
     let with_random_id = other.call_err(path, body(Uuid::now_v7())).await;
+    // The same bytes on the wire, not only the same message.
+    assert_eq!(
+        other.call_raw(path, body(owners_id)).await,
+        other.call_raw(path, body(Uuid::now_v7())).await,
+        "{path}: the answers differ"
+    );
     let not_found = CallError {
         status: StatusCode::NOT_FOUND,
         message: NOT_FOUND.to_owned(),

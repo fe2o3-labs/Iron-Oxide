@@ -78,6 +78,19 @@ else
   fi
 fi
 
+# cargo-sweep, for `make prune`. Not a dependency of the code, so pinned here.
+# renovate: datasource=crate depName=cargo-sweep
+CARGO_SWEEP_VERSION=0.8.0
+sweep_have=$(cargo-sweep sweep --version 2>/dev/null | awk '{ print $2; exit }' || true)
+if [ "$sweep_have" = "$CARGO_SWEEP_VERSION" ]; then
+  ok "cargo-sweep $CARGO_SWEEP_VERSION"
+elif [ "$DRY_RUN" = 1 ]; then
+  miss "cargo-sweep $CARGO_SWEEP_VERSION, for 'make prune' (installed: ${sweep_have:-none})"
+else
+  act "cargo-sweep $CARGO_SWEEP_VERSION"
+  cargo install cargo-sweep --version "$CARGO_SWEEP_VERSION" --locked --force
+fi
+
 echo "Docker (local Postgres)"
 if [ "$(uname -s)" = Darwin ]; then
   docker_hint="brew install colima docker docker-compose && colima start (or Docker Desktop)"

@@ -274,6 +274,12 @@ impl AuthUser {
     pub fn owner(&self) -> super::db::ids::UserId {
         self.user_id.into()
     }
+
+    /// An authenticated user without a request, for tests of code that takes an `AuthUser`.
+    #[cfg(test)]
+    pub(crate) fn for_tests(user_id: UserId) -> Self {
+        Self { user_id }
+    }
 }
 
 impl<S: Send + Sync> FromRequestParts<S> for AuthUser {
@@ -309,6 +315,15 @@ pub(crate) mod tests {
     #[test]
     fn webauthn_accepts_the_production_domain() {
         let origin = url::Url::parse("https://iron-oxyde.com").unwrap();
+        WebauthnBuilder::new("iron-oxyde.com", &origin)
+            .unwrap()
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn webauthn_accepts_the_app_subdomain_with_the_parent_rp_id() {
+        let origin = url::Url::parse("https://app.iron-oxyde.com").unwrap();
         WebauthnBuilder::new("iron-oxyde.com", &origin)
             .unwrap()
             .build()

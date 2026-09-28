@@ -198,6 +198,7 @@ types mirror them field for field, and switch to them once they are merged.
 
 | Module | Functions |
 |---|---|
+| `users` | `plan` (the subscription plan, read on every gated call), `lock_plan` (the same with `FOR UPDATE`: the serialisation point of quota checks), `unarchived_programs` (what the custom program quota counts); see docs/billing.md |
 | `settings` | `find` (`None` when never saved: the API then shows its own defaults, #20), `save` |
 | `training_maxes` | `list`, `set`, `delete` |
 | `programs` | `seed_builtins`, `list_builtins`, `copy_builtin` and `create` (idempotent on a `CreationId`), `get`, `list`, `rename`, `set_archived`, `add_version` (a retried identical upload is a no-op), `list_versions`, `get_version`, `latest_version` |
