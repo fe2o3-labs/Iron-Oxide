@@ -120,7 +120,8 @@ DOCKER_PORT ?= 8080
 # $(call step,message)
 step = printf '==> %s\n' "$(1)"
 # $(call need-file,path,where it comes from): fail with a clear message if `path` does not exist.
-need-file = test -e $(1) || { echo "make $@: needs $(1)$(if $(2), from $(2)), which is not on this branch yet." >&2; exit 1; }
+need-file = test -e $(1) || { echo "make $@: needs $(1)$(if $(2), from $(2)$(comma) which is not on this branch yet)." >&2; exit 1; }
+comma := ,
 # $(call need-cmd,command,hint)
 need-cmd = command -v $(1) >/dev/null 2>&1 || { echo "make $@: '$(1)' is not installed. $(2)" >&2; exit 1; }
 # $(call need-confirm,what): refuse unless CONFIRM=1.
@@ -136,7 +137,7 @@ need-sqlx = $(call need-cmd,$(SQLX),Run 'make setup'.); \
 	test "$$have" = "$(SQLX_VERSION)" || { echo "make $@: sqlx-cli $$have is installed, but Cargo.lock has sqlx $(SQLX_VERSION). Run 'make setup'." >&2; exit 1; }
 need-docker = $(call need-cmd,docker,See 'make setup'.); \
 	docker info >/dev/null 2>&1 || { echo "make $@: Docker is not running. Start Docker Desktop, or 'colima start'." >&2; exit 1; }
-need-compose = $(call need-file,docker-compose.yml,\#50); $(need-docker)
+need-compose = $(need-docker)
 
 .PHONY: help setup env versions \
 	dev run run-release db-up db-down db-reset db-psql migrate sqlx-prepare schema icons \
@@ -158,9 +159,9 @@ setup: ## Check and install the pinned toolchain, dx and sqlx-cli (DRY_RUN=1: on
 		WASM_TARGET='$(WASM_TARGET)' CARGO_BIN='$(CARGO_BIN)' DRY_RUN='$(DRY_RUN)' scripts/setup.sh
 DRY_RUN ?= 0
 
-env: ## Create .env from .env.example if it is missing (PRESET=localhost|lan|tailscale for phones)
+env: ## Create .env from .env.example if missing (PRESET=localhost|lan|tailscale: phone presets)
 	$(Q)src=.env$(if $(PRESET),.$(PRESET)).example; \
-	$(call need-file,$$src,$(if $(PRESET),#62,#50)); \
+	$(call need-file,$$src,$(if $(PRESET),#62)); \
 	if [ -e .env ] && [ "$(FORCE)" != 1 ]; then \
 		$(if $(PRESET),echo "make $@: .env exists. FORCE=1 replaces it (the old one is kept as .env.bak)." >&2; exit 1,echo ".env exists: kept as it is."); \
 	else \
@@ -179,18 +180,14 @@ versions: ## Show the pinned versions and the installed ones
 ##@ Dev
 
 dev: ## Start Postgres, apply the migrations and run `dx serve` with hot reload
-	$(Q)if [ -e docker-compose.yml ]; then \
-		$(MAKE) env db-up migrate; \
-	else \
-		echo "No docker-compose.yml yet (#50): starting without a database."; \
-	fi
+	$(Q)$(MAKE) env db-up migrate
 	$(Q)$(need-dx)
 	$(Q)$(call step,dx serve on http://127.0.0.1:$(APP_PORT))
 	$(Q)SQLX_OFFLINE=false $(DX) serve --web -p $(APP) --port $(APP_PORT) $(DX_ARGS)
 
 run: dev ## Same as dev
 
-run-release: build ## Build the release bundle and run its server (service worker on), reading ./.env
+run-release: build ## Build the release bundle and run its server (service worker on) with ./.env
 	$(Q)$(call step,release server on http://127.0.0.1:$(APP_PORT))
 	$(Q)PORT=$(APP_PORT) "$(BUNDLE_DIR)/server"
 
@@ -213,8 +210,7 @@ db-psql: ## Open psql in the Postgres container (DB=iron_oxide_test for the test
 	$(Q)$(need-compose)
 	$(Q)$(COMPOSE) exec postgres psql -U iron_oxide -d $(DB)
 
-migrate: ## Apply the migrations to the database of DATABASE_URL (from the environment or .env)
-	$(Q)$(call need-file,$(MIGRATIONS),#50)
+migrate: ## Apply the migrations to DATABASE_URL (from the environment, else .env)
 	$(Q)$(need-sqlx)
 	$(Q)test -n "$${DATABASE_URL:-}" || test -e .env || { echo "make $@: set DATABASE_URL, or run 'make env'." >&2; exit 1; }
 	$(Q)$(call step,sqlx migrate run)
@@ -228,8 +224,7 @@ schema: ## Regenerate schemas/program.schema.json from the domain types (commit 
 	$(Q)$(call need-file,crates/$(DOMAIN)/src/program/schema.rs,#56)
 	$(Q)UPDATE_SCHEMA=1 $(CARGO) test -p $(DOMAIN) $(LOCKED) program::schema
 
-icons: ## Regenerate the PNG icons from their SVG sources (needs rsvg-convert and ImageMagick)
-	$(Q)$(call need-file,$(APP_DIR)/icons/render.sh,#51)
+icons: ## Regenerate the PNG icons from the SVG sources (rsvg-convert, ImageMagick)
 	$(Q)$(call need-cmd,rsvg-convert,brew install librsvg)
 	$(Q)$(call need-cmd,magick,brew install imagemagick)
 	$(Q)sh $(APP_DIR)/icons/render.sh
@@ -255,7 +250,6 @@ ifneq ($(SW_TESTS),)
 endif
 
 test-db: ## Run the Postgres tests and check .sqlx/ (starts the compose database if needed)
-	$(Q)$(call need-file,$(MIGRATIONS),#50)
 	$(Q)$(need-sqlx)
 ifeq ($(origin TEST_DATABASE_URL),file)
 	$(Q)$(MAKE) db-up
@@ -293,7 +287,6 @@ sqlx-check: ## Build with SQLX_OFFLINE=true: fails if .sqlx/ is missing a query
 	$(Q)SQLX_OFFLINE=true $(CARGO) check -p $(APP) --all-targets --features server $(LOCKED)
 
 smoke: ## Build the release bundle, run it against Postgres and check it over HTTP
-	$(Q)$(call need-file,docker-compose.yml,#50)
 	$(Q)$(call need-cmd,psql,brew install libpq (the smoke test checks the migrations ran))
 ifeq ($(origin SMOKE_DATABASE_URL),file)
 	$(Q)$(MAKE) db-up
@@ -307,12 +300,11 @@ secrets: ## Scan the commits not on origin/main for secrets (needs gitleaks)
 	$(Q)gitleaks git --redact --exit-code 1 --log-opts="--remerge-diff $(SECRETS_RANGE)" .
 SECRETS_RANGE ?= origin/main..HEAD
 
-check: ## Run everything CI runs, in CI order (the Postgres steps start the compose database)
+check: ## Run everything CI runs, in CI order (starts the compose database)
 	$(Q)if command -v gitleaks >/dev/null 2>&1; then $(MAKE) secrets; \
 		else echo "==> secret scan skipped: gitleaks is not installed (CI runs it)"; fi
 	$(Q)$(MAKE) fmt-check lint test sqlx-check
-	$(Q)if [ -e docker-compose.yml ]; then $(MAKE) test-db smoke; \
-		else echo "==> Postgres tests and smoke test skipped: no docker-compose.yml yet (#50)"; fi
+	$(Q)$(MAKE) test-db smoke
 	$(Q)echo "==> check: all green"
 
 ##@ Build & deploy
@@ -324,12 +316,10 @@ build: ## Build the release bundle (dx bundle --web --release)
 	$(Q)echo "Bundle: $(BUNDLE_DIR)"
 
 docker-build: ## Build the production Docker image (IMAGE=iron-oxide)
-	$(Q)$(call need-file,Dockerfile,#52)
 	$(Q)$(need-docker)
 	$(Q)docker build -t $(IMAGE) $(DOCKER_BUILD_ARGS) .
 
 docker-run: db-up ## Run the Docker image against the local Postgres, on DOCKER_PORT
-	$(Q)$(call need-file,Dockerfile,#52)
 	$(Q)$(call step,$(IMAGE) on http://127.0.0.1:$(DOCKER_PORT))
 	$(Q)DATABASE_URL="$$(printf '%s' "$$SMOKE_DATABASE_URL" | sed 's/@localhost:/@host.docker.internal:/')" \
 		docker run --rm --init -p 127.0.0.1:$(DOCKER_PORT):8080 \
@@ -338,7 +328,6 @@ docker-run: db-up ## Run the Docker image against the local Postgres, on DOCKER_
 		$(IMAGE)
 
 deploy: ## Deploy main to Fly.io after `make check` (CONFIRM=1)
-	$(Q)$(call need-file,fly.toml,#52)
 	$(Q)$(call need-cmd,$(FLY),brew install flyctl)
 	$(Q)$(call need-confirm,deploys to production)
 	$(Q)test "$$(git rev-parse --abbrev-ref HEAD)" = main || { echo "make $@: deploy from main only." >&2; exit 1; }
@@ -347,13 +336,12 @@ deploy: ## Deploy main to Fly.io after `make check` (CONFIRM=1)
 	$(Q)$(FLY) deploy
 
 logs: ## Tail the production logs on Fly.io
-	$(Q)$(call need-file,fly.toml,#52)
 	$(Q)$(call need-cmd,$(FLY),brew install flyctl)
 	$(Q)$(FLY) logs
 
-##@ Mobile (see docs/dev/mobile-testing.md)
+##@ Mobile
 
-adb-reverse: ## Forward the Android device's localhost:APP_PORT to this machine (SERIAL=... to pick one)
+adb-reverse: ## Forward the Android device's localhost:APP_PORT here (SERIAL=... picks a device)
 	$(Q)$(call need-cmd,adb,Install Android Studio and put platform-tools on the PATH.)
 	$(Q)adb $(if $(SERIAL),-s $(SERIAL)) reverse tcp:$(APP_PORT) tcp:$(APP_PORT)
 	$(Q)adb $(if $(SERIAL),-s $(SERIAL)) reverse --list
@@ -390,4 +378,4 @@ clean: ## Delete the build output: cargo's target dir (the one in use) and dx's 
 clean-all: ## clean, and delete the local Postgres data (CONFIRM=1)
 	$(Q)$(call need-confirm,deletes the build output and every database of compose project '$(COMPOSE_PROJECT)')
 	$(Q)$(MAKE) clean
-	$(Q)if [ -e docker-compose.yml ]; then $(COMPOSE) down -v; fi
+	$(Q)$(COMPOSE) down -v

@@ -21,9 +21,6 @@ if [ -z "$log" ]; then
   log=$(mktemp)
   print_log=true
 fi
-# The PWA checks apply once the app ships its manifest (#51).
-pwa=false
-if [ -f crates/iron-oxide-app/public/manifest.webmanifest ]; then pwa=true; fi
 
 if curl -sf -o /dev/null "$base/healthz"; then
   echo "smoke-test: something already answers on port $port; stop it or set PORT." >&2
@@ -67,18 +64,16 @@ test -n "$wasm_files"
 for f in $wasm_files; do
   curl -sSf -o /dev/null -w '%{content_type}\n' "$base/${f#public/}" | grep -q '^application/wasm'
 done
-if $pwa; then
-  # PWA: the manifest and head tags are in the SSR page, and the static files are served at the root.
-  curl -sSf "$base/" | grep -q '<link rel="manifest" href="/manifest.webmanifest"'
-  curl -sSf "$base/" | grep -q 'navigator.serviceWorker.register(`/sw.js?build='
-  curl -sSf "$base/manifest.webmanifest" | grep -q '"short_name": "Fe2O3"'
-  curl -sSf "$base/sw.js?build=ci" | grep -q 'CACHE_VERSION'
-  for icon in icons/icon-192.png icons/icon-512.png icons/icon-maskable-512.png icons/apple-touch-icon.png favicon.ico; do
-    curl -sSf -o /dev/null "$base/$icon"
-  done
-  # An unknown hashed asset is a 404, not the SSR page (the service worker must never cache HTML as JS/wasm).
-  test "$(curl -s -o /dev/null -w '%{http_code}' "$base/assets/missing-dxh0.js")" = "404"
-fi
+# PWA: the manifest and head tags are in the SSR page, and the static files are served at the root.
+curl -sSf "$base/" | grep -q '<link rel="manifest" href="/manifest.webmanifest"'
+curl -sSf "$base/" | grep -q 'navigator.serviceWorker.register(`/sw.js?build='
+curl -sSf "$base/manifest.webmanifest" | grep -q '"short_name": "Fe2O3"'
+curl -sSf "$base/sw.js?build=ci" | grep -q 'CACHE_VERSION'
+for icon in icons/icon-192.png icons/icon-512.png icons/icon-maskable-512.png icons/apple-touch-icon.png favicon.ico; do
+  curl -sSf -o /dev/null "$base/$icon"
+done
+# An unknown hashed asset is a 404, not the SSR page (the service worker must never cache HTML as JS/wasm).
+test "$(curl -s -o /dev/null -w '%{http_code}' "$base/assets/missing-dxh0.js")" = "404"
 # The startup migrations ran. Not traced: the command line holds the database URL.
 { set +x; } 2>/dev/null
 echo "+ the users table exists"

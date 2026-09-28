@@ -64,7 +64,7 @@ else
 fi
 
 if [ -z "$SQLX_VERSION" ]; then
-  opt "sqlx-cli: skipped, sqlx is not a dependency yet (#50)"
+  opt "sqlx-cli: skipped, sqlx is not in Cargo.lock"
 else
   sqlx_have=$(version_of sqlx || true)
   if [ "$sqlx_have" = "$SQLX_VERSION" ]; then
