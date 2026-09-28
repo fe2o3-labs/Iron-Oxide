@@ -14,6 +14,8 @@ use uuid::Uuid;
 #[serde(transparent)]
 pub struct UserId(Uuid);
 
+// The browser build only receives these ids from the server; it never builds or unwraps one.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 impl UserId {
     /// Wraps an existing UUID (e.g. one read from the database).
     #[must_use]
@@ -39,6 +41,8 @@ impl fmt::Display for UserId {
 #[serde(transparent)]
 pub struct PasskeyId(Uuid);
 
+// The browser build only receives these ids from the server; it never builds or unwraps one.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 impl PasskeyId {
     /// Wraps an existing UUID.
     #[must_use]
@@ -141,6 +145,8 @@ pub enum GoogleCallbackMessage {
 
 /// The `BroadcastChannel` name the callback page also posts its message on, for when the popup
 /// has no `window.opener` (same-origin only by definition).
+// Used by the server (callback page) and the browser (listener) builds only.
+#[cfg_attr(not(any(feature = "server", feature = "web")), allow(dead_code))]
 pub const GOOGLE_CALLBACK_CHANNEL: &str = "iron-oxide-google-sign-in";
 
 #[cfg(test)]
