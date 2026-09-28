@@ -68,8 +68,9 @@ impl<T> From<&LoggedSet<T>> for WorkingSet {
 ///
 /// The same exercise can be prescribed differently on different days (5 × 5 at 80 % on day A,
 /// 3 × 3 at 90 % on day B) and in different versions of a program, so each past session is judged
-/// against its own prescription, never against the day being planned, and its outcome is applied
-/// with its own rule (increment and deload), never with a later version's.
+/// against its own prescription, never against the day being planned. Its rule applies the step
+/// from the previous judged session to this one, the step whose targets this version showed (see
+/// the [module documentation](super)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Prescription {
     /// Sets and reps (or time) asked for.

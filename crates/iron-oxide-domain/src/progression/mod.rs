@@ -27,10 +27,18 @@
 //! rule **on the day and program version that session was run from**. A program may prescribe the
 //! same exercise differently on different days (5 × 5 at 80 % on day A, 3 × 3 at 90 % on day B),
 //! and a new version may change it or its rule, so a past session is always judged against what it
-//! asked for, and its outcome applied with its own increment and deload, never with the day or
-//! version being planned. The planned `exercise` decides the sets and reps of the result and the
-//! rule that turns the **last** judged session into the next target (a new version's rule applies
-//! from the next step on, never to the past).
+//! asked for, never against the day or version being planned.
+//!
+//! **Which rule applies a session's outcome.** The step from session `N` to the next judged
+//! session `N + 1` uses the rule of the version that **produced the target shown for `N + 1`**:
+//! `N + 1`'s own prescription. The step from the last judged session to the next target uses the
+//! planned `exercise`'s rule. So a step is always replayed with the rule the lifter's next targets
+//! were computed with, and never changes once a later session is logged: a session done exactly
+//! as shown stays a success whatever versions follow, and a new version's increment or deload
+//! applies from the step it planned on, never to the past. A session done under a version whose
+//! rule is of another kind (a fixed-load version in a training max history, or the reverse, or no
+//! rule) moves nothing: no increment, no deload. The planned `exercise` also decides the sets and
+//! reps of the result.
 //!
 //! To build the history (the stored-history ticket, #18): for each session, load the program
 //! version it was run from (`Session::program_version_id`), and take
@@ -43,7 +51,9 @@
 //! number of sets are the **prescribed working sets**; the others are extras (a top single, a
 //! failed heavier attempt, back-off sets, extra AMRAP sets). The session screen (#28) must log
 //! extras after the prescribed sets, with indices from the prescribed count up, and leave a gap
-//! for a skipped working set, so that an extra is never taken for a working set.
+//! for a skipped working set, so that an extra is never taken for a working set. When an index
+//! appears more than once (a set retried or logged twice), only its first occurrence in set order
+//! counts; `exercise_history` keeps the logging order within an index.
 //!
 //! # Judging a session
 //!
@@ -101,7 +111,7 @@
 //!   weight is cut to `× (1 − percent)`, rounded to a lighter step (a training max: exactly), and
 //!   the failure count starts again from zero, so the session after a deload needs a fresh streak
 //!   before the next one. A success, a hold, or a session that cannot be judged also resets the
-//!   count. Each session's failure counts against its own version's deload setting.
+//!   count. Each step's deload setting comes from the rule that applies it (see above).
 //!
 //! For weight rules, the base is what was actually lifted, not what was prescribed: going heavier
 //! than the target moves the base up, and going lighter moves it down.
@@ -125,7 +135,9 @@
 //! 1. **Progression**: the exercise has a rule and a history. One weight and one rep target for
 //!    every set.
 //! 2. **Last performance**: no rule (or timed work) and a history. Set `i` repeats the weight of
-//!    working set `i` of the last session (the last set when fewer were done). Reps stay the
+//!    the last session's working set with index `i`; a set not done repeats the one done before
+//!    it (or the first one done). Extras (indices at or above the planned count) are never used;
+//!    with no working set at all, the program's load. Reps stay the
 //!    program's fixed count; for a range, the last reps clamped into the range. Timed work keeps
 //!    the program's seconds and rounds: a short hold last time does not shorten the target.
 //! 3. **Program default**: no history. The program's load (a fixed weight, or a percentage of the

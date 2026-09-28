@@ -33,9 +33,9 @@ pub enum SessionVerdict {
 ///   [`Prescription`], filtered as described in the [module documentation](super) (build it with
 ///   [`exercise_history`](super::exercise_history)).
 ///
-/// Each past session is judged against its own prescription, and its outcome applied with its
-/// own rule; `exercise` gives the rule applied to the last judged session, and the sets and reps
-/// of the result.
+/// Each past session is judged against its own prescription. The step from one judged session to
+/// the next uses the next one's rule (the version that showed its targets); `exercise` gives the
+/// rule for the step from the last judged session, and the sets and reps of the result.
 ///
 /// Returns [`NextTargets::NeedsTrainingMax`] when the load is a percentage of the training max
 /// and `training_max` is `None`. Never fails otherwise: a program that did not pass validation
@@ -184,8 +184,7 @@ enum Replayed<'a> {
     Unjudged,
 }
 
-/// Sorts the sessions for a rule's replay, and gives the position of the last judged one (whose
-/// outcome is applied with the planned rule).
+/// Sorts the sessions for a rule's replay, and gives the position of the last judged one.
 fn replay<'a>(sessions: &[&'a PastSession]) -> (Vec<Replayed<'a>>, Option<usize>) {
     let replayed: Vec<Replayed<'a>> = sessions
         .iter()
@@ -210,11 +209,48 @@ fn replay<'a>(sessions: &[&'a PastSession]) -> (Vec<Replayed<'a>>, Option<usize>
     (replayed, last)
 }
 
+/// The rule that applies the outcome of the judged session at `index`: the rule of the version
+/// that produced the target shown for the next judged session (that session's own
+/// prescription), or `None` for the last judged session, whose outcome the planned rule applies.
+/// A transition is so always replayed with the rule that produced the target the lifter saw next,
+/// and never changes once a later session is logged.
+fn next_rule(replayed: &[Replayed<'_>], index: usize) -> Option<ProgressionRule> {
+    replayed
+        .get(index + 1..)?
+        .iter()
+        .find_map(|entry| match entry {
+            Replayed::Judged(session) => Some(session.prescription.rule),
+            Replayed::Unjudged => None,
+        })
+}
+
+/// Makes the summary agree with the failure count when sessions that cannot be judged ended the
+/// streak after the last judged one.
+fn with_failures(change: Option<ChangeKind>, failures: u16) -> Option<ChangeKind> {
+    change.map(|kind| match kind {
+        ChangeKind::Unchanged { weight, .. } => ChangeKind::Unchanged {
+            weight,
+            failed_sessions: failures,
+        },
+        ChangeKind::TrainingMaxUnchanged { training_max, .. } => ChangeKind::TrainingMaxUnchanged {
+            training_max,
+            failed_sessions: failures,
+        },
+        other => other,
+    })
+}
+
 /// The prescribed working sets of a session: those with a `set_index` below the prescribed
-/// number of sets. Extra sets (a top single, a back-off set) are left out.
-fn prescribed_sets(sets: &[WorkingSet], prescribed: u16) -> impl Iterator<Item = &WorkingSet> {
+/// number of sets, in the given order. Extra sets (a top single, a back-off set) are left out,
+/// and when an index appears more than once (a retried set), only its first occurrence counts.
+fn prescribed_sets(sets: &[WorkingSet], prescribed: u16) -> Vec<&WorkingSet> {
+    let mut seen = vec![false; usize::from(prescribed.max(1))];
     sets.iter()
-        .filter(move |set| set.set_index < prescribed.max(1))
+        .filter(|set| {
+            seen.get_mut(usize::from(set.set_index))
+                .is_some_and(|slot| !std::mem::replace(slot, true))
+        })
+        .collect()
 }
 
 /// The verdict from the rep counts of the sets that count: the `n`-th best decides. Also
@@ -239,10 +275,12 @@ fn verdict(mut reps: Vec<Reps>, prescribed: u16, target: RepTarget) -> (SessionV
 /// weight (the base) is the lightest of them that has a weight; with none, `fallback`.
 fn judge_weighted(session: &Judgeable<'_>, fallback: Weight) -> (SessionVerdict, Reps, Weight) {
     let base = prescribed_sets(session.sets, session.prescribed)
+        .into_iter()
         .filter_map(|set| set.weight)
         .min()
         .unwrap_or(fallback);
     let reps = prescribed_sets(session.sets, session.prescribed)
+        .into_iter()
         .map(|set| set.reps)
         .collect();
     let (verdict, reached) = verdict(reps, session.prescribed, session.target);
@@ -253,6 +291,7 @@ fn judge_weighted(session: &Judgeable<'_>, fallback: Weight) -> (SessionVerdict,
 /// `at_least` count.
 fn judge_at_least(session: &Judgeable<'_>, at_least: Weight) -> SessionVerdict {
     let reps = prescribed_sets(session.sets, session.prescribed)
+        .into_iter()
         .filter(|set| set.weight.unwrap_or(Weight::ZERO) >= at_least)
         .map(|set| set.reps)
         .collect();
@@ -318,15 +357,55 @@ struct Outcome {
 }
 
 impl Outcome {
-    /// Past sessions apply the rule of their own program version; any rule without an increment
-    /// adds nothing.
-    fn of(rule: ProgressionRule) -> Self {
-        Self {
-            increment: rule
-                .increment()
-                .map_or(Weight::ZERO, |increment| increment.weight()),
-            deload: rule.deload(),
-            double: matches!(rule, ProgressionRule::DoubleProgression { .. }),
+    /// Nothing: no increment, no deload.
+    const NOTHING: Self = Self {
+        increment: Weight::ZERO,
+        deload: None,
+        double: false,
+    };
+
+    /// Whether this moves nothing: the rule was of another kind (or none).
+    fn is_nothing(self) -> bool {
+        self.increment.is_zero() && self.deload.is_none() && !self.double
+    }
+
+    /// A version's rule applied to a weight: only a weight rule moves the weight.
+    fn for_weight(rule: ProgressionRule) -> Self {
+        match rule {
+            ProgressionRule::AddWhenTopOfRange {
+                increment,
+                deload_after_failures,
+            } => Self {
+                increment: increment.weight(),
+                deload: deload_after_failures,
+                double: false,
+            },
+            ProgressionRule::DoubleProgression {
+                increment,
+                deload_after_failures,
+            } => Self {
+                increment: increment.weight(),
+                deload: deload_after_failures,
+                double: true,
+            },
+            ProgressionRule::TrainingMax { .. } | ProgressionRule::None => Self::NOTHING,
+        }
+    }
+
+    /// A version's rule applied to the training max: only the training max rule moves it.
+    fn for_training_max(rule: ProgressionRule) -> Self {
+        match rule {
+            ProgressionRule::TrainingMax {
+                increment,
+                deload_after_failures,
+            } => Self {
+                increment: increment.weight(),
+                deload: deload_after_failures,
+                double: false,
+            },
+            ProgressionRule::AddWhenTopOfRange { .. }
+            | ProgressionRule::DoubleProgression { .. }
+            | ProgressionRule::None => Self::NOTHING,
         }
     }
 }
@@ -366,10 +445,11 @@ fn weight_rule(sessions: &[&PastSession], rule: &WeightRule) -> Plan {
             failures = 0;
             continue;
         };
-        let outcome = if Some(index) == last {
-            rule.planned
+        // A session done under a version without a weight rule moves nothing.
+        let outcome = if Outcome::for_weight(session.prescription.rule).is_nothing() {
+            Outcome::NOTHING
         } else {
-            Outcome::of(session.prescription.rule)
+            next_rule(&replayed, index).map_or(rule.planned, Outcome::for_weight)
         };
         let fallback = match session.prescription.load {
             Some(Load::Weight(load)) => load.weight(),
@@ -459,7 +539,7 @@ fn weight_rule(sessions: &[&PastSession], rule: &WeightRule) -> Plan {
         training_max: None,
         failed_sessions: failures,
         last_verdict,
-        change,
+        change: with_failures(change, failures),
     }
 }
 
@@ -477,8 +557,8 @@ struct TrainingMaxRule {
 
 /// `training_max`: replays the history on the training max, starting from the one entered.
 /// Nothing in the replay depends on the settings: sessions are judged against their own
-/// prescription with a fixed tolerance, and their outcome is applied with their own rule
-/// (increments added exactly, deloads exact); only the last judged session uses the planned rule.
+/// prescription with a fixed tolerance, and each step uses the rule that showed the next targets
+/// (increments added exactly, deloads exact).
 fn training_max_rule(sessions: &[&PastSession], rule: &TrainingMaxRule) -> Plan {
     let (replayed, last) = replay(sessions);
     let mut training_max = rule.training_max;
@@ -490,10 +570,11 @@ fn training_max_rule(sessions: &[&PastSession], rule: &TrainingMaxRule) -> Plan 
             failures = 0;
             continue;
         };
-        let outcome = if Some(index) == last {
-            rule.planned
+        // A session done under a version without the training max rule moves nothing.
+        let outcome = if Outcome::for_training_max(session.prescription.rule).is_nothing() {
+            Outcome::NOTHING
         } else {
-            Outcome::of(session.prescription.rule)
+            next_rule(&replayed, index).map_or(rule.planned, Outcome::for_training_max)
         };
         let at_least = training_max_threshold(session.prescription, training_max);
         let verdict = judge_at_least(session, at_least);
@@ -550,7 +631,7 @@ fn training_max_rule(sessions: &[&PastSession], rule: &TrainingMaxRule) -> Plan 
         training_max: Some(training_max),
         failed_sessions: failures,
         last_verdict,
-        change,
+        change: with_failures(change, failures),
     }
 }
 
@@ -577,9 +658,17 @@ fn no_rule(exercise: &Exercise, sessions: &[&PastSession], default_weight: Optio
             change: None,
         };
     };
-    let working = (0..usize::from(count))
+    // The last session's working sets by index; extras (index at or above the planned count)
+    // are left out. A set not done repeats the last one done before it, else the first one.
+    let done_sets = prescribed_sets(&last.sets, count);
+    let working = (0..count)
         .map(|index| {
-            let done = last.sets.get(index).or_else(|| last.sets.last());
+            let done = done_sets
+                .iter()
+                .filter(|set| set.set_index <= index)
+                .max_by_key(|set| set.set_index)
+                .or_else(|| done_sets.iter().min_by_key(|set| set.set_index))
+                .copied();
             let weight = done.and_then(|set| set.weight).or(default_weight);
             let goal = match (goal, exercise.work, done) {
                 (
@@ -986,24 +1075,116 @@ mod tests {
             failures: 2,
             percent: pct(10.0),
         });
-        let double = Outcome::of(ProgressionRule::DoubleProgression {
+        let add = ProgressionRule::AddWhenTopOfRange {
             increment,
             deload_after_failures: deload,
-        });
-        assert!(double.double);
-        assert_eq!(double.increment, kg(2.5));
-        assert_eq!(double.deload, deload);
-        let none = Outcome::of(ProgressionRule::None);
-        assert!(!none.double);
-        assert_eq!(none.increment, Weight::ZERO);
-        assert_eq!(none.deload, None);
-        assert!(
-            !Outcome::of(ProgressionRule::TrainingMax {
-                increment,
-                deload_after_failures: None
-            })
-            .double
+        };
+        let double = ProgressionRule::DoubleProgression {
+            increment,
+            deload_after_failures: deload,
+        };
+        let tm = ProgressionRule::TrainingMax {
+            increment,
+            deload_after_failures: deload,
+        };
+        let check = |outcome: Outcome, increment: Weight, deload: Option<Deload>, double: bool| {
+            assert_eq!(outcome.increment, increment);
+            assert_eq!(outcome.deload, deload);
+            assert_eq!(outcome.double, double);
+        };
+        check(Outcome::for_weight(add), kg(2.5), deload, false);
+        check(Outcome::for_weight(double), kg(2.5), deload, true);
+        check(Outcome::for_training_max(tm), kg(2.5), deload, false);
+        // A rule of another kind moves nothing.
+        for (outcome, _) in [
+            (Outcome::for_weight(tm), ()),
+            (Outcome::for_weight(ProgressionRule::None), ()),
+            (Outcome::for_training_max(add), ()),
+            (Outcome::for_training_max(double), ()),
+            (Outcome::for_training_max(ProgressionRule::None), ()),
+        ] {
+            check(outcome, Weight::ZERO, None, false);
+        }
+    }
+
+    #[test]
+    fn duplicate_indices_count_once() {
+        let set = |index, reps| WorkingSet::new(kg(HUNDRED), Reps::new(reps)).at(index);
+        let sets = [set(0, 0), set(0, 5), set(1, 5), set(1, 1), set(5, 9)];
+        let reps: Vec<u16> = prescribed_sets(&sets, 3)
+            .iter()
+            .map(|set| set.reps.get())
+            .collect();
+        assert_eq!(reps, [0, 5], "first occurrence of 0 and 1; 5 is an extra");
+        assert!(prescribed_sets(&sets, 0).len() == 1, "at least one set");
+        assert!(prescribed_sets(&[set(u16::MAX, 5)], u16::MAX).is_empty());
+    }
+
+    #[test]
+    fn transitions_use_the_next_sessions_rule() {
+        let five = RepTarget::Fixed(Reps::new(5));
+        let with_rule = |rule| {
+            PastSession::new(
+                Prescription {
+                    rule,
+                    ..prescription(3, five, None)
+                },
+                sets(HUNDRED, &[5]),
+            )
+        };
+        let increment = UnitWeight::new(2.5, crate::Unit::Kg).unwrap();
+        let tm = ProgressionRule::TrainingMax {
+            increment,
+            deload_after_failures: None,
+        };
+        let first = with_rule(ProgressionRule::None);
+        let second = with_rule(tm);
+        let unknown = PastSession::without_prescription(sets(HUNDRED, &[5]));
+        let sessions = [&first, &unknown, &second];
+        let (replayed, _) = replay(&sessions);
+        assert_eq!(
+            next_rule(&replayed, 0),
+            Some(tm),
+            "skips the unjudged session"
         );
+        assert_eq!(
+            next_rule(&replayed, 2),
+            None,
+            "the last one: the planned rule"
+        );
+        assert_eq!(next_rule(&replayed, 9), None);
+    }
+
+    #[test]
+    fn summaries_agree_with_the_failure_count() {
+        let unchanged = ChangeKind::Unchanged {
+            weight: kg(HUNDRED),
+            failed_sessions: 1,
+        };
+        assert_eq!(
+            with_failures(Some(unchanged), 0),
+            Some(ChangeKind::Unchanged {
+                weight: kg(HUNDRED),
+                failed_sessions: 0
+            })
+        );
+        let tm = ChangeKind::TrainingMaxUnchanged {
+            training_max: kg(HUNDRED),
+            failed_sessions: 2,
+        };
+        assert_eq!(
+            with_failures(Some(tm), 0),
+            Some(ChangeKind::TrainingMaxUnchanged {
+                training_max: kg(HUNDRED),
+                failed_sessions: 0
+            })
+        );
+        let up = ChangeKind::WeightIncrease {
+            from: kg(HUNDRED),
+            to: kg(102.5),
+        };
+        assert_eq!(with_failures(Some(up), 0), Some(up));
+        assert_eq!(with_failures(None, 0), None);
     }
 
     #[test]

@@ -290,8 +290,17 @@ proptest! {
             prop_assert!(weight < working || working.as_nanograms() < 10_000);
         }
 
-        // The failure count stays below the deload threshold.
-        if let Some(deload) = exercise.progression.deload() {
+        // The failure count stays below the deload threshold, when the last judged session ran
+        // under a rule of the same kind (under another kind, it moves nothing, not even a deload).
+        let last_rule = history
+            .iter()
+            .rev()
+            .find(|session| counts(session))
+            .and_then(|session| session.prescription)
+            .map(|prescription| prescription.rule.name());
+        if let Some(deload) = exercise.progression.deload()
+            && last_rule.is_none_or(|name| name == exercise.progression.name())
+        {
             prop_assert!(targets.failed_sessions < deload.failures);
         }
 
@@ -417,10 +426,10 @@ proptest! {
     }
 
     /// Extra sets logged after the prescribed ones (a top single, a failed attempt, back-off
-    /// sets) change nothing.
+    /// sets) change nothing, with or without a rule.
     #[test]
     fn extra_sets_change_nothing(
-        exercise in exercise(),
+        exercise in prop_oneof![exercise(), exercise().prop_map(without_rule)],
         training_max in weight(),
         settings in settings(),
         raw in history(),
@@ -428,6 +437,7 @@ proptest! {
     ) {
         let history = resolve(&exercise, &raw);
         let before = ready(next_targets(&exercise, Some(training_max), settings, &history));
+        let planned = exercise.work.sets();
         let with_extras: Vec<PastSession> = history
             .iter()
             .map(|session| {
@@ -437,7 +447,9 @@ proptest! {
                 };
                 let mut extended = session.clone();
                 if !session.is_empty() {
-                    let first_extra = prescribed.max(u16::try_from(session.sets.len()).unwrap());
+                    let first_extra = prescribed
+                        .max(planned)
+                        .max(u16::try_from(session.sets.len()).unwrap());
                     extended.sets.extend(extras.iter().zip(first_extra..).map(|((w, r), i)| {
                         WorkingSet::new(*w, Reps::new(*r)).at(i)
                     }));
@@ -447,5 +459,196 @@ proptest! {
             .collect();
         let after = ready(next_targets(&exercise, Some(training_max), settings, &with_extras));
         prop_assert_eq!(before, after);
+    }
+}
+
+/// The same exercise without a progression rule.
+fn without_rule(mut exercise: Exercise) -> Exercise {
+    exercise.progression = ProgressionRule::None;
+    exercise
+}
+
+/// What the lifter does with the targets shown.
+#[derive(Debug, Clone, Copy)]
+enum Act {
+    /// Every set at the target weight, at the top of the range.
+    Top,
+    /// Every set at the target weight and the rep goal shown.
+    Goal,
+    /// One set short.
+    Short,
+    /// The last set one rep short.
+    Fewer,
+    /// As `Top`, plus a light back-off set.
+    BackOff,
+    /// As `Top`, plus a failed heavy attempt.
+    Attempt,
+    /// The exercise skipped.
+    Skip,
+}
+
+fn act() -> impl Strategy<Value = Act> {
+    prop_oneof![
+        4 => Just(Act::Top),
+        2 => Just(Act::Goal),
+        1 => Just(Act::Short),
+        1 => Just(Act::Fewer),
+        1 => Just(Act::BackOff),
+        1 => Just(Act::Attempt),
+        1 => Just(Act::Skip),
+    ]
+}
+
+/// A version's rule of `kind` (0: add when top of range, 1: double progression, 2: training max).
+fn rule_of_kind(kind: u8) -> impl Strategy<Value = ProgressionRule> {
+    (
+        1_u32..=10_000,
+        proptest::option::of((1_u16..=4, 1_u32..=5_000)),
+    )
+        .prop_map(move |(grams, deload)| {
+            let increment = UnitWeight::new(f64::from(grams) / 1_000.0, Unit::Kg).unwrap();
+            let deload_after_failures = deload.map(|(failures, bp)| Deload {
+                failures,
+                percent: Percent::from_basis_points(bp).unwrap(),
+            });
+            match kind {
+                0 => ProgressionRule::AddWhenTopOfRange {
+                    increment,
+                    deload_after_failures,
+                },
+                1 => ProgressionRule::DoubleProgression {
+                    increment,
+                    deload_after_failures,
+                },
+                _ => ProgressionRule::TrainingMax {
+                    increment,
+                    deload_after_failures,
+                },
+            }
+        })
+}
+
+/// 1 to 3 versions of one exercise, all with a rule of `kind`, each with 1 or 2 days.
+fn versions(kind: u8) -> impl Strategy<Value = Vec<Vec<Exercise>>> {
+    let day = (1_u16..=5, rep_target(), 40_u32..=110, 20_u32..=150);
+    let version = (rule_of_kind(kind), proptest::collection::vec(day, 1..=2)).prop_map(
+        move |(rule, days)| {
+            days.into_iter()
+                .map(|(sets, target, percent, load)| {
+                    let reps = if kind == 1 {
+                        RepTarget::Range(RepRange {
+                            min: target.min(),
+                            max: Reps::new(target.max().get().max(target.min().get() + 1)),
+                        })
+                    } else {
+                        target
+                    };
+                    let load = if kind == 2 {
+                        Load::PercentOfTrainingMax(Percent::new(f64::from(percent)).unwrap())
+                    } else {
+                        Load::Weight(UnitWeight::new(f64::from(load), Unit::Kg).unwrap())
+                    };
+                    Exercise {
+                        id: ExerciseId::new("lift").unwrap(),
+                        name: "Lift".to_owned(),
+                        work: Work::Reps { sets, reps },
+                        load: Some(load),
+                        rest: Seconds::new(90),
+                        tempo: None,
+                        notes: None,
+                        demo_url: None,
+                        warmup: Vec::new(),
+                        superset: None,
+                        progression: rule,
+                    }
+                })
+                .collect::<Vec<_>>()
+        },
+    );
+    proptest::collection::vec(version, 1..=3)
+}
+
+fn chain_settings() -> Vec<ProgressionSettings> {
+    let kg = |value| Weight::from_kg(value).unwrap();
+    let lb = |value| Weight::from_lb(value).unwrap();
+    vec![
+        ProgressionSettings::for_unit(Unit::Kg),
+        ProgressionSettings::for_unit(Unit::Lb),
+        ProgressionSettings::new(Unit::Kg, kg(1.25)).unwrap(),
+        ProgressionSettings::new(Unit::Kg, kg(1.0)).unwrap(),
+        ProgressionSettings::new(Unit::Kg, kg(0.25)).unwrap(),
+        ProgressionSettings::new(Unit::Lb, lb(2.5)).unwrap(),
+        ProgressionSettings::new(Unit::Lb, lb(5.5)).unwrap(),
+        ProgressionSettings::new(Unit::Kg, ProgressionSettings::max_step()).unwrap(),
+        ProgressionSettings::new(Unit::Kg, Weight::from_nanograms(1).unwrap()).unwrap(),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(3_000))]
+
+    /// Sessions planned from random versions and days, under random settings, and done from the
+    /// targets shown: done as shown at the top of the range is a success, at the rep goal never a
+    /// failure, one set short a failure; and every version and day agrees, under every setting,
+    /// on the verdict, the failure count and the training max.
+    #[test]
+    fn chains_across_versions_done_as_shown(
+        versions in (0_u8..3).prop_flat_map(versions),
+        training_max in weight(),
+        steps in proptest::collection::vec((0_usize..3, 0_usize..2, 0_usize..9, act()), 1..=8),
+    ) {
+        let all = chain_settings();
+        let tm = Some(training_max);
+        let mut history: Vec<PastSession> = Vec::new();
+        for (v, d, s, act) in steps {
+            let days = &versions[v % versions.len()];
+            let planned = &days[d % days.len()];
+            let shown = ready(next_targets(planned, tm, all[s], &history));
+            let Work::Reps { reps: target, .. } = planned.work else { unreachable!() };
+            let mut sets: Vec<WorkingSet> = shown
+                .working
+                .iter()
+                .map(|set| {
+                    let reps = match (act, set.goal) {
+                        (Act::Goal, SetGoal::Reps { reps, .. }) => reps,
+                        _ => target.max(),
+                    };
+                    WorkingSet::new(set.weight.unwrap(), reps)
+                })
+                .collect();
+            match act {
+                Act::Short => { sets.pop(); }
+                Act::Fewer => {
+                    let last = sets.last_mut().unwrap();
+                    last.reps = Reps::new(last.reps.get().saturating_sub(1));
+                }
+                Act::BackOff => sets.push(WorkingSet::new(Weight::from_kg(20.0).unwrap(), Reps::new(10))),
+                Act::Attempt => sets.push(WorkingSet::new(Weight::MAX, Reps::ZERO)),
+                Act::Skip => sets.clear(),
+                Act::Top | Act::Goal => {}
+            }
+            let skipped = sets.is_empty();
+            history.push(PastSession::in_order(Prescription::of(planned), sets));
+            if !skipped {
+                let after = ready(next_targets(planned, tm, all[0], &history));
+                match act {
+                    Act::Top | Act::BackOff | Act::Attempt => {
+                        prop_assert_eq!(after.last_verdict, Some(SessionVerdict::Success));
+                    }
+                    Act::Goal => prop_assert_ne!(after.last_verdict, Some(SessionVerdict::Failure)),
+                    Act::Short => prop_assert_eq!(after.last_verdict, Some(SessionVerdict::Failure)),
+                    Act::Fewer | Act::Skip => {}
+                }
+            }
+            for day in versions.iter().flatten() {
+                let first = ready(next_targets(day, tm, all[0], &history));
+                for settings in &all[1..] {
+                    let other = ready(next_targets(day, tm, *settings, &history));
+                    prop_assert_eq!(other.last_verdict, first.last_verdict);
+                    prop_assert_eq!(other.failed_sessions, first.failed_sessions);
+                    prop_assert_eq!(other.training_max, first.training_max);
+                }
+            }
+        }
     }
 }
