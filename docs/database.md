@@ -226,9 +226,7 @@ Postgres"]`, inside the `server/db` modules (the app is a binary crate, so integ
 applies every migration and drops it afterwards, so tests are isolated and run in parallel.
 
 ```sh
-docker compose up -d --wait
-DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
-  cargo test -p iron-oxide-app --features server -- --ignored
+make test-db   # starts the compose database, migrates it, checks .sqlx/, runs the tests
 ```
 
 `server/db/testing.rs` has the helpers: `users_a_and_b` (A owns the data, B tries to reach it),
