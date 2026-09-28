@@ -12,11 +12,16 @@ A strength-training PWA written in Rust with [Dioxus](https://dioxuslabs.com) fu
 
 ## Pinned versions
 
-| Tool | Version | Where |
-|---|---|---|
-| Rust | 1.98.1 (stable), with the `wasm32-unknown-unknown` target | `rust-toolchain.toml` |
-| Dioxus | 0.7.10 (latest stable; 0.8 is still alpha) | `Cargo.toml`, pinned with `=` |
-| `dx` (Dioxus CLI) | 0.7.10 | must match the `dioxus` crate version |
+Everything is pinned to its latest stable release and kept current by Renovate (`renovate.json`).
+
+| Tool | Where it is pinned |
+|---|---|
+| Rust (stable) + the `wasm32-unknown-unknown` target | `rust-toolchain.toml` |
+| Dioxus | `dioxus` in `Cargo.toml`, pinned exactly with `=` |
+| `dx` (Dioxus CLI) | this README, `.github/workflows/ci.yml` (and the Dockerfile) |
+
+The `dx` version must always equal the `dioxus` crate version. Renovate bumps them together in one
+PR, through the `# renovate: datasource=crate depName=dioxus-cli` markers.
 
 ## Toolchain
 
@@ -25,7 +30,7 @@ is installed, its `cargo` ignores the file and uses whatever version Homebrew sh
 
 ```sh
 which cargo        # should be ~/.cargo/bin/cargo, not /opt/homebrew/bin/cargo
-cargo --version    # should print 1.98.1
+cargo --version    # should print the version pinned in rust-toolchain.toml
 ```
 
 If it doesn't, put `~/.cargo/bin` first on your `PATH` (or `brew uninstall rust`). rustup installs
@@ -42,10 +47,12 @@ that bypasses the config (for example, one that sets `RUSTFLAGS`, which override
 ## Install the Dioxus CLI
 
 ```sh
+# renovate: datasource=crate depName=dioxus-cli
 cargo install dioxus-cli --locked --version 0.7.10
-# or a prebuilt binary: cargo binstall dioxus-cli@0.7.10
-dx --version   # dioxus 0.7.10
+dx --version   # must match the `dioxus` version in Cargo.toml
 ```
+
+`cargo binstall dioxus-cli@<same version>` installs the official prebuilt binary instead, which is much faster.
 
 ## Develop
 
