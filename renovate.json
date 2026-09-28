@@ -10,11 +10,12 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Versions pinned on the line after a `# renovate: datasource=… depName=…` comment (dx CLI, gitleaks) in CI, the README and the Dockerfile",
+      "description": "Versions pinned on the line after a `# renovate: datasource=… depName=…` comment (dx CLI, gitleaks, Rust toolchain) in CI, the README, the Dockerfile and rust-toolchain.toml",
       "managerFilePatterns": [
         "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/",
         "/(^|/)README\\.md$/",
-        "/(^|/)Dockerfile$/"
+        "/(^|/)Dockerfile$/",
+        "/(^|/)rust-toolchain\\.toml$/"
       ],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: extractVersion=(?<extractVersion>\\S+))?\\s*\\n[^\\n]*?(?<currentValue>\\d+\\.\\d+\\.\\d+)"
