@@ -6,6 +6,7 @@
 //! and the user and call them.
 
 pub mod error;
+pub mod errors_layer;
 pub mod history;
 pub mod sessions;
 pub mod settings;

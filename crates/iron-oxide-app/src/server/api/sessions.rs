@@ -136,6 +136,27 @@ mod tests {
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
     #[ignore = "needs Postgres"]
+    async fn arguments_that_do_not_decode_are_422(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let mut a = api.user("A").await;
+        for body in [
+            json!({ "session_id": "not-a-uuid" }),
+            json!({ "session_id": 5 }),
+            json!({}),
+        ] {
+            let error = a.call_err(GET, body).await;
+            assert_eq!(
+                error,
+                testing::CallError {
+                    status: dioxus::server::axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    message: "Invalid request.".to_owned(),
+                }
+            );
+        }
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
     async fn get_session_needs_a_signed_in_user(db: PgPool) {
         let api = TestApi::new(db).await;
         let a = api.user("A").await;
