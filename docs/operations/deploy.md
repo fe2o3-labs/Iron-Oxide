@@ -105,11 +105,11 @@ fly secrets deploy
 | Key | Required | What |
 |---|---|---|
 | `DATABASE_URL` | yes | Neon **direct** connection string (host without `-pooler`) with `?sslmode=require` (decision #39). The pooled endpoint breaks sqlx prepared statements and migrations. |
-| `APP_BASE_URL` | yes | Public URL: `https://iron-oxide.fly.dev` until the custom domain is live, then `https://iron-oxyde.com`. |
-| `WEBAUTHN_RP_ID` | yes | Passkey relying party id: the bare domain, `iron-oxyde.com` (`iron-oxide.fly.dev` while on the Fly hostname). Passkeys are bound to it: those made on the Fly hostname do not carry over. |
-| `WEBAUTHN_ORIGIN` | yes | The origin of `APP_BASE_URL`, e.g. `https://iron-oxyde.com` (the server refuses anything else). |
+| `APP_BASE_URL` | yes | Public URL of the app: `https://iron-oxide.fly.dev` until the custom domain is live, then `https://app.iron-oxyde.com` (the apex `iron-oxyde.com` is the landing page, #70). |
+| `WEBAUTHN_RP_ID` | yes | Passkey relying party id: the **parent** domain `iron-oxyde.com`, not `app.iron-oxyde.com`, so passkeys keep working if the app moves to another subdomain. `iron-oxide.fly.dev` while on the Fly hostname (`fly.dev` is a public suffix, so no parent is allowed there). Passkeys are bound to it: those made on the Fly hostname do not carry over. |
+| `WEBAUTHN_ORIGIN` | yes | The origin of `APP_BASE_URL`: `https://app.iron-oxyde.com` (the server refuses anything else). |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | yes | OAuth "Web application" client from the Google Cloud console (see docs/auth.md). |
-| `GOOGLE_REDIRECT_URL` | yes | `APP_BASE_URL`'s origin + `/auth/google/callback`, e.g. `https://iron-oxyde.com/auth/google/callback`, also registered in the Google client. |
+| `GOOGLE_REDIRECT_URL` | yes | `APP_BASE_URL`'s origin + `/auth/google/callback`: `https://app.iron-oxyde.com/auth/google/callback`, also registered in the Google client. |
 | `SESSION_KEY` | yes | Session cookie key, at least 64 random bytes, base64. Generate it and pipe it to `fly secrets import` as shown above; never print it. Use a key that exists nowhere else. |
 | `RUST_LOG` | no | Log filter, e.g. `info,sqlx=warn`. Not a secret: it can go in `[env]` in `fly.toml`. |
 
@@ -184,72 +184,64 @@ gh workflow run deploy.yml --repo guizmaii-opensource/Iron-Oxide --ref main
 gh run watch --repo guizmaii-opensource/Iron-Oxide
 ```
 
-### 6. Custom domain `iron-oxyde.com`
+### 6. Custom domain `app.iron-oxyde.com`
 
-Do this once the Route 53 registration of `iron-oxyde.com` is complete. Until then, use
-`https://iron-oxide.fly.dev`.
+The app is served at `https://app.iron-oxyde.com`. The apex `iron-oxyde.com` is the landing page
+(#70) and is not served by this Fly app. Do this once the Route 53 registration of
+`iron-oxyde.com` is complete; until then, use `https://iron-oxide.fly.dev`.
 
-1. Make sure the app has an IPv6 and a shared IPv4 address (the first deploy normally allocates
-   both):
-
-   ```sh
-   fly ips list
-   # if missing:
-   fly ips allocate-v6
-   fly ips allocate-v4 --shared
-   ```
-
-2. Ask Fly for certificates for the apex and `www`:
+1. Ask Fly for a certificate for the app's host:
 
    ```sh
-   fly certs add iron-oxyde.com
-   fly certs add www.iron-oxyde.com
+   fly certs add app.iron-oxyde.com
    ```
 
-   Each command prints the DNS records to create. **Copy the records from that output**, not from
-   this page: the addresses and the challenge target are specific to the app.
+   It prints the DNS records to create. **Copy the records from that output**, not from this
+   page: the challenge target is specific to the app.
 
-3. In Route 53, hosted zone `iron-oxyde.com`, create:
+2. In Route 53, hosted zone `iron-oxyde.com`, create:
 
    | Name | Type | Value |
    |---|---|---|
-   | `iron-oxyde.com` | `A` | the app's shared IPv4, from `fly ips list` |
-   | `iron-oxyde.com` | `AAAA` | the app's IPv6, from `fly ips list` |
-   | `www.iron-oxyde.com` | `CNAME` | `iron-oxide.fly.dev` |
-   | `_acme-challenge.iron-oxyde.com` | `CNAME` | the target printed by `fly certs add` |
-   | `_acme-challenge.www.iron-oxyde.com` | `CNAME` | the target printed by `fly certs add` |
+   | `app.iron-oxyde.com` | `CNAME` | `iron-oxide.fly.dev` |
+   | `_acme-challenge.app.iron-oxyde.com` | `CNAME` | the target printed by `fly certs add` |
 
-   The apex uses plain A and AAAA records, as Fly recommends. A Route 53 `ALIAS` record can only
-   point at AWS resources or records in the same hosted zone, so it cannot target `*.fly.dev`,
-   and a `CNAME` is not allowed at the apex. The `_acme-challenge` records let Fly issue and
-   renew the Let's Encrypt certificates even before traffic reaches the app.
+   A subdomain can be a plain `CNAME` to the Fly hostname (only the apex cannot). The
+   `_acme-challenge` record lets Fly issue and renew the Let's Encrypt certificate even before
+   traffic reaches the app.
 
-4. Wait for the certificates:
+3. Wait for the certificate:
 
    ```sh
-   fly certs check iron-oxyde.com
-   fly certs check www.iron-oxyde.com
+   fly certs check app.iron-oxyde.com
    ```
 
-5. Switch the app to the domain (restarts the app):
+4. Switch the app to the domain. All four values move together: the server refuses to start if
+   `WEBAUTHN_ORIGIN` or `GOOGLE_REDIRECT_URL` does not match `APP_BASE_URL`, and the RP ID must
+   be the origin's host or a parent of it. One `secrets set` restarts the app once:
 
    ```sh
-   fly secrets set APP_BASE_URL='https://iron-oxyde.com'
+   fly secrets set \
+     APP_BASE_URL='https://app.iron-oxyde.com' \
+     WEBAUTHN_ORIGIN='https://app.iron-oxyde.com' \
+     WEBAUTHN_RP_ID='iron-oxyde.com' \
+     GOOGLE_REDIRECT_URL='https://app.iron-oxyde.com/auth/google/callback'
    ```
 
-   Also set the WebAuthn and Google redirect values for the domain (see the table above) and add
-   the redirect URL to the Google OAuth client.
+   Before that, add `https://app.iron-oxyde.com/auth/google/callback` to the production Google
+   OAuth client's authorized redirect URIs, and `iron-oxyde.com` to its authorized domains (see
+   docs/auth.md). Passkeys created on `iron-oxide.fly.dev` do not work on the new domain.
 
 ### 7. Verify HTTPS
 
 ```sh
-curl -sSI http://iron-oxyde.com/ | head -3        # 301 to https://
-curl -sS https://iron-oxyde.com/healthz            # ok
-curl -sS https://iron-oxyde.com/readyz             # database reachable
-curl -sSv https://iron-oxyde.com/ -o /dev/null 2>&1 | grep -E 'subject:|issuer:|expire'
+curl -sSI http://app.iron-oxyde.com/ | head -3        # 301 to https://
+curl -sS https://app.iron-oxyde.com/healthz            # ok
+curl -sS https://app.iron-oxyde.com/readyz             # database reachable
+curl -sSv https://app.iron-oxyde.com/ -o /dev/null 2>&1 | grep -E 'subject:|issuer:|expire'
 ```
 
-Then open `https://iron-oxyde.com` in a browser and sign in.
+Then open `https://app.iron-oxyde.com` in a browser and sign in.
 
 ## Configuration choices
 
