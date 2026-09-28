@@ -4,15 +4,22 @@ on:
   push:
     branches: [main]
   # No branch filter: stacked PRs (whose base is not `main`) get CI too.
+  # `edited` re-runs CI when a PR is retargeted (e.g. a stacked PR moved to `main` after its base
+  # is merged), so the checks are computed against the new base. It also fires on title/body
+  # edits; that costs a run but is harmless. Never skip jobs on `edited`: a skipped required check
+  # counts as passing and would replace a real result on the same commit.
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# PRs: a new run cancels the superseded one. Pushes to main: one group per commit, so no push run is
+# ever cancelled or dropped (each one scans only its own pushed range, see the gitleaks job).
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,7 +30,8 @@ env:
 
 jobs:
   # The repo is public and built in the open: a leaked secret must fail CI.
-  # Runs on every push and PR and scans the branch's full git history, not only the diff.
+  # Scans only the new commits: the PR's commits on a pull request, the pushed range on a push to
+  # main. The weekly full-history scan of main is in secret-scan.yml.
   # The gitleaks binary is used directly because `gitleaks/gitleaks-action`
   # requires a paid license for organisation-owned repositories.
   gitleaks:
@@ -49,7 +57,10 @@ jobs:
           tar -xzf "$archive" gitleaks
       - name: Scan the new commits
         # PR: the PR's own commits (base..head). Push to main: the pushed range. Manual run: the
-        # whole history of the checked-out branch. The weekly full-history scan of main is in
+        # whole history of the checked-out branch. `--remerge-diff` also scans what each merge
+        # commit changed relative to git's automatic merge (conflict resolutions, evil merges);
+        # without it `git log -p` shows no diff for merges. Not `-m`: it diffs a merge against its
+        # first parent and would re-report the base branch's content under the merge's SHA. The weekly full-history scan of main is in
         # secret-scan.yml. Never the gitleaks default (`git log --all`), which would scan every
         # branch fetched by `fetch-depth: 0` and fail this run for someone else's commit.
         # Known false positives: see "Secrets" in SECURITY.md (`gitleaks:allow`, `.gitleaksignore`).
@@ -73,26 +84,13 @@ jobs:
               range="HEAD" ;;
           esac
           echo "Scanning commits: $range"
-          "$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 --log-opts="--no-merges $range" .
+          "$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 --log-opts="--remerge-diff $range" .
 
-  # The Rust jobs below are skipped until a root `Cargo.toml` exists (it lands with #2).
-  detect:
-    name: Detect Rust workspace
-    runs-on: ubuntu-latest
-    outputs:
-      rust: ${{ steps.check.outputs.rust }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - id: check
-        run: |
-          if [ -f Cargo.toml ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi
+  # Rust jobs: they always run (no skip gate). A skipped required check counts as passing, so a gate
+  # could let a PR merge without any Rust check.
 
   fmt:
     name: rustfmt
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -104,8 +102,6 @@ jobs:
 
   clippy:
     name: clippy
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -123,8 +119,6 @@ jobs:
 
   test:
     name: Unit tests
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -140,13 +134,14 @@ jobs:
         run: cargo test -p iron-oxide-app --features server --locked
       - name: Domain crate builds and tests with plain cargo
         run: cargo test -p iron-oxide-domain --locked
+      # The service worker's caching rule, with the Node.js preinstalled on the runner (node:test).
+      - name: Service worker unit tests
+        run: node --test crates/iron-oxide-app/tests/sw/is_cacheable.test.mjs
 
   # Builds the whole workspace with SQLX_OFFLINE=true (set globally above), so a query whose
   # `.sqlx/` metadata is missing or stale fails CI without needing a database.
   sqlx-offline:
     name: sqlx offline build
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -156,15 +151,16 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check --workspace --all-targets --locked
+      # The sqlx queries live behind the app's `server` feature.
+      - run: cargo check -p iron-oxide-app --all-targets --features server --locked
 
   integration:
     name: Integration tests (Postgres)
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:18-alpine
+        # Same image as docker-compose.yml and the Neon major version.
+        image: postgres:18.6-alpine
         # Throwaway credentials for an ephemeral CI container; not a secret.
         env:
           POSTGRES_USER: iron_oxide
@@ -173,12 +169,15 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U iron_oxide -d iron_oxide_test"
+          --health-cmd "pg_isready -h 127.0.0.1 -U iron_oxide -d iron_oxide_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
       DATABASE_URL: postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide_test
+      # Must match the `sqlx` version in Cargo.toml (held back on 0.8, see there).
+      # renovate: datasource=crate depName=sqlx-cli
+      SQLX_CLI_VERSION: 0.8.6
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -186,18 +185,47 @@ jobs:
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # Once migrations exist (#4), add `cargo sqlx prepare --workspace --check` here, after
-      # running the migrations against this database.
+      - name: Install sqlx-cli
+        run: |
+          if ! sqlx --version 2>/dev/null | grep -q "$SQLX_CLI_VERSION"; then
+            cargo install sqlx-cli --version "$SQLX_CLI_VERSION" --locked \
+              --no-default-features --features postgres,rustls
+          fi
+      - name: Apply the migrations
+        run: sqlx migrate run --source crates/iron-oxide-app/migrations
+      # Fails if `.sqlx/` is missing a query or holds a stale one: re-run `cargo sqlx prepare`.
+      - name: Check the committed sqlx query data
+        env:
+          SQLX_OFFLINE: "false"
+        run: cargo sqlx prepare --workspace --check -- --all-targets --features iron-oxide-app/server
+      # Each `sqlx::test` gets its own fresh database on this server.
       - name: Run the tests that need Postgres
-        run: cargo test --workspace --locked -- --ignored
+        run: |
+          cargo test --workspace --locked -- --ignored
+          cargo test -p iron-oxide-app --features server --locked -- --ignored
 
   # Builds the release bundle exactly as the Dockerfile (#7) will, then runs the server and checks
-  # the page, a server function round-trip and /healthz over HTTP.
+  # the page, a server function round-trip, /healthz and /readyz over HTTP, and a graceful
+  # shutdown on SIGTERM.
   dx-bundle:
     name: dx bundle + smoke test
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
+    # The server connects to Postgres and applies the migrations at startup.
+    services:
+      postgres:
+        image: postgres:18.6-alpine
+        # Throwaway credentials for an ephemeral CI container; not a secret.
+        env:
+          POSTGRES_USER: iron_oxide
+          POSTGRES_PASSWORD: iron_oxide
+          POSTGRES_DB: iron_oxide
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U iron_oxide -d iron_oxide"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       # Must match the `dioxus` crate version in Cargo.toml (Renovate bumps both in one PR).
       # renovate: datasource=crate depName=dioxus-cli
@@ -227,13 +255,17 @@ jobs:
           bundle=target/dx/iron-oxide-app/release/web
           ls -la "$bundle"
           cd "$bundle"
-          IP=127.0.0.1 PORT=8080 ./server > "$RUNNER_TEMP/server.log" 2>&1 &
+          IP=127.0.0.1 PORT=8080 APP_BASE_URL=http://127.0.0.1:8080 \
+            DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide \
+            ./server > "$RUNNER_TEMP/server.log" 2>&1 &
+          server_pid=$!
           for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
             sleep 1
           done
           set -x
           test "$(curl -sSf http://127.0.0.1:8080/healthz)" = "ok"
+          test "$(curl -sSf http://127.0.0.1:8080/readyz)" = "ok"
           curl -sSf http://127.0.0.1:8080/ | grep -q "Iron Oxide"
           curl -sSf http://127.0.0.1:8080/api/server-time | grep -Eq '^[0-9]+$'
           # The wasm client that hydrates the page is served: the JS loader referenced by the page
@@ -246,6 +278,23 @@ jobs:
           for f in $wasm_files; do
             curl -sSf -o /dev/null -w '%{content_type}\n' "http://127.0.0.1:8080/${f#public/}" | grep -q '^application/wasm'
           done
+          # PWA: the manifest and head tags are in the SSR page, and the static files are served at the root.
+          curl -sSf http://127.0.0.1:8080/ | grep -q '<link rel="manifest" href="/manifest.webmanifest"'
+          curl -sSf http://127.0.0.1:8080/ | grep -q 'navigator.serviceWorker.register(`/sw.js?build='
+          curl -sSf http://127.0.0.1:8080/manifest.webmanifest | grep -q '"short_name": "Fe2O3"'
+          curl -sSf 'http://127.0.0.1:8080/sw.js?build=ci' | grep -q 'CACHE_VERSION'
+          for icon in icons/icon-192.png icons/icon-512.png icons/icon-maskable-512.png icons/apple-touch-icon.png favicon.ico; do
+            curl -sSf -o /dev/null "http://127.0.0.1:8080/$icon"
+          done
+          # An unknown hashed asset is a 404, not the SSR page (the service worker must never cache HTML as JS/wasm).
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/assets/missing-dxh0.js)" = "404"
+          # The startup migrations ran.
+          test "$(PGPASSWORD=iron_oxide psql -h localhost -U iron_oxide -d iron_oxide -tAc "SELECT to_regclass('users')")" = "users"
+          # SIGTERM (Docker's stop signal, and what fly.toml sets) stops it cleanly with status 0.
+          # SIGINT (Fly's default) is handled the same way; the Postgres tests cover it.
+          kill -TERM "$server_pid"
+          wait "$server_pid"
+          grep -q "shut down" "$RUNNER_TEMP/server.log"
       - name: Server log
         if: always()
         run: cat "$RUNNER_TEMP/server.log" || true

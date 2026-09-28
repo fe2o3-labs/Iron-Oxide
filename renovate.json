@@ -10,12 +10,13 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Versions pinned on the line after a `# renovate: datasource=… depName=…` comment (dx CLI, gitleaks) in CI, the README and the Dockerfile. rust-toolchain.toml is handled by the built-in manager",
+      "description": "Versions pinned on the line after a `# renovate: datasource=… depName=…` comment (dx CLI, gitleaks) in CI, the README and the Dockerfile. rust-toolchain.toml is handled by the built-in manager. `semver` versioning because these are exact pins: with the crate datasource's default `cargo` versioning, `0.7.9` would be read as the range `^0.7.9` and never bumped",
       "managerFilePatterns": [
         "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/",
         "/(^|/)README\\.md$/",
         "/(^|/)Dockerfile$/"
       ],
+      "versioningTemplate": "semver",
       "matchStrings": [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: extractVersion=(?<extractVersion>\\S+))?\\s*\\n[^\\n]*?(?<currentValue>\\d+\\.\\d+\\.\\d+)"
       ]
@@ -36,10 +37,18 @@
       "automerge": true
     },
     {
-      "description": "The dioxus crates and the dx CLI (dioxus-cli, pinned in CI, README and Dockerfile) must always move together, in one PR.",
+      "description": "The dioxus crates and the dx CLI (dioxus-cli, pinned in CI, README and Dockerfile) must always move together, in one PR. Never automerged, even for patches: Dioxus bumps always get a review.",
       "matchPackageNames": ["/^dioxus/"],
       "groupName": "dioxus",
-      "groupSlug": "dioxus"
+      "groupSlug": "dioxus",
+      "automerge": false
+    },
+    {
+      "description": "sqlx is held on 0.8: tower-sessions-sqlx-store (Postgres sessions) depends on sqlx 0.8 and must share the app's PgPool. The sqlx crates and sqlx-cli (pinned in CI and the README) move together. Lift the cap once the store supports a newer sqlx.",
+      "matchPackageNames": ["sqlx", "/^sqlx-/"],
+      "allowedVersions": "<0.9",
+      "groupName": "sqlx",
+      "groupSlug": "sqlx"
     }
   ]
 }

@@ -11,11 +11,15 @@
 //!   increment and display helpers.
 //! - [`Reps`], [`Percent`] and [`Seconds`].
 //! - [`ValueError`] for every rejected value.
+//! - The rest timer lives in [`time`] and [`timer`].
 //!
 //! # Progression
 //!
 //! [`progression::next_targets`] computes an exercise's next targets from its program rule and
 //! history, and the [`progression::ProgressionChange`] shown in the end-of-session summary.
+
+pub mod time;
+pub mod timer;
 
 mod display;
 mod duration;
