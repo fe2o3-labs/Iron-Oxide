@@ -11,7 +11,7 @@ use webauthn_rs_proto::{
 };
 
 use super::test_support::{Browser, Grant, Passkey, TestApp, query_param};
-use crate::auth::types::Me;
+use crate::auth::types::{GoogleProgress, Me};
 
 const SIGN_UP_BEGIN: &str = "/api/auth/passkey/sign-up/begin";
 const SIGN_UP_FINISH: &str = "/api/auth/passkey/sign-up/finish";
@@ -426,7 +426,7 @@ async fn saving_a_deleted_session_does_not_resurrect_it(db: PgPool) {
 #[sqlx::test]
 #[ignore = "needs Postgres"]
 async fn concurrent_google_finishes_of_one_ceremony_cannot_both_succeed(db: PgPool) {
-    // Both requests carry the same session (and so the same ceremony id): only the database
+    // Both callbacks carry the same session (and so the same ceremony id): only the database
     // delete makes the ceremony single-use here.
     let app = TestApp::new(db.clone()).await;
     let mut browser = app.browser();
@@ -435,20 +435,20 @@ async fn concurrent_google_finishes_of_one_ceremony_cannot_both_succeed(db: PgPo
     for (code, subject) in [("c1", "sub-a"), ("c2", "sub-b")] {
         app.google.grant(
             code,
-            Grant {
-                code_challenge: query_param(&url, "code_challenge"),
-                claims: app.google.claims(&url, subject),
-                sign_with_unpublished_key: false,
-                sign_hs256_with_client_secret: false,
-            },
+            Grant::new(
+                query_param(&url, "code_challenge"),
+                app.google.claims(&url, subject),
+            ),
         );
     }
     let (mut a, mut b) = (browser.clone(), browser.clone());
-    let (ra, rb) = tokio::join!(
-        a.call::<Me>(GOOGLE_FINISH, json!({ "code": "c1", "state": state })),
-        b.call::<Me>(GOOGLE_FINISH, json!({ "code": "c2", "state": state }))
-    );
-    assert_eq!(usize::from(ra.is_ok()) + usize::from(rb.is_ok()), 1);
+    let (pa, pb) = (callback_path("c1", &state), callback_path("c2", &state));
+    let ((_, _, ba), (_, _, bb)) = tokio::join!(a.get(&pa), b.get(&pb));
+    let done = [ba, bb]
+        .iter()
+        .filter(|body| body.contains(r#""type":"done""#))
+        .count();
+    assert_eq!(done, 1);
     let users: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
         .fetch_one(&db)
         .await
@@ -567,7 +567,7 @@ async fn signed_out_calls_to_protected_functions_are_401(db: PgPool) {
         .unwrap_err();
     assert_eq!(error.status, StatusCode::UNAUTHORIZED);
     let error = browser
-        .call::<Value>(GOOGLE_BEGIN, json!({ "intent": "Link" }))
+        .call::<Value>(GOOGLE_BEGIN, json!({ "intent": "Link", "popup": true }))
         .await
         .unwrap_err();
     assert_eq!(error.status, StatusCode::UNAUTHORIZED);
@@ -614,7 +614,7 @@ async fn deleting_a_user_deletes_their_auth_rows(db: PgPool) {
 /// Starts a Google flow and returns the authorization URL.
 async fn google_begin(browser: &mut Browser, intent: &str) -> String {
     browser
-        .call(GOOGLE_BEGIN, json!({ "intent": intent }))
+        .call(GOOGLE_BEGIN, json!({ "intent": intent, "popup": true }))
         .await
         .unwrap()
 }
@@ -712,22 +712,24 @@ async fn google_sign_in_creates_then_finds_the_account_by_sub(db: PgPool) {
 
 #[sqlx::test]
 #[ignore = "needs Postgres"]
-async fn a_popup_without_the_session_hands_the_code_to_the_opener(db: PgPool) {
+async fn a_popup_without_the_session_relays_the_code_to_the_app(db: PgPool) {
     let app = TestApp::new(db).await;
     let mut opener = app.browser();
     let url = google_begin(&mut opener, "SignIn").await;
     let state = query_param(&url, "state");
     app.google.grant(
         "code-2",
-        Grant {
-            code_challenge: query_param(&url, "code_challenge"),
-            claims: app.google.claims(&url, "sub-popup"),
-            sign_with_unpublished_key: false,
-            sign_hs256_with_client_secret: false,
-        },
+        Grant::new(
+            query_param(&url, "code_challenge"),
+            app.google.claims(&url, "sub-popup"),
+        ),
     );
 
-    // The popup has its own (empty) cookie jar: it cannot finish, it relays.
+    // Google has not come back yet.
+    let progress: GoogleProgress = opener.call(GOOGLE_FINISH, json!({})).await.unwrap();
+    assert_eq!(progress, GoogleProgress::Pending);
+
+    // The popup has its own (empty) cookie jar: it cannot finish, it leaves the code.
     let mut popup = app.browser();
     popup.origin = None;
     popup.fetch_site = Some("cross-site".to_owned());
@@ -735,18 +737,87 @@ async fn a_popup_without_the_session_hands_the_code_to_the_opener(db: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["cache-control"], "no-store");
     assert_eq!(headers["referrer-policy"], "no-referrer");
-    assert!(body.contains(r#""type":"code""#), "{body}");
-    assert!(
-        body.contains(r#""origin":"http://localhost:8080""#),
-        "{body}"
-    );
+    assert!(body.contains(r#""type":"relayed""#), "{body}");
+    assert!(body.contains(r#""after":"close""#), "{body}");
+    assert!(!body.contains("code-2"), "the code is not echoed: {body}");
     assert!(popup.cookie.is_none(), "the popup gets no session");
 
-    let me: Me = opener
-        .call(GOOGLE_FINISH, json!({ "code": "code-2", "state": state }))
+    // A second callback for the same state cannot replace the code.
+    app.google.grant(
+        "code-3",
+        Grant::new(
+            query_param(&url, "code_challenge"),
+            app.google.claims(&url, "sub-other"),
+        ),
+    );
+    let (_, _, body) = popup.get(&callback_path("code-3", &state)).await;
+    assert!(body.contains(r#""type":"error""#), "{body}");
+
+    // The app redeems it in its own session.
+    let GoogleProgress::Finished(me1) = opener.call(GOOGLE_FINISH, json!({})).await.unwrap() else {
+        panic!("not finished");
+    };
+    assert!(me1.google_linked);
+    assert_eq!(me(&mut opener).await.unwrap().user_id, me1.user_id);
+    // Signed in as `sub-popup`, not `sub-other`.
+    let mut again = app.browser();
+    google_sign_in_or_link(&app, &mut again, "SignIn", "sub-popup")
         .await
         .unwrap();
-    assert!(me.google_linked);
+    assert_eq!(me(&mut again).await.unwrap().user_id, me1.user_id);
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn a_relayed_code_needs_a_live_ceremony_with_that_state(db: PgPool) {
+    let app = TestApp::new(db.clone()).await;
+    let mut browser = app.browser();
+    let url = google_begin(&mut browser, "SignIn").await;
+    let mut popup = app.browser();
+    let (_, _, body) = popup.get(&callback_path("code-x", "not-the-state")).await;
+    assert!(body.contains(r#""type":"error""#), "{body}");
+    // Expired ceremony: nothing to relay to, and the app gets an error, not an endless wait.
+    sqlx::query("UPDATE auth_ceremonies SET expires_at = now() - interval '1 second'")
+        .execute(&db)
+        .await
+        .unwrap();
+    let (_, _, body) = popup
+        .get(&callback_path("code-x", &query_param(&url, "state")))
+        .await;
+    assert!(body.contains(r#""type":"error""#), "{body}");
+    let error = browser
+        .call::<GoogleProgress>(GOOGLE_FINISH, json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn a_redirect_flow_goes_back_home_and_a_popup_closes(db: PgPool) {
+    let app = TestApp::new(db).await;
+    for (popup, after) in [(false, "home"), (true, "close")] {
+        let mut browser = app.browser();
+        let url: String = browser
+            .call(GOOGLE_BEGIN, json!({ "intent": "SignIn", "popup": popup }))
+            .await
+            .unwrap();
+        app.google.grant(
+            "code-r",
+            Grant::new(
+                query_param(&url, "code_challenge"),
+                app.google.claims(&url, "sub-r"),
+            ),
+        );
+        let (_, _, body) = browser
+            .get(&callback_path("code-r", &query_param(&url, "state")))
+            .await;
+        assert!(body.contains(r#""type":"done""#), "{body}");
+        assert!(body.contains(&format!(r#""after":"{after}""#)), "{body}");
+        // The app, sharing the session, sees the flow as finished.
+        let progress: GoogleProgress = browser.call(GOOGLE_FINISH, json!({})).await.unwrap();
+        assert!(matches!(progress, GoogleProgress::Finished(_)));
+    }
 }
 
 /// Begins a flow and grants a code with `tamper` applied; returns the finish error status.
@@ -763,12 +834,12 @@ async fn google_finish_with(
     );
     tamper(&mut grant, &mut state);
     app.google.grant("code-t", grant);
-    let result = browser
-        .call::<Me>(GOOGLE_FINISH, json!({ "code": "code-t", "state": state }))
-        .await;
-    let status = match result {
-        Ok(_) => StatusCode::OK,
-        Err(error) => error.status,
+    let (_, _, body) = browser.get(&callback_path("code-t", &state)).await;
+    let status = if body.contains(r#""type":"done""#) {
+        StatusCode::OK
+    } else {
+        assert!(body.contains(r#""type":"error""#), "{body}");
+        StatusCode::BAD_REQUEST
     };
     if status != StatusCode::OK {
         assert_eq!(
@@ -895,25 +966,24 @@ async fn a_google_ceremony_is_single_use(db: PgPool) {
     for code in ["c1", "c2"] {
         app.google.grant(
             code,
-            Grant {
-                code_challenge: query_param(&url, "code_challenge"),
-                claims: app.google.claims(&url, "sub-once"),
-                sign_with_unpublished_key: false,
-                sign_hs256_with_client_secret: false,
-            },
+            Grant::new(
+                query_param(&url, "code_challenge"),
+                app.google.claims(&url, "sub-once"),
+            ),
         );
     }
     let before = browser.clone();
-    let _: Me = browser
-        .call(GOOGLE_FINISH, json!({ "code": "c1", "state": state }))
-        .await
-        .unwrap();
-    let mut replay = before;
-    let error = replay
-        .call::<Me>(GOOGLE_FINISH, json!({ "code": "c2", "state": state }))
-        .await
-        .unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    let (_, _, body) = browser.get(&callback_path("c1", &state)).await;
+    assert!(body.contains(r#""type":"done""#), "{body}");
+    // The same state again, with the pre-sign-in cookie or with none: nothing left to use.
+    for mut replay in [before, app.browser()] {
+        let (_, _, body) = replay.get(&callback_path("c2", &state)).await;
+        assert!(body.contains(r#""type":"error""#), "{body}");
+        assert_eq!(
+            me(&mut replay).await.unwrap_err().status,
+            StatusCode::UNAUTHORIZED
+        );
+    }
 }
 
 #[sqlx::test]
@@ -1038,23 +1108,22 @@ async fn a_link_ceremony_cannot_be_finished_by_another_user(db: PgPool) {
     let state = query_param(&url, "state");
     app.google.grant(
         "code-l",
-        Grant {
-            code_challenge: query_param(&url, "code_challenge"),
-            claims: app.google.claims(&url, "sub-l"),
-            sign_with_unpublished_key: false,
-            sign_hs256_with_client_secret: false,
-        },
+        Grant::new(
+            query_param(&url, "code_challenge"),
+            app.google.claims(&url, "sub-l"),
+        ),
     );
     // Alice signs out and Bob signs in on the same browser before the callback.
     let () = alice.call(SIGN_OUT, json!({})).await.unwrap();
     assert!(alice.cookie.is_none());
     let mut bob = alice.clone();
     sign_up(&mut bob, &mut Passkey::new(), "bob").await;
-    let error = bob
-        .call::<Me>(GOOGLE_FINISH, json!({ "code": "code-l", "state": state }))
-        .await
-        .unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    let _ = bob.get(&callback_path("code-l", &state)).await;
+    let progress: GoogleProgress = bob.call(GOOGLE_FINISH, json!({})).await.unwrap();
+    let GoogleProgress::Finished(me_bob) = progress else {
+        panic!("{progress:?}");
+    };
+    assert!(!me_bob.google_linked);
     assert!(!me(&mut bob).await.unwrap().google_linked);
 }
 

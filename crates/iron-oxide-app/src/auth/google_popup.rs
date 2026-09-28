@@ -3,8 +3,7 @@
 
 use super::types::GoogleCallbackMessage;
 
-/// Longest callback message accepted, in bytes. A real one is well under 5 KiB (`code` and
-/// `state` are capped at 2 KiB each by the server).
+/// Longest callback message accepted, in bytes. A real one is a few hundred bytes.
 const MAX_MESSAGE_LEN: usize = 8 * 1024;
 
 /// The callback message carried by a `message` event, or `None` if the event must be ignored.
@@ -55,15 +54,8 @@ mod tests {
             Some(GoogleCallbackMessage::Done)
         );
         assert_eq!(
-            accept_callback_message(
-                ORIGIN,
-                ORIGIN,
-                Some(r#"{"type":"code","code":"c","state":"s"}"#)
-            ),
-            Some(GoogleCallbackMessage::Code {
-                code: "c".to_owned(),
-                state: "s".to_owned()
-            })
+            accept_callback_message(ORIGIN, ORIGIN, Some(r#"{"type":"relayed"}"#)),
+            Some(GoogleCallbackMessage::Relayed)
         );
         assert_eq!(
             accept_callback_message(ORIGIN, ORIGIN, Some(r#"{"type":"error","message":"no"}"#)),
@@ -110,7 +102,7 @@ mod tests {
             Some(""),
             Some("done"),
             Some(r#"{"type":"unknown"}"#),
-            Some(r#"{"type":"code","code":"c"}"#),
+            Some(r#"{"type":"error"}"#),
             Some(r#"["done"]"#),
         ] {
             assert_eq!(
@@ -123,8 +115,8 @@ mod tests {
 
     #[test]
     fn ignores_oversized_messages() {
-        let code = "c".repeat(MAX_MESSAGE_LEN);
-        let data = format!(r#"{{"type":"code","code":"{code}","state":"s"}}"#);
+        let message = "m".repeat(MAX_MESSAGE_LEN);
+        let data = format!(r#"{{"type":"error","message":"{message}"}}"#);
         assert_eq!(accept_callback_message(ORIGIN, ORIGIN, Some(&data)), None);
     }
 

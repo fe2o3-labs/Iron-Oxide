@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE auth_ceremonies SET relay_code = $2\n         WHERE state_hash = $1 AND kind = ANY($3) AND relay_code IS NULL AND expires_at > now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Text",
+        {
+          "Custom": {
+            "name": "auth_ceremony_kind[]",
+            "kind": {
+              "Array": {
+                "Custom": {
+                  "name": "auth_ceremony_kind",
+                  "kind": {
+                    "Enum": [
+                      "passkey_sign_up",
+                      "passkey_sign_in",
+                      "passkey_add",
+                      "google_sign_in",
+                      "google_link"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8fb5c5c4b99aa6d20c6887c034318a659805560db8c36bbaea7fc4db56f60da2"
+}

@@ -15,7 +15,7 @@ use webauthn_rs_proto::{
     RequestChallengeResponse,
 };
 
-use super::types::{GoogleIntent, Me, PasskeyId};
+use super::types::{GoogleIntent, GoogleProgress, Me, PasskeyId};
 #[cfg(feature = "server")]
 use crate::server::auth::{AuthContext, AuthUser, google, passkeys};
 
@@ -95,19 +95,19 @@ pub async fn passkey_remove(passkey_id: PasskeyId) -> Result<Me, ServerFnError> 
 }
 
 /// Starts Sign in with Google (or linking Google to the signed-in user) and returns the Google
-/// URL to open, in the popup or the current window.
+/// URL to open. `popup`: whether it opens in a popup (the callback page then closes itself) or
+/// in the current window (the callback page then goes back to `/`).
 #[post("/api/auth/google/begin", ctx: AuthContext)]
-pub async fn google_begin(intent: GoogleIntent) -> Result<String, ServerFnError> {
-    Ok(google::begin(&ctx, intent).await?)
+pub async fn google_begin(intent: GoogleIntent, popup: bool) -> Result<String, ServerFnError> {
+    Ok(google::begin(&ctx, intent, popup).await?)
 }
 
-/// Finishes a Google sign-in whose callback ran in a popup that could not finish it itself
-/// (see `GoogleCallbackMessage::Code`).
+/// Checks on the Google sign-in started in this session, and finishes it if its callback left
+/// the code on the server (`GoogleCallbackMessage::Relayed`). Safe to call repeatedly while
+/// waiting: `Pending` until Google comes back.
 #[post("/api/auth/google/finish", ctx: AuthContext)]
-pub async fn google_finish(code: String, state: String) -> Result<Me, ServerFnError> {
-    google::finish(&ctx, &code, &state).await?;
-    let user = ctx.require_user().await?;
-    Ok(passkeys::me(&ctx, user).await?)
+pub async fn google_finish() -> Result<GoogleProgress, ServerFnError> {
+    Ok(google::progress(&ctx).await?)
 }
 
 /// Unlinks Google from the signed-in account. Refused if it is their last way to sign in.

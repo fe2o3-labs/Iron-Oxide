@@ -4,14 +4,19 @@
 //!    random `state`, `nonce` and PKCE verifier, and returns the authorization URL. The client
 //!    opens it in a popup (started synchronously from the tap, for iOS) or, if popups are
 //!    blocked, in the current window.
-//! 2. Google redirects to `GET /auth/google/callback?code&state` ([`callback`]).
+//! 2. Google redirects to `GET /auth/google/callback?code&state` ([`callback`]). Google's pages
+//!    send `Cross-Origin-Opener-Policy: same-origin`, so by then the popup has usually lost its
+//!    `window.opener`: nothing here relies on it.
 //!    - If this request carries the session that started the flow (full redirect, or a popup
-//!      sharing the app's cookies), the callback finishes the flow itself and tells the opener
-//!      it is done (or redirects to `/`).
-//!    - Otherwise (an iOS standalone PWA popup may have its own cookie jar), the page hands
-//!      `code` and `state` to the opener with `postMessage` restricted to our origin, and the
-//!      opener finishes with the `google_finish` server function in its own session. The code
-//!      is useless to anyone else: it needs the PKCE verifier, which never leaves the server.
+//!      sharing the app's cookies), the callback finishes the flow itself. In a popup the page
+//!      announces it on a same-origin `BroadcastChannel` and closes; after a full redirect it
+//!      goes back to `/`.
+//!    - Otherwise (a popup with its own cookie jar, as an installed iOS web app may get), the
+//!      callback finds the ceremony by the hash of `state` and leaves the code on it
+//!      ([`ceremony::relay_google_code`]). The app redeems it with `google_finish()` in its own
+//!      session when it becomes visible again ([`progress`]). The code is useless to anyone
+//!      else: it needs the PKCE verifier, which never leaves the server; and only the browser
+//!      that went to Google knows `state`.
 //! 3. [`finish`] checks `state` (constant time) against the ceremony, exchanges the code with
 //!    the PKCE verifier, and verifies the ID token: signature against Google's current JWKS
 //!    (fetched per sign-in, so key rotation needs no restart), issuer, audience (our client id),
@@ -43,7 +48,7 @@ use super::{
     passkeys::lock_user_and_count_methods,
 };
 use crate::auth::types::{
-    GOOGLE_CALLBACK_CHANNEL, GoogleCallbackMessage, GoogleIntent, Me, UserId,
+    GOOGLE_CALLBACK_CHANNEL, GoogleCallbackMessage, GoogleIntent, GoogleProgress, Me, UserId,
 };
 
 /// Google's OpenID Connect issuer.
@@ -121,10 +126,21 @@ struct GoogleState {
     state: String,
     nonce: String,
     pkce_verifier: String,
+    /// Opened in a popup (the callback page closes itself) rather than in the app's window.
+    popup: bool,
+}
+
+/// The key under which a ceremony can be found from the callback's `state`.
+fn state_hash(state: &str) -> Vec<u8> {
+    Sha256::digest(state.as_bytes()).to_vec()
 }
 
 /// Starts a Google sign-in (or link) and returns the authorization URL.
-pub async fn begin(ctx: &AuthContext, intent: GoogleIntent) -> Result<String, AuthError> {
+pub async fn begin(
+    ctx: &AuthContext,
+    intent: GoogleIntent,
+    popup: bool,
+) -> Result<String, AuthError> {
     let (kind, user) = match intent {
         GoogleIntent::SignIn => (CeremonyKind::GoogleSignIn, None),
         GoogleIntent::Link => (CeremonyKind::GoogleLink, Some(ctx.require_user().await?)),
@@ -141,12 +157,14 @@ pub async fn begin(ctx: &AuthContext, intent: GoogleIntent) -> Result<String, Au
         // Let the user pick the account, rather than silently reusing the last one.
         .add_prompt(CoreAuthPrompt::SelectAccount)
         .url();
+    let hash = state_hash(state.secret());
     let state = GoogleState {
         state: state.secret().clone(),
         nonce: nonce.secret().clone(),
         pkce_verifier: verifier.secret().clone(),
+        popup,
     };
-    ceremony::start(ctx.db(), &ctx.session, kind, user, &state).await?;
+    ceremony::start_with_state_hash(ctx.db(), &ctx.session, kind, user, &state, Some(hash)).await?;
     Ok(url.to_string())
 }
 
@@ -173,9 +191,10 @@ fn check_param(value: &str) -> Result<(), AuthError> {
     Ok(())
 }
 
-/// Finishes the Google flow started in this session: signs in (creating the account on first
-/// use), or links Google to the signed-in user.
-pub async fn finish(ctx: &AuthContext, code: &str, state: &str) -> Result<(), AuthError> {
+/// Finishes the Google flow started in this session, from its callback: signs in (creating the
+/// account on first use), or links Google to the signed-in user. Returns whether the flow ran
+/// in a popup.
+pub async fn finish(ctx: &AuthContext, code: &str, state: &str) -> Result<bool, AuthError> {
     check_param(code)?;
     check_param(state)?;
     let current = ctx.current_user().await?;
@@ -185,7 +204,43 @@ pub async fn finish(ctx: &AuthContext, code: &str, state: &str) -> Result<(), Au
     if !state_matches(&stored.state, state) {
         return Err(AuthError::Ceremony("state mismatch"));
     }
+    let popup = stored.popup;
+    complete(ctx, kind, owner, stored, code).await?;
+    Ok(popup)
+}
 
+/// `google_finish()`: redeems a code relayed by a callback that ran without this session, or
+/// reports that Google has not come back yet.
+pub async fn progress(ctx: &AuthContext) -> Result<GoogleProgress, AuthError> {
+    let current = ctx.current_user().await?;
+    if has_ceremony(ctx).await? {
+        let Some((taken, code)) =
+            ceremony::take_relayed_google(ctx.db(), &ctx.session, current).await?
+        else {
+            return Ok(GoogleProgress::Pending);
+        };
+        let (kind, owner) = (taken.kind, taken.user);
+        complete(ctx, kind, owner, taken.state()?, &code).await?;
+    } else if current.is_none() {
+        // Nothing in flight, not signed in: the flow failed or was never started here.
+        return Err(AuthError::Ceremony("none in this session"));
+    }
+    // Finished here, or by a callback that shared this session (a popup with the app's
+    // cookies): report the account as it now is.
+    let user = ctx.require_user().await?;
+    Ok(GoogleProgress::Finished(
+        super::passkeys::me(ctx, user).await?,
+    ))
+}
+
+/// Exchanges `code` and verifies the ID token for a taken ceremony, then signs in or links.
+async fn complete(
+    ctx: &AuthContext,
+    kind: CeremonyKind,
+    owner: Option<UserId>,
+    stored: GoogleState,
+    code: &str,
+) -> Result<(), AuthError> {
     let client = ctx.auth.google().client().await?;
     let token = client
         .exchange_code(AuthorizationCode::new(code.to_owned()))
@@ -338,26 +393,37 @@ pub struct CallbackParams {
     error: Option<String>,
 }
 
+/// What the callback page does once it has posted its message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterMessage {
+    /// Stay, showing the text (errors).
+    Stay,
+    /// Close the window (a popup).
+    Close,
+    /// Go back to the app at `/` (after a full-page redirect).
+    GoHome,
+}
+
 /// `GET /auth/google/callback`: see the module docs.
 pub async fn callback(ctx: AuthContext, Query(params): Query<CallbackParams>) -> Response {
     let origin = ctx.auth.origin().to_owned();
-    let (message, redirect_home) = match callback_outcome(&ctx, params).await {
+    let (message, after) = match callback_outcome(&ctx, params).await {
         Ok(outcome) => outcome,
         Err(error) => {
             let message = GoogleCallbackMessage::Error {
                 message: error.public().1.to_owned(),
             };
             tracing::warn!(%error, "Google callback failed");
-            (message, false)
+            (message, AfterMessage::Stay)
         }
     };
-    callback_page(&origin, &message, redirect_home)
+    callback_page(&origin, &message, after)
 }
 
 async fn callback_outcome(
     ctx: &AuthContext,
     params: CallbackParams,
-) -> Result<(GoogleCallbackMessage, bool), AuthError> {
+) -> Result<(GoogleCallbackMessage, AfterMessage), AuthError> {
     if let Some(error) = params.error {
         // e.g. `access_denied` when the user cancels. Clear the ceremony.
         if has_ceremony(ctx).await? {
@@ -372,12 +438,21 @@ async fn callback_outcome(
         ));
     };
     if has_ceremony(ctx).await? {
-        finish(ctx, &code, &state).await?;
-        Ok((GoogleCallbackMessage::Done, true))
+        let popup = finish(ctx, &code, &state).await?;
+        let after = if popup {
+            AfterMessage::Close
+        } else {
+            AfterMessage::GoHome
+        };
+        Ok((GoogleCallbackMessage::Done, after))
     } else {
         check_param(&code)?;
         check_param(&state)?;
-        Ok((GoogleCallbackMessage::Code { code, state }, false))
+        if ceremony::relay_google_code(ctx.db(), &state_hash(&state), &code).await? {
+            Ok((GoogleCallbackMessage::Relayed, AfterMessage::Close))
+        } else {
+            Err(AuthError::Ceremony("no ceremony for this state"))
+        }
     }
 }
 
@@ -385,11 +460,9 @@ async fn callback_outcome(
 const CALLBACK_SCRIPT: &str = r#"(function () {
   var data = JSON.parse(document.getElementById("data").textContent);
   var message = JSON.stringify(data.message);
-  var delivered = false;
   try {
     if (window.opener && window.opener !== window) {
       window.opener.postMessage(message, data.origin);
-      delivered = true;
     }
   } catch (e) {}
   try {
@@ -397,9 +470,9 @@ const CALLBACK_SCRIPT: &str = r#"(function () {
     channel.postMessage(message);
     channel.close();
   } catch (e) {}
-  if (delivered) {
+  if (data.after === "close") {
     window.close();
-  } else if (data.redirect) {
+  } else if (data.after === "home") {
     window.location.replace("/");
   }
 })();"#;
@@ -423,17 +496,21 @@ fn html_escape(text: &str) -> String {
 
 /// Builds the callback page. Never cached, never sends a referrer (the URL holds the code),
 /// cannot be framed, and runs only its own script.
-fn callback_page(origin: &str, message: &GoogleCallbackMessage, redirect_home: bool) -> Response {
+fn callback_page(origin: &str, message: &GoogleCallbackMessage, after: AfterMessage) -> Response {
     let data = serde_json::json!({
         "origin": origin,
         "channel": GOOGLE_CALLBACK_CHANNEL,
         "message": message,
-        "redirect": redirect_home,
+        "after": match after {
+            AfterMessage::Stay => "stay",
+            AfterMessage::Close => "close",
+            AfterMessage::GoHome => "home",
+        },
     });
     let text = match message {
         GoogleCallbackMessage::Done => "Signed in. You can close this window.".to_owned(),
-        GoogleCallbackMessage::Code { .. } => {
-            "Almost done. Return to Iron Oxide to finish signing in.".to_owned()
+        GoogleCallbackMessage::Relayed => {
+            "Signed in with Google. Close this window and return to Iron Oxide.".to_owned()
         }
         GoogleCallbackMessage::Error { message } => message.clone(),
     };
@@ -530,11 +607,10 @@ mod tests {
     async fn callback_page_is_locked_down() {
         let response = callback_page(
             "https://iron-oxyde.com",
-            &GoogleCallbackMessage::Code {
-                code: "</script>".to_owned(),
-                state: "s".to_owned(),
+            &GoogleCallbackMessage::Error {
+                message: "</script><script>alert(1)</script>".to_owned(),
             },
-            false,
+            AfterMessage::Stay,
         );
         let headers = response.headers().clone();
         assert_eq!(headers[header::CACHE_CONTROL], "no-store");
@@ -564,9 +640,28 @@ mod tests {
             &GoogleCallbackMessage::Error {
                 message: "<b>no</b>".to_owned(),
             },
-            false,
+            AfterMessage::Stay,
         );
         let body = page_text(response).await;
         assert!(body.contains("<p>&lt;b&gt;no&lt;/b&gt;</p>"), "{body}");
+        assert!(body.contains(r#""after":"stay""#), "{body}");
+    }
+
+    #[tokio::test]
+    async fn callback_page_closes_a_popup_and_sends_a_redirect_home() {
+        for (message, after, expected) in [
+            (GoogleCallbackMessage::Done, AfterMessage::Close, "close"),
+            (GoogleCallbackMessage::Done, AfterMessage::GoHome, "home"),
+            (GoogleCallbackMessage::Relayed, AfterMessage::Close, "close"),
+        ] {
+            let body = page_text(callback_page("http://localhost:8080", &message, after)).await;
+            assert!(body.contains(&format!(r#""after":"{expected}""#)), "{body}");
+        }
+    }
+
+    #[test]
+    fn state_hash_is_sha256() {
+        assert_eq!(state_hash("abc").len(), 32);
+        assert_ne!(state_hash("abc"), state_hash("abd"));
     }
 }

@@ -76,6 +76,19 @@ pub async fn start<T: Serialize>(
     user: Option<UserId>,
     state: &T,
 ) -> Result<(), AuthError> {
+    start_with_state_hash(pool, session, kind, user, state, None).await
+}
+
+/// Like [`start`], also storing the hash of the OAuth `state` sent to Google, so that a callback
+/// arriving without this session can leave its code on this ceremony ([`relay_google_code`]).
+pub async fn start_with_state_hash<T: Serialize>(
+    pool: &PgPool,
+    session: &Session,
+    kind: CeremonyKind,
+    user: Option<UserId>,
+    state: &T,
+    state_hash: Option<Vec<u8>>,
+) -> Result<(), AuthError> {
     if kind.needs_user() != user.is_some() {
         return Err(AuthError::Internal(format!(
             "ceremony {kind:?} started with the wrong user binding"
@@ -84,13 +97,14 @@ pub async fn start<T: Serialize>(
     let id = Uuid::new_v4();
     let expires_at = OffsetDateTime::now_utc() + kind.ttl();
     sqlx::query!(
-        "INSERT INTO auth_ceremonies (id, kind, user_id, state, expires_at)
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO auth_ceremonies (id, kind, user_id, state, expires_at, state_hash)
+         VALUES ($1, $2, $3, $4, $5, $6)",
         id,
         kind as CeremonyKind,
         user.map(|user| user.as_uuid()),
         serde_json::to_value(state)?,
         expires_at,
+        state_hash,
     )
     .execute(pool)
     .await?;
@@ -138,13 +152,7 @@ pub async fn take_google(
     session: &Session,
     current: Option<UserId>,
 ) -> Result<Taken, AuthError> {
-    take_one_of(
-        pool,
-        session,
-        &[CeremonyKind::GoogleSignIn, CeremonyKind::GoogleLink],
-        current,
-    )
-    .await
+    take_one_of(pool, session, &GOOGLE_KINDS, current).await
 }
 
 /// `kinds` must share one session key.
@@ -175,11 +183,22 @@ async fn take_one_of(
     .await?
     .ok_or(AuthError::Ceremony("unknown or already used"))?;
 
-    if !row.live {
+    checked(row.kind, row.user_id, row.state, row.live, current)
+}
+
+/// Checks a deleted ceremony row: unexpired, and bound to `current` exactly when its kind is.
+fn checked(
+    kind: CeremonyKind,
+    user_id: Option<Uuid>,
+    state: serde_json::Value,
+    live: bool,
+    current: Option<UserId>,
+) -> Result<Taken, AuthError> {
+    if !live {
         return Err(AuthError::Ceremony("expired"));
     }
-    let owner = row.user_id.map(UserId::from_uuid);
-    let bound_ok = if row.kind.needs_user() {
+    let owner = user_id.map(UserId::from_uuid);
+    let bound_ok = if kind.needs_user() {
         owner.is_some() && owner == current
     } else {
         owner.is_none()
@@ -188,10 +207,80 @@ async fn take_one_of(
         return Err(AuthError::Ceremony("bound to another user"));
     }
     Ok(Taken {
-        kind: row.kind,
+        kind,
         user: owner,
-        state: row.state,
+        state,
     })
+}
+
+const GOOGLE_KINDS: [CeremonyKind; 2] = [CeremonyKind::GoogleSignIn, CeremonyKind::GoogleLink];
+
+/// Leaves an authorization `code` on the unexpired Google ceremony whose `state` hashes to
+/// `state_hash`, for the session that started it to redeem ([`take_relayed_google`]). First
+/// writer wins. Returns whether a ceremony took it.
+///
+/// Only someone who knows the ceremony's `state` (sent to Google in the victim's own browser)
+/// can do this, and the code is useless without the ceremony's PKCE verifier.
+pub async fn relay_google_code(
+    pool: &PgPool,
+    state_hash: &[u8],
+    code: &str,
+) -> Result<bool, AuthError> {
+    let updated = sqlx::query!(
+        "UPDATE auth_ceremonies SET relay_code = $2
+         WHERE state_hash = $1 AND kind = ANY($3) AND relay_code IS NULL AND expires_at > now()",
+        state_hash,
+        code,
+        &GOOGLE_KINDS as &[CeremonyKind],
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(updated == 1)
+}
+
+/// Takes the session's Google ceremony if a callback relayed its code. `Ok(None)` while it is
+/// still waiting for one (the ceremony stays in place).
+pub async fn take_relayed_google(
+    pool: &PgPool,
+    session: &Session,
+    current: Option<UserId>,
+) -> Result<Option<(Taken, String)>, AuthError> {
+    let key = CeremonyKind::GoogleSignIn.session_key();
+    let id = session
+        .get::<Uuid>(key)
+        .await?
+        .ok_or(AuthError::Ceremony("none in this session"))?;
+    let row = sqlx::query!(
+        r#"DELETE FROM auth_ceremonies
+           WHERE id = $1 AND kind = ANY($2) AND relay_code IS NOT NULL
+           RETURNING kind AS "kind: CeremonyKind", user_id, state, relay_code AS "relay_code!",
+                     expires_at > now() AS "live!""#,
+        id,
+        &GOOGLE_KINDS as &[CeremonyKind],
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        let waiting = sqlx::query_scalar!(
+            r#"SELECT expires_at > now() AS "live!" FROM auth_ceremonies
+               WHERE id = $1 AND kind = ANY($2)"#,
+            id,
+            &GOOGLE_KINDS as &[CeremonyKind],
+        )
+        .fetch_optional(pool)
+        .await?;
+        return match waiting {
+            Some(true) => Ok(None),
+            _ => {
+                session.remove::<Uuid>(key).await?;
+                Err(AuthError::Ceremony("unknown or expired"))
+            }
+        };
+    };
+    session.remove::<Uuid>(key).await?;
+    let taken = checked(row.kind, row.user_id, row.state, row.live, current)?;
+    Ok(Some((taken, row.relay_code)))
 }
 
 #[cfg(test)]

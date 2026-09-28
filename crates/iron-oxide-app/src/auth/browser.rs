@@ -206,6 +206,17 @@ pub async fn get_passkey(
     Ok(assertion_credential(raw)?)
 }
 
+/// Waits `ms` milliseconds (`setTimeout`). Returns at once if there is no window.
+pub async fn sleep(ms: i32) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+    });
+    let _ = JsFuture::from(promise).await;
+}
+
 /// Asks the user to confirm with `window.confirm`. `false` if it cannot be shown.
 #[must_use]
 pub fn confirm(message: &str) -> bool {
@@ -243,6 +254,12 @@ impl GooglePopup {
                 .flatten()
         });
         Self { window }
+    }
+
+    /// Whether the browser let us open the popup (otherwise the flow uses this window).
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.window.is_some()
     }
 
     /// Sends the popup to `url`, or this window if there is no popup.

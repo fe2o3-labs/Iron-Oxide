@@ -25,6 +25,11 @@ pub async fn get_passkey(
     Err(BrowserError::Unsupported)
 }
 
+/// Never returns outside the browser (nothing polls there).
+pub async fn sleep(_ms: i32) {
+    std::future::pending::<()>().await;
+}
+
 /// Never confirmed outside the browser.
 #[must_use]
 pub fn confirm(_message: &str) -> bool {
@@ -48,6 +53,12 @@ impl GooglePopup {
     #[must_use]
     pub fn open() -> Self {
         Self
+    }
+
+    /// Never open outside the browser.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        false
     }
 
     /// Always unsupported outside the browser.

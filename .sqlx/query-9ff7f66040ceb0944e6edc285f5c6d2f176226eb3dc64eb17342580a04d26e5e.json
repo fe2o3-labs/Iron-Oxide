@@ -1,0 +1,43 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT expires_at > now() AS \"live!\" FROM auth_ceremonies\n               WHERE id = $1 AND kind = ANY($2)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "live!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        {
+          "Custom": {
+            "name": "auth_ceremony_kind[]",
+            "kind": {
+              "Array": {
+                "Custom": {
+                  "name": "auth_ceremony_kind",
+                  "kind": {
+                    "Enum": [
+                      "passkey_sign_up",
+                      "passkey_sign_in",
+                      "passkey_add",
+                      "google_sign_in",
+                      "google_link"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9ff7f66040ceb0944e6edc285f5c6d2f176226eb3dc64eb17342580a04d26e5e"
+}

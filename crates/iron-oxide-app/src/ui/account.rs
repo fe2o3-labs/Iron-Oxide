@@ -19,8 +19,14 @@ use crate::auth::browser::{
     self, BrowserError, GoogleCallbackListener, GoogleNavigation, GooglePopup,
 };
 use crate::auth::types::{
-    GoogleCallbackMessage, GoogleIntent, MAX_NAME_CHARS, Me, PasskeyId, PasskeyInfo, normalize_name,
+    GoogleCallbackMessage, GoogleIntent, GoogleProgress, MAX_NAME_CHARS, Me, PasskeyId,
+    PasskeyInfo, normalize_name,
 };
+
+/// How often the app asks the server whether a Google sign-in has come back, while waiting.
+/// The callback's message cannot always reach the app (a popup with its own cookie jar), and
+/// timers pause while the app is in the background, so this also fires soon after returning.
+const GOOGLE_POLL_MS: i32 = 2_000;
 
 /// What the panel shows.
 #[derive(Debug, Clone, PartialEq)]
@@ -225,6 +231,25 @@ pub fn Account() -> Element {
             let _ = sender.unbounded_send(message);
         }))
     });
+    // While waiting for Google, check with the server regularly (see `GOOGLE_POLL_MS`). Client
+    // only; the check goes through the same queue as the callback messages.
+    use_hook(move || {
+        if cfg!(feature = "web") {
+            let sender = messages.tx();
+            spawn(async move {
+                loop {
+                    browser::sleep(GOOGLE_POLL_MS).await;
+                    if auth.google.peek().is_some()
+                        && sender
+                            .unbounded_send(GoogleCallbackMessage::Relayed)
+                            .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+        }
+    });
 
     // Client only: on the server the panel stays "Loading" so hydration matches.
     use_effect(move || {
@@ -270,23 +295,37 @@ async fn handle_google_message(auth: Auth, message: GoogleCallbackMessage) {
         }
         return;
     };
-    auth.end_google();
-    let success = match intent {
-        GoogleIntent::SignIn => None,
-        GoogleIntent::Link => Some("Google account linked."),
-    };
-    match message {
-        GoogleCallbackMessage::Done => match me().await {
-            Err(error) if is_signed_out_error(&error) => auth.fail(Notice::Error(
-                "Google sign-in did not complete. Please try again.".to_owned(),
-            )),
-            result => auth.finish(result.map_err(Failure::Server), success),
-        },
-        GoogleCallbackMessage::Code { code, state } => {
-            let result = google_finish(code, state).await.map_err(Failure::Server);
-            auth.finish(result, success);
+    if let GoogleCallbackMessage::Error { message } = message {
+        auth.end_google();
+        auth.fail(Notice::Error(message));
+        return;
+    }
+    // `done` (finished by a popup sharing our session) or `relayed` / a poll (the code may be
+    // waiting on the server): ask the server where the flow stands.
+    let progress = google_finish().await;
+    if auth.google.peek().is_none() {
+        // Cancelled meanwhile.
+        return;
+    }
+    match progress {
+        Ok(GoogleProgress::Pending) => {}
+        Ok(GoogleProgress::Finished(me)) => {
+            auth.end_google();
+            match intent {
+                GoogleIntent::Link if !me.google_linked => {
+                    auth.finish(Ok(me), None);
+                    auth.notice.clone().set(Some(Notice::Error(
+                        "Google was not linked. Please try again.".to_owned(),
+                    )));
+                }
+                GoogleIntent::Link => auth.finish(Ok(me), Some("Google account linked.")),
+                GoogleIntent::SignIn => auth.finish(Ok(me), None),
+            }
         }
-        GoogleCallbackMessage::Error { message } => auth.fail(Notice::Error(message)),
+        Err(error) => {
+            auth.end_google();
+            auth.finish(Err(Failure::Server(error)), None);
+        }
     }
 }
 
@@ -299,7 +338,7 @@ fn start_google(mut auth: Auth, intent: GoogleIntent) {
     let popup = GooglePopup::open();
     auth.google.set(Some(intent));
     spawn(async move {
-        let url = match google_begin(intent).await {
+        let url = match google_begin(intent, popup.is_open()).await {
             Ok(url) => url,
             Err(error) => {
                 popup.close();
