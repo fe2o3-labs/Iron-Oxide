@@ -1,7 +1,6 @@
 # Pinned to an exact stable release so local builds and CI use the same compiler (Renovate bumps it).
 # Only honoured when `cargo` is the rustup proxy (see README, "Toolchain").
 [toolchain]
-# renovate: datasource=github-releases depName=rust-lang/rust
 channel = "1.98.1"
 components = ["rustfmt", "clippy"]
 targets = ["wasm32-unknown-unknown"]
