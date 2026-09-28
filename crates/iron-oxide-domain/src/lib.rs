@@ -17,6 +17,7 @@ mod error;
 mod ids;
 mod percent;
 mod reps;
+pub mod session;
 mod units;
 mod weight;
 
@@ -25,5 +26,9 @@ pub use error::{Quantity, ValueError};
 pub use ids::{ExerciseId, ProgramId, ProgramVersionId, SessionId, SetId, UserId};
 pub use percent::Percent;
 pub use reps::Reps;
+pub use session::{
+    Change, DayId, LoggedSet, RotationError, Session, SessionError, SessionLog, SessionOutcome,
+    SessionStatus, next_day,
+};
 pub use units::Unit;
 pub use weight::{Rounding, Weight, WeightDisplay};
