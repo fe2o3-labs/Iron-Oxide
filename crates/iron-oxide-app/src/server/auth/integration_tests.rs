@@ -814,6 +814,25 @@ async fn google_rejects_a_token_for_another_client(db: PgPool) {
 
 #[sqlx::test]
 #[ignore = "needs Postgres"]
+async fn google_rejects_a_token_shared_with_another_audience(db: PgPool) {
+    let app = TestApp::new(db).await;
+    let status = google_finish_with(&app, |grant, _| {
+        grant.claims["aud"] = json!([
+            super::test_support::CLIENT_ID,
+            "other.apps.googleusercontent.com"
+        ]);
+    })
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let status = google_finish_with(&app, |grant, _| {
+        grant.claims["azp"] = json!("other.apps.googleusercontent.com");
+    })
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
 async fn google_rejects_a_token_from_another_issuer(db: PgPool) {
     let app = TestApp::new(db).await;
     let status = google_finish_with(&app, |grant, _| {

@@ -1,0 +1,279 @@
+# Sign-in
+
+Iron Oxide has no passwords and no email. There are two ways to sign in (#5, decided in #37):
+
+- **Passkeys** (WebAuthn), the primary method, through [`webauthn-rs`](https://docs.rs/webauthn-rs).
+- **Sign in with Google** (OpenID Connect), through [`openidconnect`](https://docs.rs/openidconnect).
+
+Sessions are server-side, stored in Postgres, and identified by a signed cookie.
+
+Code map:
+
+| Where | What |
+|---|---|
+| `crates/iron-oxide-app/src/auth/api.rs` | The sign-in server functions (all `POST`) |
+| `crates/iron-oxide-app/src/auth/types.rs` | Types shared with the client (`Me`, `UserId`, …) |
+| `crates/iron-oxide-app/src/auth/browser.rs` | Browser side: `navigator.credentials`, the Google popup |
+| `crates/iron-oxide-app/src/server/auth/mod.rs` | `AuthState`, `AuthContext`, the `AuthUser` extractor, router wiring |
+| `crates/iron-oxide-app/src/server/auth/passkeys.rs` | Passkey ceremonies, account queries |
+| `crates/iron-oxide-app/src/server/auth/google.rs` | Google flow and the `/auth/google/callback` page |
+| `crates/iron-oxide-app/src/server/auth/session.rs` | Session store, cookie settings, timeouts, cleanup |
+| `crates/iron-oxide-app/src/server/auth/ceremony.rs` | One-time ceremony state |
+| `crates/iron-oxide-app/src/server/auth/csrf.rs` | The CSRF layer |
+| `crates/iron-oxide-app/migrations/20260928153000_create_auth_tables.sql` | Tables |
+
+## Accounts and identities
+
+A `users` row holds no identifier from outside: no email, no Google subject. Identities live in
+their own tables, all `ON DELETE CASCADE` from `users`, so deleting a user (#22) removes their
+passkeys, Google link, sessions and in-flight ceremonies:
+
+- `passkeys`: one row per WebAuthn credential. `credential_id` is unique across all users. The
+  serialized `webauthn_rs::Passkey` (public key, algorithm, signature counter, backup flags) is the
+  source of truth. `sign_count`, `backup_eligible` and `backup_state` mirror it for display.
+  Each row also has a nickname, `created_at` and `last_used_at`.
+- `oauth_identities`: `(provider, subject)` is unique, so one Google account belongs to at most one
+  user, and `(user_id, provider)` is unique, so a user has at most one Google account.
+- `sessions`: see [Sessions](#sessions).
+- `auth_ceremonies`: see [Ceremony state](#ceremony-state).
+
+An account always keeps at least one way in. Removing a passkey or unlinking Google is refused when
+it is the last one. The check locks the user row (`SELECT … FOR UPDATE`), so two concurrent
+removals cannot both pass.
+
+## Passkeys
+
+The relying party ID is `WEBAUTHN_RP_ID`. In production that is `iron-oxyde.com`, the registrable
+domain, so a future `app.` subdomain can use the same passkeys. The origin is `WEBAUTHN_ORIGIN`,
+which must equal `APP_BASE_URL`'s origin. Every ceremony requires user verification (Face ID,
+Touch ID, device PIN).
+
+**Sign-up** (`passkey_sign_up_begin` → `navigator.credentials.create()` → `passkey_sign_up_finish`):
+
+1. Begin draws a new random user id and uses it as the WebAuthn user handle. The optional name
+   given by the user labels the account in the passkey manager.
+2. The creation options require a discoverable ("resident") credential and user verification.
+   `webauthn-rs` leaves `residentKey` unset, so we set it to `required` before sending.
+3. Finish verifies the attestation: challenge, origin, RP ID hash and the UV flag. It rejects a
+   credential the browser reports as non-discoverable (`credProps.rk == false`). It then creates
+   the user and stores the passkey in one transaction, and signs in.
+
+**Sign-in** is discoverable, so no username is needed (`passkey_sign_in_begin` →
+`navigator.credentials.get()` → `passkey_sign_in_finish`):
+
+1. Begin asks for any credential of our RP (an empty `allowCredentials`). It uses a modal prompt:
+   `webauthn-rs`' discoverable API defaults to conditional (autofill) mediation, which we unset.
+2. The browser returns the credential id and the user handle. Finish loads the one passkey with
+   *that* credential id *and* that user handle, locked with `FOR UPDATE`. It verifies the
+   signature, challenge, origin, RP ID, UV flag and signature counter. A counter that does not
+   increase, when non-zero, is rejected as a possible clone. Finish then stores the new counter
+   and backup state, sets `last_used_at` and signs in.
+
+**Adding a passkey** works like sign-up, bound to the signed-in user. The user's existing
+credentials go in `excludeCredentials`, so the same authenticator is not registered twice. There
+are at most 20 passkeys per user.
+
+The `webauthn-rs` feature flags used are:
+
+- `danger-allow-state-serialisation`: the ceremony state is serialized into `auth_ceremonies`, on
+  the server only.
+- `conditional-ui`: enables the discoverable authentication API.
+
+## Sign in with Google
+
+This is the authorization code flow with PKCE (S256), `state` and `nonce`. It asks only for the
+`openid` scope, so we never receive an email or a name. Accounts are linked by the ID token's
+`sub` claim only, never by email.
+
+1. `google_begin(intent)` is a `POST`, so the CSRF check applies. It discovers Google's endpoints,
+   stores a ceremony holding a random `state`, `nonce` and PKCE verifier, and returns the
+   authorization URL. The client opens it:
+   - **in a popup** (`window.open`) opened synchronously in the tap handler, which iOS requires
+     for an installed PWA. The popup is opened blank first, then pointed at Google once the URL
+     comes back;
+   - **in the current window**, if popups are blocked (a full redirect).
+2. Google redirects to `GET /auth/google/callback?code=…&state=…`:
+   - If the request carries the session that started the flow (a full redirect, or a popup that
+     shares the app's cookies), the callback finishes the flow itself and rotates the session.
+     The page then posts `{"type":"done"}` to the opener and closes, or redirects to `/` if there
+     is no opener.
+   - Otherwise the popup has its own cookie jar, which can happen for an iOS standalone PWA.
+     The page then posts `{"type":"code","code":…,"state":…}` to the opener, and the opener calls
+     `google_finish(code, state)` in its own session. The code is useless to anyone else: it
+     needs the PKCE verifier, which never leaves the server.
+   - The page posts with `postMessage(message, <our origin>)`, so only a window on our origin can
+     receive it. It also posts on a same-origin `BroadcastChannel`. The opener ignores messages
+     from any other origin.
+   - The page is sent with `Cache-Control: no-store`, `Referrer-Policy: no-referrer` (its URL
+     holds the code) and a CSP that only allows its own inline script (by hash). It cannot be
+     framed, and data from the query string is escaped.
+3. Finishing takes the ceremony and compares `state` in constant time. It then exchanges the code
+   together with the PKCE verifier, over an HTTP client that follows no redirects. It verifies the
+   ID token:
+   - the signature, against Google's JWKS fetched on each sign-in, so key rotation needs no
+     restart;
+   - the issuer, the audience (exactly our client id, and `azp`, if present, equal to it),
+     expiry and issue time;
+   - the nonce.
+4. Then:
+   - **Sign-in**: the user linked to `sub` is signed in. If there is none, a new account is
+     created with that identity.
+   - **Link** (from a signed-in session): `sub` is linked to the current user. This is refused if
+     `sub` already belongs to another account, or if the user already has a different Google
+     account. Linking an identity to itself again is a no-op.
+
+## Sessions
+
+Sessions use [`tower-sessions`](https://docs.rs/tower-sessions) 0.15 with our own Postgres store.
+The published `tower-sessions-sqlx-store` still targets `tower-sessions-core` 0.14, and it creates
+its own table with no user column.
+
+- **Cookie:** `__Host-iron_oxide_session` (`iron_oxide_session` on local http), with
+  `HttpOnly; SameSite=Lax; Path=/`. It is `Secure` whenever `APP_BASE_URL` is `https`.
+  - Plain http is only accepted for `localhost`/loopback, so `Secure` cannot be turned off in
+    production.
+  - The `__Host-` prefix stops a sibling subdomain from setting or overwriting the cookie.
+  - The value is signed with `SESSION_KEY` (HMAC), so a forged or truncated id is rejected before
+    any database lookup.
+- **Storage:** the table stores the SHA-256 of the session id, never the id itself, so a copy of
+  the table cannot be replayed as cookies. `user_id` is kept in a column, so deleting a user
+  deletes their sessions.
+- **Rotation:** every sign-in deletes the old session, issues a new random id and carries no data
+  over. An id planted before sign-in is worthless.
+- **Expiry:**
+  - **Idle:** 14 days without activity. Activity pushes the expiry back, at most once an hour,
+    since each push is a write.
+  - **Absolute:** 30 days after sign-in, whatever the activity.
+  - **Signed-out sessions:** 15 minutes. They only exist to hold an in-flight ceremony.
+  - The store never loads an expired session. The absolute limit is checked on every
+    authenticated request, and an expired session is deleted.
+- **Sign-out** deletes the session row and clears the cookie. Sign-out and account deletion are
+  final: the store's `save` only updates an existing, unexpired row, so a request that loaded the
+  session earlier cannot recreate it.
+- **Cleanup:** a background task deletes expired sessions and ceremonies every 6 hours. It runs
+  rarely on purpose: every run wakes the scale-to-zero Neon compute (#41).
+
+## Ceremony state
+
+A ceremony's state is the WebAuthn challenge state, or Google's `state`, nonce and PKCE verifier.
+It is stored in `auth_ceremonies`, and the session holds only the row's random id. Taking a
+ceremony removes the id from the session and deletes the row in the same statement that reads it
+(`DELETE … RETURNING`). It is therefore single-use even when two requests with the same cookie race.
+The session alone could not guarantee that, since each request works on its own copy of the
+session data.
+
+Ceremonies expire after 5 minutes (passkeys) or 10 minutes (Google). A ceremony started by a
+signed-in user (adding a passkey, linking Google) is bound to that user, and only that user's
+session can finish it.
+
+## CSRF
+
+- The session cookie is `SameSite=Lax`, so browsers do not send it on cross-site `POST`s.
+- A layer in front of every route refuses any request with an unsafe method (anything but `GET`,
+  `HEAD`, `OPTIONS` and `TRACE`) unless:
+  - `Sec-Fetch-Site`, if present, is `same-origin` (`same-site` is refused too);
+  - `Origin`, if present, is exactly `APP_BASE_URL`'s origin. It is never compared with `Host`,
+    which `dx serve` and proxies rewrite;
+  - at least one of the two headers is present.
+- Every server function that changes state is a `POST`. `GET` endpoints must never change state.
+  The one cross-site `GET` that does, the Google callback, is protected by its one-time `state`.
+
+## `AuthUser` in server functions
+
+```rust
+#[cfg(feature = "server")]
+use crate::server::auth::AuthUser;
+
+#[post("/api/sets", user: AuthUser)]
+pub async fn save_set(set: NewSet) -> Result<(), ServerFnError> {
+    let user_id = user.user_id(); // from the server-side session; scope every query by it
+    // ...
+}
+```
+
+Without a valid session, the call fails with HTTP 401 before the body runs. The client sees that
+as `ServerFnError::ServerError { code: 401, .. }`, and `auth::api::is_unauthorized` detects it, so
+the UI can route to the sign-in screen. No server function takes a user id from the client.
+
+Errors reaching the client carry only a status and a short generic message. Details are logged
+server-side: which check failed, and database errors.
+
+## Threat model
+
+| Threat | Mitigation | Tested by |
+|---|---|---|
+| **Session fixation** | New random session id on every sign-in; old session deleted; unknown ids never adopted (the store draws a fresh id); `__Host-` cookie cannot be set by subdomains | `the_session_id_changes_on_sign_in`, `google_sign_in_creates_then_finds_the_account_by_sub` |
+| **Session theft (DB copy, XSS)** | Only SHA-256 of ids stored; `HttpOnly`; signed cookie; idle 14 d and absolute 30 d expiry; server-side sign-out | `session_ids_are_stored_hashed`, `sign_out_deletes_the_session_server_side`, `an_expired_session_is_401`, `a_session_past_the_absolute_timeout_is_401_and_deleted` |
+| **CSRF** | `SameSite=Lax` + `Sec-Fetch-Site`/`Origin` check on every non-safe method; state changes only via `POST` | `csrf::tests`, `cross_site_posts_are_refused_without_side_effects` |
+| **Login CSRF** (victim signed into the attacker's account) | Google: `state` bound to the victim's session, single-use; passkeys: the challenge lives in the victim's session | `a_forged_callback_cannot_log_the_victim_into_the_attackers_account` |
+| **Challenge / ceremony replay** | Ceremony consumed with `DELETE … RETURNING`, 5–10 min TTL, bound to the session (and user); WebAuthn signs the challenge; signature counter checked | `a_replayed_sign_in_is_rejected`, `two_concurrent_finishes_of_one_ceremony_cannot_both_succeed`, `concurrent_google_finishes_of_one_ceremony_cannot_both_succeed`, `a_sign_up_ceremony_is_single_use`, `a_google_ceremony_is_single_use`, `an_expired_ceremony_is_rejected` |
+| **Passkey without user verification** | UV required at registration and sign-in | `user_verification_is_required` |
+| **Credential/user mismatch** (assertion with another user's handle) | Lookup by credential id *and* user handle | `a_user_handle_pointing_at_another_account_is_rejected` |
+| **Account linking hijack** | Linked by `sub` only, never email; `(provider, subject)` unique; linking refuses a `sub` owned by another account; link ceremonies bound to the initiating user | `linking_cannot_take_over_another_accounts_google`, `a_link_ceremony_cannot_be_finished_by_another_user`, `google_sign_in_creates_then_finds_the_account_by_sub` |
+| **Token substitution** (ID token for another client, issuer or user) | `aud` = exactly our client id (and `azp` if present), `iss` = Google, signature against Google's JWKS, `nonce` bound to the ceremony, `exp`/`iat`; code bound to our PKCE verifier | `google_rejects_a_token_for_another_client`, `…_shared_with_another_audience`, `…_from_another_issuer`, `…_signed_with_an_unknown_key`, `…_an_expired_token`, `google_rejects_a_nonce_mismatch`, `google_rejects_a_code_bound_to_another_pkce_challenge` |
+| **Authorization code interception** (popup relay, logs, referrer) | PKCE; `Referrer-Policy: no-referrer`, `no-store`; `postMessage` restricted to our origin | `a_popup_without_the_session_hands_the_code_to_the_opener`, `google::tests` |
+| **Open redirect** | No return-URL parameter anywhere; the callback only ever goes to `/`; the Google redirect URL is fixed by config and validated | `config::tests::google_redirect_url_must_be_the_app_callback` |
+| **XSS via the callback page** | Query data JSON-escaped for `<script>` and HTML-escaped; CSP allows only the page's own script by hash | `google::tests::callback_page_is_locked_down`, `script_safe_json_cannot_close_the_script_element` |
+| **Locking yourself out** | Last sign-in method cannot be removed (row lock against races) | `add_list_and_remove_passkeys_but_never_the_last_way_in`, `google_as_the_only_method_cannot_be_unlinked` |
+| **Deleted user keeps access** | Sessions, identities and ceremonies cascade from `users`; a deleted session is never resurrected | `deleting_a_user_deletes_their_auth_rows`, `saving_a_deleted_session_does_not_resurrect_it` |
+| **Secrets in logs** | `secrecy` wrappers; generic client errors | `a_nasty_database_password_never_reaches_the_logs`, `error::tests` |
+| **Credential stuffing / password spraying** | **Not applicable**: there are no passwords. Passkeys are phishing-resistant and origin-bound | — |
+| **Brute force / resource exhaustion** on the begin endpoints | Ceremonies and signed-out sessions are short-lived and cleaned up; per-IP and per-user rate limits come with #23 (the begin/finish functions and the callback are the places to limit) | — |
+
+## Creating the Google OAuth client
+
+In the [Google Cloud console](https://console.cloud.google.com/):
+
+1. Create a project, e.g. "Iron Oxide".
+2. **Google Auth Platform → Branding** (the OAuth consent screen): app name "Iron Oxide", a
+   support email, and `iron-oxyde.com` under authorized domains. **Audience**: External.
+   **Data access**: no scopes need adding. The app asks for `openid` only, which needs no Google
+   verification. Publish the app ("In production") when it goes live. In "Testing", only the
+   listed test users can sign in.
+3. **Clients → Create client → Web application**. Use one client per environment, so the
+   production secret never sits on a laptop:
+   - **Local:** name "Iron Oxide (local)". Authorized redirect URI:
+     `http://localhost:8080/auth/google/callback`.
+   - **Production:** name "Iron Oxide". Authorized redirect URI:
+     `https://iron-oxyde.com/auth/google/callback`.
+   - No "Authorized JavaScript origins" are needed: the flow runs on the server.
+4. Copy the client ID and secret into `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. Set
+   `GOOGLE_REDIRECT_URL` to the exact redirect URI registered for that client. The server refuses
+   to start if it is not `APP_BASE_URL`'s origin followed by `/auth/google/callback`.
+
+## Running it locally
+
+```sh
+docker compose up -d --wait
+cp .env.example .env
+# In .env: set GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET (the local client above) and
+# SESSION_KEY=$(openssl rand 64 | openssl base64 -A)
+dx serve --web -p iron-oxide-app
+```
+
+Open **http://localhost:8080**, not 127.0.0.1: the RP ID is `localhost`, and WebAuthn requires the
+page's host to match it.
+- Browsers treat `localhost` as a secure context, so passkeys work over plain http there.
+- The session cookie is not `Secure` locally, since not every browser accepts `Secure` cookies
+  over plain http.
+- Passkeys created on `localhost` only work on `localhost`.
+
+To try the installed-PWA flow on a phone you need https on the real domain. Passkeys registered
+on a temporary host (e.g. the Fly default hostname) will not carry over to `iron-oxyde.com`.
+
+## Production settings
+
+| Variable | Value |
+|---|---|
+| `APP_BASE_URL` | `https://iron-oxyde.com` |
+| `WEBAUTHN_RP_ID` | `iron-oxyde.com` |
+| `WEBAUTHN_ORIGIN` | `https://iron-oxyde.com` |
+| `GOOGLE_REDIRECT_URL` | `https://iron-oxyde.com/auth/google/callback` |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | the production client (secret) |
+| `SESSION_KEY` | `openssl rand 64 \| openssl base64 -A`, generated for production only (secret) |
+
+Set the secrets as platform secrets (e.g. `fly secrets set`), never in a file in the repository.
+Rotating `SESSION_KEY` signs everyone out.
+
+The server links the system OpenSSL through `webauthn-rs`. A build image needs `libssl-dev` and
+`pkg-config`. The runtime needs `libssl3`, which the distroless `cc` image includes.

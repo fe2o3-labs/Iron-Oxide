@@ -199,6 +199,19 @@ pub async fn finish(ctx: &AuthContext, code: &str, state: &str) -> Result<(), Au
     let claims = id_token
         .claims(&client.id_token_verifier(), &Nonce::new(stored.nonce))
         .map_err(|e| AuthError::Google(format!("ID token: {e}")))?;
+    // openidconnect accepts any token whose audiences include ours and does not check `azp`.
+    // Google issues single-audience tokens: require exactly that, and a matching `azp` if any.
+    let client_id = ctx.auth.google().client_id.as_str();
+    let audiences: Vec<&str> = claims.audiences().iter().map(|a| a.as_str()).collect();
+    if audiences != [client_id]
+        || claims
+            .authorized_party()
+            .is_some_and(|azp| azp.as_str() != client_id)
+    {
+        return Err(AuthError::Google(
+            "ID token audience is not only us".to_owned(),
+        ));
+    }
     let subject = claims.subject().as_str();
 
     match (kind, owner) {
