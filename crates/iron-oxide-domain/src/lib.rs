@@ -12,6 +12,11 @@
 //! - [`Reps`], [`Percent`] and [`Seconds`].
 //! - [`ValueError`] for every rejected value.
 //! - The rest timer lives in [`time`] and [`timer`].
+//!
+//! # Plate calculator
+//!
+//! [`calculate_plates`] loads a target on a bar from a [`PlateInventory`], exactly or as close as
+//! possible from below and above.
 
 pub mod session;
 pub mod time;
@@ -22,6 +27,7 @@ mod duration;
 mod error;
 mod ids;
 mod percent;
+mod plates;
 mod reps;
 mod units;
 mod weight;
@@ -32,6 +38,10 @@ pub use ids::{
     DayId, ExerciseId, ProgramId, ProgramVersionId, SLUG_MAX_LEN, SessionId, SetId, UserId,
 };
 pub use percent::Percent;
+pub use plates::{
+    Loadout, PlateCount, PlateInventory, PlateInventoryError, PlateOutcome, PlateResult,
+    PlateStock, calculate_plates,
+};
 pub use reps::Reps;
 pub use session::{
     Change, LoggedSet, RotationError, Session, SessionError, SessionLog, SessionOutcome,
