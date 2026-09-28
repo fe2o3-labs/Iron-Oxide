@@ -63,7 +63,7 @@ fn valid_fixtures_parse_validate_round_trip_and_match_the_schema() {
 }
 
 #[test]
-fn builtin_programs_match_the_schema() {
+fn builtin_programs_round_trip_and_match_the_schema() {
     let validator = schema_validator();
     for builtin in builtin_programs().unwrap() {
         assert_eq!(
@@ -74,6 +74,7 @@ fn builtin_programs_match_the_schema() {
         );
         let written = builtin.program().to_json_pretty().unwrap();
         assert_eq!(schema_errors(&validator, &written), Vec::<String>::new());
+        assert_eq!(Program::from_json(&written).unwrap(), *builtin.program());
     }
 }
 
