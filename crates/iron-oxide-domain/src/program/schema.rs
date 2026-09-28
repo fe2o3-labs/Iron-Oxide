@@ -30,9 +30,15 @@ use crate::{DayId, ExerciseId, Percent, Reps, Seconds};
 /// Matches the slug rules of `ExerciseId`, `DayId` and `SupersetId`.
 const SLUG_PATTERN: &str = "^[a-z0-9]+(-[a-z0-9]+)*$";
 
-/// Matches a text with at least one character that `validate::is_blank` does not treat as
-/// whitespace. ECMA-262 `\s` is Unicode `White_Space` plus U+FEFF, minus U+0085.
-const NOT_BLANK_PATTERN: &str = "[^\\s\\u0085]";
+/// A name: no C0 control character (`validate::has_control_character`), and at least one
+/// character that `validate::is_blank` does not treat as whitespace. ECMA-262 `\s` is Unicode
+/// `White_Space` plus U+FEFF, minus U+0085.
+const NAME_PATTERN: &str = "^[^\\u0000-\\u001f]*[^\\s\\u0085\\u0000-\\u001f][^\\u0000-\\u001f]*$";
+
+/// A description or notes: as [`NAME_PATTERN`], but tab, line feed and carriage return are allowed.
+const MULTILINE_PATTERN: &str = "^[^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f]*\
+     [^\\s\\u0085\\u0000-\\u001f]\
+     [^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f]*$";
 
 /// A port from 1 to 65535 without leading zeros, as `values::is_port` accepts.
 const PORT_PATTERN: &str =
@@ -113,7 +119,7 @@ pub(super) fn name(_: &mut SchemaGenerator) -> Schema {
         "type": "string",
         "minLength": 1,
         "maxLength": MAX_NAME_CHARS,
-        "pattern": NOT_BLANK_PATTERN,
+        "pattern": NAME_PATTERN,
     })
 }
 
@@ -122,7 +128,7 @@ pub(super) fn optional_text(_: &mut SchemaGenerator) -> Schema {
         "type": ["string", "null"],
         "minLength": 1,
         "maxLength": MAX_TEXT_CHARS,
-        "pattern": NOT_BLANK_PATTERN,
+        "pattern": MULTILINE_PATTERN,
     })
 }
 

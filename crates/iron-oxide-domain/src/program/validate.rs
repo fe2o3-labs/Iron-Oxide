@@ -71,7 +71,7 @@ impl<'a> Validator<'a> {
         }
         self.name(root.key("name"), &program.name);
         if let Some(description) = &program.description {
-            self.text(root.key("description"), description, MAX_TEXT_CHARS);
+            self.multiline(root.key("description"), description);
         }
 
         let days_path = root.key("days");
@@ -197,7 +197,7 @@ impl<'a> Validator<'a> {
         self.work(&path.key("work"), exercise.work);
         self.seconds(path.key("rest"), exercise.rest, 0);
         if let Some(notes) = &exercise.notes {
-            self.text(path.key("notes"), notes, MAX_TEXT_CHARS);
+            self.multiline(path.key("notes"), notes);
         }
         if let Some(load) = exercise.load {
             let load_path = path.key("load");
@@ -461,14 +461,22 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// A one-line text: a program, day or exercise name.
     fn name(&mut self, path: JsonPath, name: &str) {
-        self.text(path, name, MAX_NAME_CHARS);
+        self.text(path, name, MAX_NAME_CHARS, false);
     }
 
-    fn text(&mut self, path: JsonPath, text: &str, max: usize) {
+    /// A description or notes: may contain tabs and line breaks.
+    fn multiline(&mut self, path: JsonPath, text: &str) {
+        self.text(path, text, MAX_TEXT_CHARS, true);
+    }
+
+    fn text(&mut self, path: JsonPath, text: &str, max: usize, multiline: bool) {
         let len = text.chars().count();
         if is_blank(text) {
             self.push(path, Kind::Blank);
+        } else if has_control_character(text, multiline) {
+            self.push(path, Kind::ControlCharacter { multiline });
         } else if len > max {
             self.push(path, Kind::TooLong { max, len });
         }
@@ -532,6 +540,14 @@ impl<'a> Validator<'a> {
 /// mark), exactly what the schema's `[^\s\u0085]` pattern treats as blank.
 fn is_blank(text: &str) -> bool {
     text.chars().all(|c| c.is_whitespace() || c == '\u{feff}')
+}
+
+/// Whether `text` has a C0 control character (U+0000 to U+001F), not counting tab, line feed and
+/// carriage return when `multiline`. They have no place in a name or a note, and Postgres cannot
+/// store U+0000 at all. `schema.rs` mirrors this in its text patterns.
+fn has_control_character(text: &str, multiline: bool) -> bool {
+    text.chars()
+        .any(|c| matches!(c, '\u{0}'..='\u{1f}') && !(multiline && matches!(c, '\t' | '\n' | '\r')))
 }
 
 /// `path.kg` or `path.lb`, where the number of a [`UnitWeight`] is written.
@@ -870,6 +886,56 @@ mod tests {
                 "days[1].exercises[0].load: exercise `squat` must have the same kind of load everywhere (see days[0].exercises[0])",
             ]
         );
+    }
+
+    #[test]
+    fn control_characters_are_refused_in_every_text() {
+        let refused = errors(|doc| {
+            doc["name"] = "A\u{0}B".into();
+            doc["description"] = "x\u{0}y".into();
+            doc["days"][0]["name"] = "Day\tA".into();
+            doc["days"][0]["exercises"][0]["name"] = "Squat\n".into();
+            doc["days"][0]["exercises"][0]["notes"] = "Brace\u{1b}[31m".into();
+        });
+        assert_eq!(
+            refused,
+            [
+                "name: must not contain control characters",
+                "description: must not contain control characters other than tabs and line breaks",
+                "days[0].name: must not contain control characters",
+                "days[0].exercises[0].name: must not contain control characters",
+                "days[0].exercises[0].notes: must not contain control characters other than tabs \
+                 and line breaks",
+            ]
+        );
+        // Descriptions and notes may have tabs and line breaks (CRLF included); DEL and C1
+        // controls are not C0 and are allowed.
+        assert!(
+            errors(|doc| {
+                doc["description"] = "Line 1\r\nLine 2\n\tindented".into();
+                doc["days"][0]["exercises"][0]["notes"] = "a\tb\nc".into();
+                doc["name"] = "A\u{7f}\u{80}B".into();
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn control_characters_are_every_c0_character() {
+        for code in 0_u32..=0x1f {
+            let c = char::from_u32(code).unwrap();
+            let text = format!("a{c}b");
+            let in_multiline = !matches!(c, '\t' | '\n' | '\r');
+            assert!(has_control_character(&text, false), "U+{code:04X}");
+            assert_eq!(
+                has_control_character(&text, true),
+                in_multiline,
+                "U+{code:04X}"
+            );
+        }
+        for text in ["plain", "é\u{7f}\u{80}\u{9f}\u{a0}\u{2028}"] {
+            assert!(!has_control_character(text, false), "{text:?}");
+        }
     }
 
     #[test]

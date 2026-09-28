@@ -120,7 +120,16 @@ async fn builtin_row(db: &PgPool) -> ProgramId {
 
 /// The problems of a refused upload, read the way the client reads them.
 async fn problems(user: &mut TestUser, document: &str) -> ProgramProblems {
-    let (status, body) = fails(user, UPLOAD, upload_body(new_program(), document)).await;
+    problems_for(user, new_program(), document).await
+}
+
+/// [`problems`], for an upload to `target`.
+async fn problems_for(
+    user: &mut TestUser,
+    target: UploadTarget,
+    document: &str,
+) -> ProgramProblems {
+    let (status, body) = fails(user, UPLOAD, upload_body(target, document)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert_eq!(message(&body), INVALID_PROGRAM, "{body}");
     // What the Dioxus client turns this response into.
@@ -411,6 +420,63 @@ async fn invalid_uploads_get_the_path_aware_errors(db: PgPool) {
         vec![created.version]
     );
     assert_eq!(programs_of(&mut a, true).await.len(), 1);
+}
+
+/// A change to a program document.
+type DocumentChange = fn(&mut Value);
+
+/// Postgres cannot store U+0000 (it was a `500` when the document reached the database), and no
+/// C0 control character belongs in a name or a note: a `422` with the path, for a new program and
+/// for a new version, and nothing is saved.
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn control_characters_are_refused_with_their_path(db: PgPool) {
+    let api = api(db).await;
+    let mut a = api.user("A").await;
+    let created = upload(&mut a, new_program(), &document("P")).await;
+    let new_version = UploadTarget::NewVersion {
+        program_id: created.program.id,
+    };
+
+    let cases: [(&str, DocumentChange); 5] = [
+        ("name", |doc| doc["name"] = json!("A\u{0}B")),
+        ("description", |doc| doc["description"] = json!("x\u{0}y")),
+        ("days[0].name", |doc| {
+            doc["days"][0]["name"] = json!("D\u{0}")
+        }),
+        ("days[0].exercises[0].name", |doc| {
+            doc["days"][0]["exercises"][0]["name"] = json!("Squat\u{7}");
+        }),
+        ("days[0].exercises[0].notes", |doc| {
+            doc["days"][0]["exercises"][0]["notes"] = json!("\u{1b}[31mred");
+        }),
+    ];
+    for (path, change) in cases {
+        let mut value: Value = serde_json::from_str(&document("P")).unwrap();
+        change(&mut value);
+        // Written as JSON escapes, the way an uploaded file carries them.
+        let json = value.to_string();
+        assert!(json.contains("\\u0000") || json.contains("\\u0007") || json.contains("\\u001b"));
+        for target in [new_program(), new_version] {
+            let found = problems_for(&mut a, target, &json).await;
+            // First the control character; a renamed exercise also differs from its other days.
+            assert_eq!(found.errors[0].path, path, "{found:?}");
+            assert!(
+                found.errors[0].message.contains("control characters"),
+                "{found:?}"
+            );
+        }
+    }
+    assert_eq!(
+        versions_of(&mut a, created.program.id).await,
+        vec![created.version]
+    );
+    assert_eq!(programs_of(&mut a, true).await.len(), 1);
+
+    // Tabs and line breaks are fine in a description.
+    let mut value: Value = serde_json::from_str(&document("P")).unwrap();
+    value["description"] = json!("Line 1\r\nLine 2\n\tindented");
+    assert!(upload(&mut a, new_version, &value.to_string()).await.saved);
 }
 
 #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
