@@ -42,14 +42,25 @@ Things to know:
 
 ## 2. Before you restore
 
-1. **Stop the bleeding.** If the app is still doing damage (a bad deploy or a runaway job), stop it:
+1. **Stop the bleeding.** If the app is still doing damage (a bad deploy or a runaway job), stop it. First **record the image** you will bring back. Scaling to 0 **destroys** the Machines, so `fly scale count 1`, `fly apps restart` and `fly secrets set` can no longer start anything. The only way back is `fly deploy` ([Fly docs](https://fly.io/docs/apps/scale-count/)).
 
    ```bash
+   fly releases --image -a <app>   # note the image ref of the last known-good release -> <image-ref>
    fly scale count 0 -a <app>
    ```
 
+   To bring the app back, use this command. It is referenced below as **"start the app"**. Run it from a checkout of the repo so `fly.toml` is picked up. A deploy from zero creates two Machines per process group.
+
+   ```bash
+   fly deploy --image <image-ref> -a <app>   # <image-ref>: known-good release, or the fixed release
+   ```
+
+   A bare `fly deploy` would build whatever is in your working tree, which may be the bad release.
+
+   If you did not stop the app, "start the app" just means `fly apps restart <app>`, so it opens fresh connections.
+
 2. **Find the restore point in UTC.** Neon takes RFC 3339 timestamps, and `Z` means UTC. Paris is UTC+2 in summer and UTC+1 in winter.
-   - `fly logs -a <app>` prints UTC timestamps. Look for the bad deploy or request.
+   - `fly logs -a <app>` and `fly releases -a <app>`: look for the bad deploy or request. Check the timestamps' zone (a `Z` suffix means UTC) before copying them.
    - Look at `created_at`/`updated_at` columns near the incident.
    - Use **Time Travel** to query the past read-only, and bisect until you find the last good moment. You can do this from the Console (**SQL Editor**, clock icon) or from the CLI:
 
@@ -71,7 +82,7 @@ Things to know:
 
 3. **Think about migrations.** Migrations run automatically when the app starts.
    - If you restore to a point **before a migration**, the database's migration table goes back too. The next boot **re-runs that migration**.
-   - If the incident *was* a bad migration, restoring and then booting the same image repeats the damage. Deploy a fixed release first, or keep the app scaled to 0 until one is ready.
+   - If the incident *was* a bad migration, restoring and then booting the same image repeats the damage. Keep the app scaled to 0 until a fixed release exists. Then "start the app" with that release's image, never with the bad one.
    - Rolling the **code** back to an older release while the database keeps a newer schema can make the migrator refuse to start, because it sees "applied migration missing from source". Check how the migrator is configured before relying on a code rollback.
 
 ## 3. Restore
@@ -112,10 +123,10 @@ If only a few rows were lost and you want to keep the writes made since, don't r
 
 ```bash
 # Direct endpoint: never pass --pooled (decision #39). $(...) keeps the password out of your shell history.
-fly secrets set DATABASE_URL="$(neon connection-string restore-check)" -a <app>
+# --stage: store the secret without deploying (there may be no Machines to roll if you scaled to 0).
+fly secrets set --stage DATABASE_URL="$(neon connection-string restore-check)" -a <app>
+fly deploy --image <image-ref> -a <app>   # "start the app"; the new Machines pick up the staged secret
 ```
-
-`fly secrets set` rolls out a new release that restarts the machines, so no separate restart is needed. If you used `--stage`, run `fly secrets deploy -a <app>`.
 
 ### B. Restore production in place
 
@@ -134,18 +145,16 @@ neon branches restore <prod-branch> ^self@2026-09-28T12:05:00Z \
 
 `--preserve-under-name` is mandatory for `^self`. The pre-restore state is kept as a root branch with that name (the Console names it `<prod-branch>_old_<timestamp>`).
 
-- **Undo the restore:** restore `<prod-branch>` again, using that backup branch as the source:
-
-  ```bash
-  neon branches restore <prod-branch> <prod-branch>_before_restore_20260928
-  ```
-
 - Open connections drop for a few seconds during the restore. The restore itself takes seconds.
-- Restart the app so it opens fresh connections, or scale it back up if you stopped it:
+- **Start the app** as described in [step 2.1](#2-before-you-restore): `fly deploy --image <image-ref> -a <app>` if you scaled to 0, otherwise `fly apps restart <app>`.
+- **Undo the restore:** restore `<prod-branch>` again, using the backup branch as the source. **Always pass `--preserve-under-name`.** Anything written since the restore exists only in `<prod-branch>`, and the flag keeps it in a new backup branch. Neon only guarantees that backup when the flag is given. Stop the app first (step 2.1), then start it again afterwards.
 
   ```bash
-  fly apps restart <app>        # or: fly scale count 1 -a <app>
+  neon branches restore <prod-branch> <prod-branch>_before_restore_20260928 \
+    --preserve-under-name <prod-branch>_before_undo_20260928
   ```
+
+  Per the Neon docs, the branch preserved when a root branch is restored *from another branch* **cannot be deleted**. You can only drop its tables to reclaim storage.
 
 ## 4. Verify
 
@@ -178,12 +187,21 @@ Do this once before real data matters, then after any change to the database set
 
 PITR only reaches as far back as the history window, and it lives inside Neon. For an off-Neon copy (before risky changes, before leaving Neon, or for long-term archiving), take a logical dump.
 
-```bash
-# Direct endpoint only: pg_dump over the pooler is not supported. pg_dump's major version must match the server's (`show server_version;`).
-pg_dump -Fc -v -d "$(neon connection-string <prod-branch>)" -f ~/iron-oxide-backups/iron-oxide-$(date -u +%Y%m%dT%H%M%SZ).dump
+- Use the direct endpoint only: `pg_dump` over the pooler is not supported.
+- `pg_dump` refuses to dump a server with a newer major version, so its major version must be **the same as or newer than** the server's (`show server_version;`).
+- `pg_restore` must be at least as new as the `pg_dump` that wrote the archive.
 
-# Restore into an empty database or branch:
-pg_restore -v --no-owner -d "<target connection string>" ~/iron-oxide-backups/<file>.dump
+```bash
+pg_dump -Fc -v -d "$(neon connection-string <prod-branch>)" -f ~/iron-oxide-backups/iron-oxide-$(date -u +%Y%m%dT%H%M%SZ).dump
+```
+
+The restore target must not already contain the application schema. A new Neon branch is a **copy of its parent**, not an empty database, so `pg_restore` into a branch of `<prod-branch>` would fail on existing objects or duplicate rows. Restore into a **freshly created database** instead, e.g. on a scratch branch:
+
+```bash
+neon branches create --name dump-check
+neon databases create --branch dump-check --name restore_target
+pg_restore -v --no-owner -d "$(neon connection-string dump-check --database-name restore_target)" \
+  ~/iron-oxide-backups/<file>.dump
 ```
 
 > **Never commit dumps.** They contain user data (accounts, emails, workout history) and this repository is **public**. Write them outside the repo, keep them encrypted, and delete old ones.
