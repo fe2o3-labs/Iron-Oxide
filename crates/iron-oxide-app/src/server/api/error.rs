@@ -46,8 +46,9 @@ pub enum ApiError {
     /// `413`: the request is larger than the endpoint accepts. The message is shown to the user.
     #[error("too large: {0}")]
     TooLarge(Cow<'static, str>),
-    /// `503`: nothing was saved and retrying the same request is safe and expected to succeed
-    /// (a concurrent write got in the way, the database was briefly unreachable). The client retry
+    /// `503`: retrying the same request is safe and expected to succeed (a concurrent write got in
+    /// the way, the database was briefly unreachable). A write may have landed before a dropped
+    /// connection; the retry is still safe because every write is idempotent. The client retry
     /// queue (#30) retries it. The text is for the logs only.
     #[error("transient: {0}")]
     Transient(String),
@@ -160,7 +161,7 @@ impl From<RepoError> for ApiError {
 
 /// Database failures that a retry can fix: the pool or the connection was unavailable (a Neon
 /// compute waking up, a restart), or Postgres aborted the statement because of a concurrent one.
-fn is_transient(error: &sqlx::Error) -> bool {
+pub(crate) fn is_transient(error: &sqlx::Error) -> bool {
     match error {
         sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_) => true,
         sqlx::Error::Database(db_error) => {
@@ -195,6 +196,7 @@ impl From<AuthError> for ApiError {
             401 => Self::Unauthorized,
             404 => Self::NotFound,
             409 => Self::conflict(message.to_owned()),
+            503 => Self::Transient(error.to_string()),
             400 | 422 => Self::invalid(message.to_owned()),
             _ => Self::Internal(error.to_string()),
         }
@@ -361,6 +363,7 @@ mod tests {
         assert_eq!(status(AuthError::LastSignInMethod), 409);
         assert_eq!(status(AuthError::Invalid("Too long.".to_owned())), 422);
         assert_eq!(status(AuthError::Internal("x".to_owned())), 500);
+        assert_eq!(status(AuthError::Database(sqlx::Error::PoolTimedOut)), 503);
         assert_eq!(
             server_error(AuthError::Invalid("Too long.".to_owned())).1,
             "Too long."
