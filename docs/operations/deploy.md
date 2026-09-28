@@ -24,10 +24,14 @@ docker run --rm --init -p 8080:8080 \
   --add-host=host.docker.internal:host-gateway \
   -e APP_BASE_URL=http://localhost:8080 \
   -e DATABASE_URL=postgres://iron_oxide:iron_oxide@host.docker.internal:5433/iron_oxide \
+  -e WEBAUTHN_RP_ID=localhost -e WEBAUTHN_ORIGIN=http://localhost:8080 \
+  -e GOOGLE_CLIENT_ID=placeholder.apps.googleusercontent.com -e GOOGLE_CLIENT_SECRET=placeholder \
+  -e GOOGLE_REDIRECT_URL=http://localhost:8080/auth/google/callback \
+  -e SESSION_KEY="$(openssl rand 64 | openssl base64 -A)" \
   iron-oxide
 curl http://127.0.0.1:8080/healthz   # ok
 curl http://127.0.0.1:8080/readyz    # ok: the database answers
-open http://127.0.0.1:8080/
+open http://localhost:8080/
 ```
 
 Inside the container `localhost` is the container itself; `host.docker.internal` reaches the
@@ -85,7 +89,7 @@ Base64 session keys and Google client secrets are unaffected.
 `--stage` stores them without deploying (the app has no machine yet); the first deploy picks them
 up. After the first deploy, drop `--stage`: Fly then restarts the machines with the new values.
 
-Later, for sign-in (#5), the same pattern applies (with `--stage` to set several before one
+For sign-in (#5), the same pattern applies (with `--stage` to set several before one
 restart, then `fly secrets deploy`). Generate the session key and send it straight to Fly, without
 ever seeing it:
 
@@ -101,16 +105,17 @@ fly secrets deploy
 |---|---|---|
 | `DATABASE_URL` | yes | Neon **direct** connection string (host without `-pooler`) with `?sslmode=require` (decision #39). The pooled endpoint breaks sqlx prepared statements and migrations. |
 | `APP_BASE_URL` | yes | Public URL: `https://iron-oxide.fly.dev` until the custom domain is live, then `https://iron-oxyde.com`. |
-| `WEBAUTHN_RP_ID` | sign-in | Passkey relying party id: the bare domain, `iron-oxyde.com`. Passkeys are bound to it, so set it once the custom domain is live. |
-| `WEBAUTHN_ORIGIN` | sign-in | `https://iron-oxyde.com` |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | sign-in | OAuth "Web application" client from the Google Cloud console. |
-| `GOOGLE_REDIRECT_URL` | sign-in | `https://iron-oxyde.com/auth/google/callback`, also registered in the Google client. |
-| `SESSION_KEY` | sign-in | Session cookie key, at least 64 random bytes, base64. Generate it and pipe it to `fly secrets import` as shown above; never print it. Use a key that exists nowhere else. |
+| `WEBAUTHN_RP_ID` | yes | Passkey relying party id: the bare domain, `iron-oxyde.com` (`iron-oxide.fly.dev` while on the Fly hostname). Passkeys are bound to it: those made on the Fly hostname do not carry over. |
+| `WEBAUTHN_ORIGIN` | yes | The origin of `APP_BASE_URL`, e.g. `https://iron-oxyde.com` (the server refuses anything else). |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | yes | OAuth "Web application" client from the Google Cloud console (see docs/auth.md). |
+| `GOOGLE_REDIRECT_URL` | yes | `APP_BASE_URL`'s origin + `/auth/google/callback`, e.g. `https://iron-oxyde.com/auth/google/callback`, also registered in the Google client. |
+| `SESSION_KEY` | yes | Session cookie key, at least 64 random bytes, base64. Generate it and pipe it to `fly secrets import` as shown above; never print it. Use a key that exists nowhere else. |
 | `RUST_LOG` | no | Log filter, e.g. `info,sqlx=warn`. Not a secret: it can go in `[env]` in `fly.toml`. |
 
-The six sign-in variables are all-or-nothing: set all of them or none (they are needed once
-sign-in, #5, lands). The hello-world scaffold needs none of these; `DATABASE_URL` and
-`APP_BASE_URL` become required when the config and database work (#3 / #4) is merged.
+The six sign-in variables are required since sign-in (#5): **set them before deploying it**, or
+the new machines refuse to start (the old ones keep serving). `WEBAUTHN_ORIGIN` and
+`GOOGLE_REDIRECT_URL` must match `APP_BASE_URL`, so change all three together when moving to the
+custom domain.
 
 `IP` and `PORT` are not secrets: they are set in `fly.toml` (`0.0.0.0`, `8080`).
 
