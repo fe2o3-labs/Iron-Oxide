@@ -13,7 +13,92 @@ A strength-training PWA written in Rust with [Dioxus](https://dioxuslabs.com) fu
 | `.sqlx/` | Offline query metadata for the sqlx macros (see "Database"). |
 | `docker-compose.yml` | Local Postgres for development and tests. |
 | `programs/` | Built-in training programs (JSON), embedded in the domain crate. |
-| `schemas/program.schema.json` | JSON Schema of a program document, generated from the domain types. Regenerate with `UPDATE_SCHEMA=1 cargo test -p iron-oxide-domain program::schema`; a test fails when it is stale. |
+| `schemas/program.schema.json` | JSON Schema of a program document, generated from the domain types. Regenerate with `make schema`; a test fails when it is stale. |
+| `Makefile` | Entry point for every dev, test, build and deploy task (`make` lists them). |
+| `scripts/` | Helpers the Makefile and CI call: `setup.sh` (tool check and install), `smoke-test.sh` (release bundle smoke test), `check-postgres-tests.sh` (every Postgres test ran), `test-make-guards.sh` (the Makefile's own guards). |
+
+## Quick start
+
+```sh
+make setup   # pinned Rust toolchain + wasm target, dx, sqlx-cli; lists anything else missing (Docker...)
+make dev     # .env, local Postgres, migrations, then hot reload on http://localhost:8080
+make check   # everything CI runs, before pushing
+```
+
+Every task goes through `make`: run `make` alone for the list below. It works with macOS's
+`/usr/bin/make` (3.81) and GNU make 4. Commands fail at the first error and are not echoed; `V=1`
+echoes them (database URLs are passed through the environment, so they never show).
+
+```text
+Setup
+  help             List the targets
+  setup            Check and install the pinned toolchain, dx and sqlx-cli (DRY_RUN=1: only check)
+  env              Create .env from .env.example if missing, with a new SESSION_KEY (PRESET=localhost|lan|tailscale)
+  versions         Show the pinned versions and the installed ones
+
+Dev
+  dev              Start Postgres, apply the migrations and run `dx serve` with hot reload
+  run              Same as dev
+  run-release      Build the release bundle and run its server (service worker on) with ./.env
+  db-up            Start the local Postgres (compose project COMPOSE_PROJECT, port PG_PORT)
+  db-down          Stop the local Postgres, keeping its data
+  db-reset         Delete the local Postgres data and start afresh (CONFIRM=1)
+  db-psql          Open psql in the Postgres container (DB=iron_oxide_test for the test database)
+  migrate          Apply the migrations to DATABASE_URL (from the environment, else .env)
+  sqlx-prepare     Regenerate the offline query data in .sqlx/ (commit it)
+  schema           Regenerate schemas/program.schema.json from the domain types (commit it)
+  icons            Regenerate the PNG icons from the SVG sources (rsvg-convert, ImageMagick)
+
+Quality
+  compile          Type-check everything, fast: the workspace, the server and the wasm client
+  test             Run the unit tests (no database)
+  test-make        Test the Makefile's own safety guards (deploy, clean, check, test)
+  test-db          Run the Postgres tests and check .sqlx/ (starts the compose database if needed)
+  test-all         Run all the tests
+  fmt              Format the code
+  fmt-check        Check the formatting, as CI does
+  lint             Run clippy exactly as CI does (warnings are errors)
+  sqlx-check       Build with SQLX_OFFLINE=true: fails if .sqlx/ is missing a query
+  smoke            Build the release bundle, run it against Postgres and check it over HTTP
+  secrets          Scan the commits not on origin/main for secrets (needs gitleaks)
+  check            Run everything CI runs, in CI order (starts the compose database)
+
+Build & deploy
+  build            Build the release bundle (dx bundle --web --release)
+  docker-build     Build the production Docker image (IMAGE=iron-oxide)
+  docker-run       Run the Docker image against the local Postgres, on DOCKER_PORT
+  deploy           Redeploy origin/main to Fly.io after `make check` (CONFIRM=1)
+  logs             Tail the production logs on Fly.io
+
+Mobile
+  adb-reverse      Forward the Android device's localhost:APP_PORT here (SERIAL=... picks a device)
+  android-open     Open the app in the Android device's browser (after adb-reverse)
+  ios-open         Open the app in the booted iOS Simulator
+  tailscale-serve  Publish the app over HTTPS to your tailnet (tailscale serve)
+  tailscale-reset  Stop publishing the app to your tailnet
+
+Misc
+  clean            Delete the build output: cargo's target dir (the one in use) and dx's output
+  clean-all        clean, and delete the local Postgres data (CONFIRM=1)
+```
+
+Useful variables, set on the command line (`make test-db PG_PORT=5444`):
+
+| Variable | Default | What |
+|---|---|---|
+| `V` | `0` | `1` echoes every command |
+| `CONFIRM` | `0` | `1` is required by `db-reset`, `clean-all` and `deploy` |
+| `CONFIRM_SHARED` | `0` | `1` is required by `clean` and `clean-all` when `CARGO_TARGET_DIR` is outside the checkout (it may be shared) |
+| `SKIP_SECRETS` | `0` | `1` lets `check` run without gitleaks (never allowed for `deploy`) |
+| `COMPOSE_PROJECT`, `PG_PORT` | `iron-oxide`, `5433` | Compose project and host port of the local Postgres: set both to run a second, independent database |
+| `APP_PORT` | `8080` | Port of `dev`, `run-release`, `smoke` and the phone helpers |
+| `DX_ARGS` | | Extra `dx serve` arguments for `dev` |
+| `LOCKED` | `--locked` | Empty to let cargo update `Cargo.lock` |
+| `DRY_RUN` | `0` | `1`: `setup` only checks |
+
+The Makefile puts `~/.cargo/bin` first on the `PATH` (see "Toolchain"), and on macOS, while the
+Xcode license is not accepted, points `DEVELOPER_DIR` at the Command Line Tools so git and the
+linker keep working.
 
 ## Pinned versions
 
@@ -23,10 +108,13 @@ Everything is pinned to its latest stable release and kept current by Renovate (
 |---|---|
 | Rust (stable) + the `wasm32-unknown-unknown` target | `rust-toolchain.toml` |
 | Dioxus | `dioxus` in `Cargo.toml`, pinned exactly with `=` |
-| `dx` (Dioxus CLI) | this README, `.github/workflows/ci.yml` (and the Dockerfile) |
+| `dx` (Dioxus CLI) | `.github/workflows/ci.yml` and the Dockerfile; locally, `make setup` installs the `dioxus` version from `Cargo.lock` |
+| `sqlx-cli` | `.github/workflows/ci.yml`; locally, `make setup` installs the `sqlx` version from `Cargo.lock` |
 
-The `dx` version must always equal the `dioxus` crate version. Renovate bumps them together in one
-PR, through the `# renovate: datasource=crate depName=dioxus-cli` markers.
+The `dx` version must always equal the `dioxus` crate version, and `sqlx-cli` the `sqlx` one.
+Renovate bumps them together in one PR, through the `# renovate: datasource=crate` markers. The
+Makefile writes no version: it reads them from `rust-toolchain.toml` and `Cargo.lock`, and `make
+versions` compares them with what is installed.
 
 ## Toolchain
 
@@ -38,8 +126,8 @@ which cargo        # should be ~/.cargo/bin/cargo, not /opt/homebrew/bin/cargo
 cargo --version    # should print the version pinned in rust-toolchain.toml
 ```
 
-If it doesn't, put `~/.cargo/bin` first on your `PATH` (or `brew uninstall rust`). rustup installs
-the pinned toolchain and the wasm target on first use.
+If it doesn't, put `~/.cargo/bin` first on your `PATH` (or `brew uninstall rust`). The Makefile
+already does, and `make setup` installs the pinned toolchain, its components and the wasm target.
 
 ### wasm `--cfg=web_sys_unstable_apis`
 
@@ -54,24 +142,12 @@ that bypasses the config fails loudly.
 > wasm client, for example in a Dockerfile or a CI step, it must also contain
 > `--cfg=web_sys_unstable_apis`.
 
-## Install the Dioxus CLI
-
-```sh
-# renovate: datasource=crate depName=dioxus-cli
-cargo install dioxus-cli --locked --version 0.7.10
-dx --version   # must match the `dioxus` version in Cargo.toml
-```
-
-`cargo binstall dioxus-cli@<same version>` installs the official prebuilt binary instead, which is much faster.
-
 ## Configuration
 
 The server reads its configuration from environment variables at startup
-(`crates/iron-oxide-app/src/server/config.rs`). For local development, copy the template:
-
-```sh
-cp .env.example .env
-```
+(`crates/iron-oxide-app/src/server/config.rs`). For local development, `make env` copies the
+template `.env.example` to `.env` if there is none yet (`make dev` does it too), with a freshly
+generated `SESSION_KEY`; fill in the Google client (see [docs/auth.md](docs/auth.md)).
 
 `.env` is git-ignored and optional, and only read from the working directory (not its parents);
 real environment variables take precedence over it. A malformed `.env` stops the server with the
@@ -98,7 +174,7 @@ host), stops the server with "unsupported parameter".
 | `IP`, `PORT` | no | Bind address, default `127.0.0.1:8080`. `dx serve` sets them itself |
 | `RUST_LOG` | no | Log filter, e.g. `info,sqlx=warn` |
 | `SHUTDOWN_GRACE_SECS` | no | Time in-flight requests get after a shutdown signal, 1 to 300, default 20. Keep it below the platform's kill timeout |
-| `WEBAUTHN_RP_ID` | yes | Passkeys: our domain, e.g. `iron-oxyde.com` (`localhost` locally) |
+| `WEBAUTHN_RP_ID` | yes | Passkeys: the relying party domain (`localhost` locally; production: see docs/auth.md). The app is served at `https://app.iron-oxyde.com` |
 | `WEBAUTHN_ORIGIN` | yes | Passkeys: the origin of `APP_BASE_URL` (must be equal) |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | yes | Sign in with Google: the OAuth client (secret) |
 | `GOOGLE_REDIRECT_URL` | yes | `APP_BASE_URL`'s origin + `/auth/google/callback` (must be equal) |
@@ -112,15 +188,19 @@ Secrets are redacted from `Debug` output and logs.
 ## Database
 
 Postgres 18 (the same major version as the Neon project) runs locally with Docker Compose
-(Compose 2.23 or newer):
+(Compose 2.23 or newer), with a dev database `iron_oxide` and a test database `iron_oxide_test`:
 
 ```sh
-docker compose up -d --wait   # dev DB `iron_oxide` and test DB `iron_oxide_test`, on localhost:5433
-docker compose down           # stop (add -v to delete the data)
+make db-up     # start, on localhost:5433
+make db-psql   # psql in the container (DB=iron_oxide_test for the test database)
+make db-down   # stop, keeping the data
+make db-reset CONFIRM=1   # delete the data and start afresh
 ```
 
-It listens on port 5433 so it does not clash with a local Postgres on 5432; set
-`IRON_OXIDE_PG_PORT` to use another port (and change `DATABASE_URL` to match).
+It listens on port 5433 so it does not clash with a local Postgres on 5432. `PG_PORT` picks
+another port, and `COMPOSE_PROJECT` another compose project (an independent database); change
+`DATABASE_URL` in `.env` to match for `dev` and `migrate`. The make targets only ever delete the
+data of their own compose project.
 
 The schema, the repository layer and how users' data is kept apart are described in
 [`docs/database.md`](docs/database.md).
@@ -129,47 +209,42 @@ The schema, the repository layer and how users' data is kept apart are described
 
 Migrations live in `crates/iron-oxide-app/migrations/` and are embedded in the server binary
 (`sqlx::migrate!()`). The server applies any pending ones at startup, before serving requests;
-there is no separate migration step to run on deploy.
-
-The CLI is only needed to add migrations or refresh the query data below. Install the version that
-matches the `sqlx` crate:
+there is no separate migration step to run on deploy. `make migrate` applies them to the database
+of `DATABASE_URL` (`make dev` does it first, so the sqlx macros can check queries against it). To
+add one (`make setup` installs `sqlx-cli`):
 
 ```sh
-# renovate: datasource=crate depName=sqlx-cli
-cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features postgres,rustls
 sqlx migrate add <name> --source crates/iron-oxide-app/migrations
-sqlx migrate run --source crates/iron-oxide-app/migrations   # optional: the server does it too
 ```
 
 ### Offline query data (`.sqlx/`)
 
 `sqlx::query!` macros check queries against a real database at compile time. So that CI, the
 Docker build and anyone without a running database can still compile, the query metadata is
-committed in `.sqlx/`, and CI builds with `SQLX_OFFLINE=true`. After adding or changing a query,
-with the compose database up and migrated:
+committed in `.sqlx/`, and CI builds with `SQLX_OFFLINE=true`. The Makefile sets it too, except for
+`dev`, `sqlx-prepare` and the `.sqlx/` check of `test-db`, which compile against the live
+database. After adding or changing a query:
 
 ```sh
-cargo sqlx prepare --workspace -- --all-targets --features iron-oxide-app/server
+make sqlx-prepare   # starts and migrates the database, then `cargo sqlx prepare`
 git add .sqlx
 ```
 
-CI fails if `.sqlx/` is missing a query or holds a stale one.
+`make sqlx-check` and CI fail if `.sqlx/` is missing a query; `make test-db` and CI also fail if
+it holds a stale one.
 
-Whenever `DATABASE_URL` is set (including from `.env`), the macros check queries against that live
-database instead of `.sqlx/`, so its schema must be migrated. On a fresh database, either run
-`sqlx migrate run --source crates/iron-oxide-app/migrations` before the first build, or build with
-`SQLX_OFFLINE=true`, which compiles from `.sqlx/` without a database.
+Outside make, whenever `DATABASE_URL` is set (including from `.env`), the macros check queries
+against that live database instead of `.sqlx/`, so its schema must be migrated (`make migrate`),
+or build with `SQLX_OFFLINE=true`.
 
 ### Tests that need Postgres
 
-They are marked `#[ignore = "needs Postgres"]`, so plain `cargo test` skips them. Run them against
-the compose test database; each `#[sqlx::test]` creates, and then drops, its own database (see
-"Tests" in [`docs/database.md`](docs/database.md)):
-
-```sh
-DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
-  cargo test -p iron-oxide-app --features server -- --ignored
-```
+They are marked `#[ignore = "needs Postgres"]`, so `make test` and plain `cargo test` skip them.
+`make test-db` starts the compose database, applies the migrations to `iron_oxide_test`, checks
+`.sqlx/`, then runs them; each `#[sqlx::test]` creates, and then drops, its own database (see
+"Tests" in [`docs/database.md`](docs/database.md)). It then fails if any of them silently did not
+run (`scripts/check-postgres-tests.sh`). `make test-all` runs both. To use another database, set
+`TEST_DATABASE_URL` (as CI does): no compose database is started then.
 
 ### Neon (production)
 
@@ -193,12 +268,12 @@ DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
 ## Develop
 
 ```sh
-docker compose up -d --wait   # once per session
-cp .env.example .env          # once
-dx serve --web -p iron-oxide-app
+make dev
 ```
 
-This builds the client and the server, and serves the app with hot reload on http://127.0.0.1:8080.
+This creates `.env` if needed, starts Postgres, applies the migrations, then runs
+`dx serve --web -p iron-oxide-app`: it builds the client and the server, and serves the app with
+hot reload on http://localhost:8080 (use `localhost`, not `127.0.0.1`: passkeys are bound to it).
 The page has a button that calls the `server_time` server function (`GET /api/server-time`).
 Probes:
 
@@ -252,20 +327,21 @@ pub async fn save_set(set: NewSet) -> Result<(), ServerFnError> {
 
 On the client, `crate::auth::api::is_unauthorized(&error)` tells a 401 apart from other errors.
 
-Checks run by CI:
+### Checks
 
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy -p iron-oxide-app --all-targets --features server -- -D warnings
-cargo clippy -p iron-oxide-app --target wasm32-unknown-unknown --features web -- -D warnings
-cargo test --workspace
-cargo test -p iron-oxide-app --features server
-SQLX_OFFLINE=true cargo check -p iron-oxide-app --all-targets --features server
-# with Postgres (see "Database"):
-cargo sqlx prepare --workspace --check -- --all-targets --features iron-oxide-app/server
-cargo test -p iron-oxide-app --features server -- --ignored
-```
+`make check` runs what CI runs, in the same order. Each CI job calls one target:
+
+| CI job | Target | What |
+|---|---|---|
+| Secret scan (gitleaks) | `make secrets` | gitleaks on the commits not on `origin/main` (`check` fails without gitleaks, unless `SKIP_SECRETS=1`) |
+| rustfmt | `make fmt-check` | `cargo fmt --all --check` (`make fmt` formats) |
+| clippy | `make lint` | clippy with `-D warnings`: the workspace, the app with `server`, the app with `web` on wasm32 |
+| Unit tests | `make test`, `make test-make` | the workspace, the app with `server`, the domain crate alone, the service worker tests (Node.js; fails if there are none), then the Makefile's own guards |
+| sqlx offline build | `make sqlx-check` | `cargo check` with `SQLX_OFFLINE=true` |
+| Integration tests (Postgres) | `make test-db` | migrations, `cargo sqlx prepare --check`, the `--ignored` tests |
+| dx bundle + smoke test | `make smoke` | `make build`, then `scripts/smoke-test.sh` runs the server against Postgres and checks it over HTTP |
+
+`make compile` is the fast type-check while working: the workspace, the server and the wasm client.
 
 `clippy::unwrap_used`, `clippy::expect_used` and `clippy::panic` are denied workspace-wide, but
 allowed in tests (`clippy.toml`).
@@ -279,13 +355,13 @@ The app is an installable Progressive Web App.
 | `public/manifest.webmanifest` | Web app manifest, served at `/manifest.webmanifest` |
 | `public/sw.js` | Service worker, served at `/sw.js` so that its scope is the whole app |
 | `public/icons/`, `public/favicon.ico` | Generated icons (192, 512, maskable 512, apple-touch 180, favicon) |
-| `icons/` | SVG sources for the icons, plus `render.sh` to regenerate them (needs `rsvg-convert` and ImageMagick) |
+| `icons/` | SVG sources for the icons, plus `render.sh` to regenerate them: `make icons` (needs `rsvg-convert` and ImageMagick) |
 | `assets/tokens.css` | Colour tokens (`--io-*`), documented in [docs/palette.md](docs/palette.md) |
 | `src/pwa.rs` | Manifest link, icons and iOS meta tags in `<head>`, plus service worker registration |
 
 `dx` copies `public/` unchanged to the root of the site. The service worker is only registered in
 release builds, because `dx serve` rebuilds constantly and serves an unhashed `/wasm/` folder. To test
-the PWA locally, run the release bundle (see below) and open http://127.0.0.1:8080. Chrome and
+the PWA locally, run `make run-release` and open http://localhost:8080. Chrome and
 Safari treat `localhost`/`127.0.0.1` as a secure context, so no HTTPS is needed.
 
 The page registers the worker as `/sw.js?build=<id>`, where the id is derived from the hashed asset
@@ -302,7 +378,7 @@ unhashed file in `public/` (icons, manifest) changes. What the service worker ca
   never cached.
 - Only complete, direct responses with a non-HTML `Content-Type` are cached (status 200, not
   redirected; a missing `Content-Type` is not cached). `Range` requests go straight to the network.
-  Unit tests: `node --test crates/iron-oxide-app/tests/sw/is_cacheable.test.mjs`.
+  Unit tests (`node:test`, part of `make test`): `crates/iron-oxide-app/tests/sw/`.
 
 The server answers `404` (with `Cache-Control: no-store`) for unknown `/assets/…` paths
 (`src/pwa/missing_assets.rs`) instead of the SSR page that Dioxus serves for every other unknown path.
@@ -312,19 +388,53 @@ To try the app on the iOS Simulator, the Android Emulator or a real phone, see [
 ## Release build
 
 ```sh
-dx bundle --web --release -p iron-oxide-app
+make build         # dx bundle --web --release -p iron-oxide-app
+make run-release   # build, then run the server with ./.env
 ```
 
-The output is `target/dx/iron-oxide-app/release/web/`: a `server` binary and the `public/` client
-assets next to it. Run it from that directory, with the configuration above in its environment. It
-binds to the `IP` and `PORT` environment variables:
+The output is `target/dx/iron-oxide-app/release/web/` (under `CARGO_TARGET_DIR` if set): a
+`server` binary and the `public/` client assets next to it. The server serves `public/` from next
+to its binary, reads its configuration from the environment (and `./.env`), and binds to the `IP`
+and `PORT` environment variables:
 
 ```sh
-cd target/dx/iron-oxide-app/release/web
-IP=0.0.0.0 PORT=8080 DATABASE_URL=... APP_BASE_URL=... ./server
+IP=0.0.0.0 PORT=8080 DATABASE_URL=... APP_BASE_URL=... target/dx/iron-oxide-app/release/web/server
 ```
 
-Docker image and Fly.io deployment: see [docs/operations/deploy.md](docs/operations/deploy.md).
+## Docker and deployment
+
+```sh
+make docker-build       # the production image, tagged iron-oxide
+make docker-run         # run it on http://localhost:8080 against the local Postgres (local sign-in settings)
+make deploy CONFIRM=1   # manual redeploy of origin/main (see below)
+make logs               # fly logs
+```
+
+The production configuration, including the six sign-in variables, lives in Fly secrets; they must
+all be set before deploying, or the new machines refuse to start (see
+[docs/operations/deploy.md](docs/operations/deploy.md)). Pushes to `main` deploy through GitHub
+Actions. `make deploy` is for a manual redeploy: it only
+runs on a clean `main` at exactly `origin/main` (it fetches first) whose CI run passed (checked
+with `gh`), runs `make check` including the secret scan, checks the checkout again, then runs
+`fly deploy` from a pristine `git archive` of that commit in a temporary directory, so no local
+file (ignored, excluded or skip-worktree) reaches the build. The image is built on Fly's builder,
+not taken from CI: the same commit CI tested, but not the same build. First-time setup (Fly app, secrets, deploy token)
+and the custom domain: [docs/operations/deploy.md](docs/operations/deploy.md).
+
+## Testing on phones
+
+The app must run on `127.0.0.1:8080` (`make dev` or `make run-release`); the phone reaches it
+through a forward:
+
+```sh
+make ios-open                          # iOS Simulator: opens the app in the booted simulator
+make adb-reverse && make android-open  # Android Emulator or a USB phone
+make env PRESET=tailscale FORCE=1      # real iPhone: .env for the Tailscale host (old one kept in .env.bak)
+make tailscale-serve                   # ...then publish it over HTTPS to the tailnet; tailscale-reset stops
+```
+
+Step-by-step setups (simulators, real phones over Tailscale or mkcert, passkeys, debugging) are in
+docs/dev/mobile-testing.md, added by #63.
 
 ## Security
 
