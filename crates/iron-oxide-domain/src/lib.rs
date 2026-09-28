@@ -11,11 +11,15 @@
 //!   increment and display helpers.
 //! - [`Reps`], [`Percent`] and [`Seconds`].
 //! - [`ValueError`] for every rejected value.
+//! - The rest timer lives in [`time`] and [`timer`].
 //!
 //! # Strength statistics
 //!
 //! e1RM ([`E1rmFormula`]), [`Volume`], [`top_set`], personal records ([`ExerciseRecords`],
 //! [`PrEvent`]) and chart series ([`exercise_series`]), all computed from [`PerformedSet`] values.
+
+pub mod time;
+pub mod timer;
 
 mod display;
 mod duration;
