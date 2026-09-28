@@ -105,7 +105,8 @@ CREATE TABLE program_versions (
     -- The program JSON document (#56). The domain validates it before it is stored.
     document   jsonb       NOT NULL CHECK (
         jsonb_typeof(document) = 'object'
-        AND jsonb_typeof(document -> 'schema_version') = 'number'
+        -- IS NOT DISTINCT FROM: a missing key gives NULL, which a plain `=` would let through.
+        AND jsonb_typeof(document -> 'schema_version') IS NOT DISTINCT FROM 'number'
         AND octet_length(document::text) <= 1048576
     ),
     created_at timestamptz NOT NULL DEFAULT now(),

@@ -298,3 +298,292 @@ pub async fn list(
     .map(WorkoutSession::try_from)
     .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::db::{
+        MIGRATOR,
+        testing::{self, at, new_session, random_uuid},
+    };
+
+    #[test]
+    fn status_text_round_trips_and_rejects_unknown_values() {
+        for status in [
+            SessionStatus::InProgress,
+            SessionStatus::Completed,
+            SessionStatus::Skipped,
+            SessionStatus::Abandoned,
+        ] {
+            assert_eq!(SessionStatus::parse(status.as_str()).unwrap(), status);
+        }
+        assert!(matches!(
+            SessionStatus::parse("paused"),
+            Err(RepoError::Corrupt(_))
+        ));
+        assert_eq!(
+            SessionStatus::from(SessionOutcome::Skipped),
+            SessionStatus::Skipped
+        );
+        assert_eq!(
+            SessionStatus::from(SessionOutcome::Completed),
+            SessionStatus::Completed
+        );
+        assert_eq!(
+            SessionStatus::from(SessionOutcome::Abandoned),
+            SessionStatus::Abandoned
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn start_is_idempotent_and_detects_conflicts(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (program, version) = testing::program(&pool, user).await;
+        let new = new_session(version);
+        assert_eq!(start(&pool, user, &new).await.unwrap(), Change::Applied);
+        assert_eq!(start(&pool, user, &new).await.unwrap(), Change::Unchanged);
+        let stored = get(&pool, user, new.id).await.unwrap();
+        assert_eq!(
+            stored,
+            WorkoutSession {
+                id: new.id,
+                program_version_id: version,
+                program_id: program,
+                day_id: "a".to_owned(),
+                status: SessionStatus::InProgress,
+                started_at: new.started_at,
+                finished_at: None,
+            }
+        );
+        for different in [
+            NewSession {
+                day_id: "b".to_owned(),
+                ..new.clone()
+            },
+            NewSession {
+                started_at: at(1),
+                ..new.clone()
+            },
+            NewSession {
+                program_version_id: testing::program(&pool, user).await.1,
+                ..new.clone()
+            },
+        ] {
+            let result = start(&pool, user, &different).await;
+            assert!(matches!(result, Err(RepoError::Conflict)), "{result:?}");
+        }
+        // Still a retry after the session ended.
+        finish(&pool, user, new.id, SessionOutcome::Completed, at(10))
+            .await
+            .unwrap();
+        assert_eq!(start(&pool, user, &new).await.unwrap(), Change::Unchanged);
+        assert_eq!(
+            get(&pool, user, new.id).await.unwrap().status,
+            SessionStatus::Completed
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn concurrent_starts_create_one_session(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (_, version) = testing::program(&pool, user).await;
+        let new = new_session(version);
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let (pool, new) = (pool.clone(), new.clone());
+                tokio::spawn(async move { start(&pool, user, &new).await })
+            })
+            .collect();
+        let mut applied = 0;
+        for task in tasks {
+            if task.await.unwrap().unwrap() == Change::Applied {
+                applied += 1;
+            }
+        }
+        assert_eq!(applied, 1);
+        assert_eq!(list(&pool, user, None, None, 100).await.unwrap().len(), 1);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn start_rejects_invalid_days(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (_, version) = testing::program(&pool, user).await;
+        let new = NewSession {
+            day_id: "Day A".to_owned(),
+            ..new_session(version)
+        };
+        let result = start(&pool, user, &new).await;
+        assert!(
+            matches!(result, Err(RepoError::Invalid { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn finish_is_idempotent_and_detects_conflicts(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let session = testing::session(&pool, user).await;
+        let result = finish(&pool, user, session, SessionOutcome::Skipped, at(-1)).await;
+        assert!(
+            matches!(result, Err(RepoError::Invalid { .. })),
+            "{result:?}"
+        );
+        assert_eq!(
+            finish(&pool, user, session, SessionOutcome::Skipped, at(0))
+                .await
+                .unwrap(),
+            Change::Applied
+        );
+        assert_eq!(
+            finish(&pool, user, session, SessionOutcome::Skipped, at(0))
+                .await
+                .unwrap(),
+            Change::Unchanged
+        );
+        for (outcome, time) in [
+            (SessionOutcome::Completed, at(0)),
+            (SessionOutcome::Skipped, at(5)),
+        ] {
+            let result = finish(&pool, user, session, outcome, time).await;
+            assert!(matches!(result, Err(RepoError::Conflict)), "{result:?}");
+        }
+        let stored = get(&pool, user, session).await.unwrap();
+        assert_eq!(stored.status, SessionStatus::Skipped);
+        assert_eq!(stored.finished_at, Some(at(0)));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn in_progress_and_history_pages(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (program_1, version_1) = testing::program(&pool, user).await;
+        let (_, version_2) = testing::program(&pool, user).await;
+        assert_eq!(get_in_progress(&pool, user).await.unwrap(), None);
+        // Five sessions, one per hour; the last two from the second program.
+        let mut ids = Vec::new();
+        for hour in 0..5 {
+            let new = NewSession {
+                started_at: at(hour * 3_600),
+                program_version_id: if hour < 3 { version_1 } else { version_2 },
+                ..new_session(version_1)
+            };
+            start(&pool, user, &new).await.unwrap();
+            if hour < 4 {
+                finish(
+                    &pool,
+                    user,
+                    new.id,
+                    SessionOutcome::Completed,
+                    at(hour * 3_600 + 60),
+                )
+                .await
+                .unwrap();
+            }
+            ids.push(new.id);
+        }
+        assert_eq!(
+            get_in_progress(&pool, user).await.unwrap().map(|s| s.id),
+            Some(ids[4])
+        );
+
+        let first = list(&pool, user, None, None, 2).await.unwrap();
+        assert_eq!(
+            first.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![ids[4], ids[3]]
+        );
+        let second = list(&pool, user, None, Some(first[1].cursor()), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![ids[2], ids[1]]
+        );
+        let third = list(&pool, user, None, Some(second[1].cursor()), 2)
+            .await
+            .unwrap();
+        assert_eq!(third.iter().map(|s| s.id).collect::<Vec<_>>(), vec![ids[0]]);
+        assert!(
+            list(&pool, user, None, Some(third[0].cursor()), 2)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let of_program_1 = list(&pool, user, Some(program_1), None, 100).await.unwrap();
+        assert_eq!(
+            of_program_1.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![ids[2], ids[1], ids[0]]
+        );
+        // The limit is clamped to at least 1.
+        assert_eq!(list(&pool, user, None, None, 0).await.unwrap().len(), 1);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn sessions_with_the_same_start_page_by_id(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (_, version) = testing::program(&pool, user).await;
+        for _ in 0..3 {
+            start(&pool, user, &new_session(version)).await.unwrap();
+        }
+        let mut seen = Vec::new();
+        let mut after = None;
+        loop {
+            let page = list(&pool, user, None, after, 1).await.unwrap();
+            let Some(last) = page.last() else { break };
+            after = Some(last.cursor());
+            seen.extend(page.iter().map(|s| s.id));
+        }
+        assert_eq!(seen.len(), 3);
+        let mut sorted = seen.clone();
+        sorted.sort_by(|x, y| y.cmp(x));
+        assert_eq!(seen, sorted);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn another_users_sessions_are_invisible_and_untouchable(pool: PgPool) {
+        let (a, b) = testing::users_a_and_b(&pool).await;
+        let (program_a, version_a) = testing::program(&pool, a).await;
+        let session_a = new_session(version_a);
+        start(&pool, a, &session_a).await.unwrap();
+        let before = get(&pool, a, session_a.id).await.unwrap();
+        let guessed = SessionId::from_uuid(random_uuid());
+
+        for id in [session_a.id, guessed] {
+            let result = get(&pool, b, id).await;
+            assert!(matches!(result, Err(RepoError::NotFound)), "{result:?}");
+            let result = finish(&pool, b, id, SessionOutcome::Abandoned, at(10)).await;
+            assert!(matches!(result, Err(RepoError::NotFound)), "{result:?}");
+        }
+        assert_eq!(get_in_progress(&pool, b).await.unwrap(), None);
+        assert!(list(&pool, b, None, None, 100).await.unwrap().is_empty());
+        assert!(
+            list(&pool, b, Some(program_a), None, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // B cannot start a session from A's program version (same answer as an unknown version).
+        let (_, version_b) = testing::program(&pool, b).await;
+        for version in [version_a, ProgramVersionId::from_uuid(random_uuid())] {
+            let result = start(&pool, b, &new_session(version)).await;
+            assert!(matches!(result, Err(RepoError::NotFound)), "{result:?}");
+        }
+        // Reusing A's session id: rejected, and nothing of A's session is returned or changed.
+        let reuse = NewSession {
+            program_version_id: version_b,
+            ..session_a.clone()
+        };
+        let result = start(&pool, b, &reuse).await;
+        assert!(matches!(result, Err(RepoError::Conflict)), "{result:?}");
+        let result = start(&pool, b, &session_a).await;
+        assert!(matches!(result, Err(RepoError::Conflict)), "{result:?}");
+        assert_eq!(get(&pool, a, session_a.id).await.unwrap(), before);
+    }
+}

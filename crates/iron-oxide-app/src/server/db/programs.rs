@@ -495,3 +495,256 @@ fn found(rows_affected: u64) -> Result<(), RepoError> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::db::{
+        MIGRATOR,
+        testing::{self, document, random_uuid},
+    };
+
+    const STARTER: BuiltinSeed = BuiltinSeed {
+        builtin_id: "starter",
+        name: "Starter",
+        json: r#"{"schema_version": 1, "name": "Starter"}"#,
+    };
+
+    fn not_found<T: std::fmt::Debug>(result: Result<T, RepoError>) {
+        assert!(matches!(result, Err(RepoError::NotFound)), "{result:?}");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn seeding_is_idempotent_and_versions_changed_documents(pool: PgPool) {
+        seed_builtins(&pool, &[STARTER]).await.unwrap();
+        seed_builtins(&pool, &[STARTER]).await.unwrap();
+        let builtins = list_builtins(&pool).await.unwrap();
+        assert_eq!(builtins.len(), 1);
+        let first = &builtins[0];
+        assert_eq!(first.program.name, "Starter");
+        assert_eq!(first.program.source_builtin_id.as_deref(), Some("starter"));
+        assert_eq!(first.latest.version, 1);
+
+        let renamed = BuiltinSeed {
+            name: "Starter v2",
+            json: r#"{"schema_version": 1, "name": "Starter v2"}"#,
+            ..STARTER
+        };
+        seed_builtins(&pool, &[renamed]).await.unwrap();
+        let builtins = list_builtins(&pool).await.unwrap();
+        assert_eq!(builtins[0].program.id, first.program.id);
+        assert_eq!(builtins[0].program.name, "Starter v2");
+        assert_eq!(builtins[0].latest.version, 2);
+
+        // A built-in no longer shipped is archived, and comes back when it is shipped again.
+        seed_builtins(&pool, &[]).await.unwrap();
+        assert!(list_builtins(&pool).await.unwrap().is_empty());
+        seed_builtins(&pool, &[renamed]).await.unwrap();
+        assert_eq!(list_builtins(&pool).await.unwrap()[0].latest.version, 2);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn seeding_rejects_invalid_documents(pool: PgPool) {
+        for json in ["not json", "[1]", r#"{"name": "no schema_version"}"#] {
+            let seed = BuiltinSeed { json, ..STARTER };
+            let result = seed_builtins(&pool, &[seed]).await;
+            assert!(
+                matches!(result, Err(RepoError::Invalid { .. })),
+                "{json}: {result:?}"
+            );
+        }
+        assert!(list_builtins(&pool).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn the_seed_hook_is_valid(pool: PgPool) {
+        seed_builtins(&pool, BUILTIN_PROGRAMS).await.unwrap();
+        assert_eq!(
+            list_builtins(&pool).await.unwrap().len(),
+            BUILTIN_PROGRAMS.len()
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn copying_a_builtin_creates_an_owned_program(pool: PgPool) {
+        seed_builtins(&pool, &[STARTER]).await.unwrap();
+        let user = testing::user(&pool).await;
+        let (program, version) = copy_builtin(&pool, user, "starter").await.unwrap();
+        assert_eq!(program.name, "Starter");
+        assert_eq!(program.source_builtin_id.as_deref(), Some("starter"));
+        assert!(!program.archived);
+        assert_eq!(version.version, 1);
+        assert_eq!(version.program_id, program.id);
+        assert_eq!(
+            version.document,
+            serde_json::from_str::<JsonValue>(STARTER.json).unwrap()
+        );
+        assert_ne!(
+            program.id,
+            list_builtins(&pool).await.unwrap()[0].program.id
+        );
+        assert_eq!(list(&pool, user, false).await.unwrap(), vec![program]);
+        not_found(copy_builtin(&pool, user, "missing").await);
+        // An archived built-in cannot be copied any more.
+        seed_builtins(&pool, &[]).await.unwrap();
+        not_found(copy_builtin(&pool, user, "starter").await);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn create_rename_archive_and_list(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (first, version) = create(&pool, user, "First", &document("First"))
+            .await
+            .unwrap();
+        assert_eq!(first.source_builtin_id, None);
+        assert_eq!(version.version, 1);
+        let (second, _) = create(&pool, user, "Second", &document("Second"))
+            .await
+            .unwrap();
+        rename(&pool, user, first.id, "Renamed").await.unwrap();
+        assert_eq!(get(&pool, user, first.id).await.unwrap().name, "Renamed");
+        set_archived(&pool, user, second.id, true).await.unwrap();
+        let active: Vec<ProgramId> = list(&pool, user, false)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(active, vec![first.id]);
+        assert_eq!(list(&pool, user, true).await.unwrap().len(), 2);
+        set_archived(&pool, user, second.id, false).await.unwrap();
+        assert_eq!(list(&pool, user, false).await.unwrap().len(), 2);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn invalid_names_and_documents_are_rejected(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let long = "x".repeat(101);
+        for (name, document) in [
+            ("", document("x")),
+            (long.as_str(), document("x")),
+            ("Ok", serde_json::json!([1])),
+            ("Ok", serde_json::json!({"schema_version": "1"})),
+            (
+                "Ok",
+                serde_json::json!({"schema_version": 1, "pad": "x".repeat(1_048_576)}),
+            ),
+        ] {
+            let result = create(&pool, user, name, &document).await;
+            assert!(
+                matches!(result, Err(RepoError::Invalid { .. })),
+                "{result:?}"
+            );
+        }
+        assert!(list(&pool, user, true).await.unwrap().is_empty());
+        let (program, _) = create(&pool, user, &"x".repeat(100), &document("x"))
+            .await
+            .unwrap();
+        let result = rename(&pool, user, program.id, "").await;
+        assert!(
+            matches!(result, Err(RepoError::Invalid { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn versions_are_numbered_and_identical_uploads_are_no_ops(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (program, v1) = create(&pool, user, "P", &document("one")).await.unwrap();
+        let (change, v2) = add_version(&pool, user, program.id, &document("two"))
+            .await
+            .unwrap();
+        assert_eq!((change, v2.version), (Change::Applied, 2));
+        let (change, again) = add_version(&pool, user, program.id, &document("two"))
+            .await
+            .unwrap();
+        assert_eq!((change, &again), (Change::Unchanged, &v2));
+        // Going back to an older document is a new version.
+        let (change, v3) = add_version(&pool, user, program.id, &document("one"))
+            .await
+            .unwrap();
+        assert_eq!((change, v3.version), (Change::Applied, 3));
+        assert_eq!(
+            list_versions(&pool, user, program.id).await.unwrap(),
+            vec![v1.clone(), v2, v3.clone()]
+        );
+        assert_eq!(latest_version(&pool, user, program.id).await.unwrap(), v3);
+        assert_eq!(get_version(&pool, user, v1.id).await.unwrap(), v1);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn concurrent_uploads_get_consecutive_versions(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (program, _) = create(&pool, user, "P", &document("0")).await.unwrap();
+        let uploads = (1..=8).map(|n| {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                add_version(&pool, user, program.id, &document(&n.to_string())).await
+            })
+        });
+        for upload in uploads.collect::<Vec<_>>() {
+            upload.await.unwrap().unwrap();
+        }
+        let numbers: Vec<u32> = list_versions(&pool, user, program.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|v| v.version)
+            .collect();
+        assert_eq!(numbers, (1..=9).collect::<Vec<_>>());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn another_users_programs_are_invisible_and_untouchable(pool: PgPool) {
+        let (a, b) = testing::users_a_and_b(&pool).await;
+        let (program, version) = create(&pool, a, "A's", &document("A")).await.unwrap();
+        let guessed = ProgramId::from_uuid(random_uuid());
+        let guessed_version = ProgramVersionId::from_uuid(random_uuid());
+
+        // Every call with A's real id fails exactly like one with an id that does not exist.
+        for id in [program.id, guessed] {
+            not_found(get(&pool, b, id).await);
+            not_found(rename(&pool, b, id, "Mine now").await);
+            not_found(set_archived(&pool, b, id, true).await);
+            not_found(add_version(&pool, b, id, &document("B")).await);
+            not_found(list_versions(&pool, b, id).await);
+            not_found(latest_version(&pool, b, id).await);
+        }
+        for id in [version.id, guessed_version] {
+            not_found(get_version(&pool, b, id).await);
+        }
+        assert!(list(&pool, b, true).await.unwrap().is_empty());
+
+        // A's program is exactly as it was.
+        assert_eq!(get(&pool, a, program.id).await.unwrap(), program);
+        assert_eq!(
+            list_versions(&pool, a, program.id).await.unwrap(),
+            vec![version]
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn nobody_can_change_a_builtin_through_the_repository(pool: PgPool) {
+        seed_builtins(&pool, &[STARTER]).await.unwrap();
+        let user = testing::user(&pool).await;
+        let builtin = list_builtins(&pool).await.unwrap().remove(0);
+        let id = builtin.program.id;
+        not_found(get(&pool, user, id).await);
+        not_found(rename(&pool, user, id, "Mine").await);
+        not_found(set_archived(&pool, user, id, true).await);
+        not_found(add_version(&pool, user, id, &document("B")).await);
+        not_found(list_versions(&pool, user, id).await);
+        not_found(get_version(&pool, user, builtin.latest.id).await);
+        assert_eq!(list_builtins(&pool).await.unwrap(), vec![builtin]);
+    }
+}
