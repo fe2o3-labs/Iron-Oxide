@@ -732,6 +732,9 @@ mod tests {
             .unwrap();
         assert_eq!(first.source_builtin_id, None);
         assert_eq!(version.version, 1);
+        // Database-generated ids are UUIDv7 (#65).
+        assert_eq!(first.id.as_uuid().get_version_num(), 7);
+        assert_eq!(version.id.as_uuid().get_version_num(), 7);
         let (_, second, _) = create(&pool, user, creation(), "Second", &document("Second"))
             .await
             .unwrap();

@@ -1,7 +1,9 @@
 //! Typed ids used by the repository.
 //!
 //! Stand-ins for the domain ids of `iron-oxide-domain` (#48), which have the same shape
-//! (`from_uuid`/`as_uuid`); the repository switches to them once #48 is merged. Distinct types
+//! (`from_uuid`/`as_uuid`); the repository switches to them now that #48 is merged, in a follow-up.
+//! Ids created on the client use the domain's UUIDv7 constructor (#65); ids created in the
+//! database default to `uuidv7()`. Distinct types
 //! mean a program id can never be passed where a session id is expected, and every repository
 //! function takes a [`UserId`] that the caller must get from the authenticated session.
 

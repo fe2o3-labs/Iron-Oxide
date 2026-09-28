@@ -136,7 +136,7 @@ async fn every_user_id_cascades_from_users_and_is_indexed(pool: PgPool) {
 /// server generates or controls belong here: a key over a client-chosen value without `user_id`
 /// would tell one user that another already uses that value.
 const UNIQUE_KEYS_WITHOUT_OWNER: &[&str] = &[
-    // Program and version ids come from gen_random_uuid(), never from a client.
+    // Program and version ids come from uuidv7() in the database, never from a client.
     "programs_pkey",
     "program_versions_pkey",
     // One row per built-in id, among built-ins only (user_id IS NULL).

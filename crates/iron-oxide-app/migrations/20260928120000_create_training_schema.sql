@@ -1,6 +1,9 @@
 -- Training data: settings, training maxes, programs and their immutable versions, the active
 -- program, workout sessions and logged sets. See docs/database.md.
 --
+-- Server-side ids default to Postgres 18's `uuidv7()` (time-ordered, #65); client-generated ids
+-- (sessions, sets, creation ids) are v7 too, from the domain's constructor.
+--
 -- Isolation rules (data isolation is the app's first security property):
 -- - Every user-owned table has `user_id uuid NOT NULL REFERENCES users ON DELETE CASCADE` and an
 --   index that starts with `user_id` (built-in programs are the only rows without an owner).
@@ -96,7 +99,7 @@ CREATE TRIGGER training_maxes_owner BEFORE UPDATE OF user_id ON training_maxes
 -- a retried create or copy returns the program it already made instead of making a second one.
 
 CREATE TABLE programs (
-    id                uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    id                uuid        PRIMARY KEY DEFAULT uuidv7(),
     user_id           uuid        REFERENCES users ON DELETE CASCADE,
     creation_id       uuid,
     source_builtin_id text        CHECK (is_slug(source_builtin_id)),
@@ -125,7 +128,7 @@ CREATE TRIGGER programs_no_direct_delete BEFORE DELETE ON programs
 -- `user_id` is copied from the program by a trigger (the caller cannot choose it), so a version
 -- always has its program's owner, including NULL for built-ins.
 CREATE TABLE program_versions (
-    id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    id         uuid        PRIMARY KEY DEFAULT uuidv7(),
     program_id uuid        NOT NULL REFERENCES programs ON DELETE CASCADE,
     user_id    uuid        REFERENCES users ON DELETE CASCADE,
     version    integer     NOT NULL CHECK (version >= 1),

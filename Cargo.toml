@@ -31,12 +31,12 @@ sqlx = { version = "0.8.6", default-features = false, features = [
   "time",
   "json",
 ] }
-serde_json = "1.0.151"
 thiserror = "2.0.21"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter"] }
 url = "2.5.8"
 
 # Dev-dependencies for tests (tokio: the app also enables runtime features for its server build).
+# serde_json is also a server dependency of the app (jsonb columns).
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["macros", "rt"] }
 tower = { version = "0.5.3", features = ["util"] }
