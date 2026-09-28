@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.name, v.document FROM programs p\n         JOIN program_versions v ON v.program_id = p.id\n         WHERE p.user_id IS NULL AND NOT p.archived AND p.source_builtin_id = $1\n         ORDER BY v.version DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "document",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "800138b50ddac13e1389586e335a94c41b63a704fd0c9391d56826568ccc5b0c"
+}

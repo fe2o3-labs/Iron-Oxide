@@ -11,37 +11,83 @@ repository.workspace = true
 [dependencies]
 dioxus = { workspace = true, features = ["fullstack"] }
 iron-oxide-domain = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+webauthn-rs-proto = { workspace = true }
+
+# Browser-only: optional, enabled by the `web` feature (WebAuthn and the Google sign-in popup).
+js-sys = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true, features = [
+  "BroadcastChannel",
+  "CredentialCreationOptions",
+  "CredentialRequestOptions",
+  "CredentialsContainer",
+  "DomException",
+  "EventTarget",
+  "Location",
+  "MessageEvent",
+  "Navigator",
+  "PublicKeyCredential",
+  "Window",
+] }
 
 # Server-only: optional, enabled by the `server` feature so the wasm client never pulls them in.
+async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 dotenvy = { workspace = true, optional = true }
+openidconnect = { workspace = true, optional = true }
 secrecy = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
+subtle = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tower-sessions = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
+webauthn-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
+openssl = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
+webauthn-authenticator-rs = { workspace = true }
 
 [features]
 default = []
 # Browser client, compiled to wasm32-unknown-unknown.
-web = ["dioxus/web"]
+web = [
+  "dioxus/web",
+  "dep:js-sys",
+  "dep:wasm-bindgen",
+  "dep:wasm-bindgen-futures",
+  "dep:web-sys",
+]
 # axum server: server functions, SSR, and custom routes such as /healthz.
 server = [
   "dioxus/server",
+  "dep:async-trait",
   "dep:base64",
   "dep:dotenvy",
+  "dep:openidconnect",
   "dep:secrecy",
+  "dep:sha2",
   "dep:sqlx",
+  "dep:subtle",
   "dep:thiserror",
+  "dep:time",
   "dep:tokio",
+  "dep:tower-sessions",
   "dep:tracing-subscriber",
   "dep:url",
+  "dep:webauthn-rs",
+  "uuid/v4",
+  "uuid/v7",
 ]
 
 [lints]

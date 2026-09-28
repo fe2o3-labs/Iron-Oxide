@@ -96,7 +96,8 @@ pub mod vars {
     pub const GOOGLE_REDIRECT_URL: &str = "GOOGLE_REDIRECT_URL";
     pub const SESSION_KEY: &str = "SESSION_KEY";
 
-    /// The auth variables: all set together, or none of them (until #5 makes them required).
+    /// The sign-in variables (#5), all required.
+    #[cfg(test)]
     pub const AUTH: [&str; 6] = [
         WEBAUTHN_RP_ID,
         WEBAUTHN_ORIGIN,
@@ -121,16 +122,16 @@ pub struct Config {
     /// How long in-flight requests may run after a shutdown signal (`SHUTDOWN_GRACE_SECS`,
     /// default 20). Keep it a few seconds below the platform's kill timeout.
     pub shutdown_grace: Duration,
-    /// Sign-in settings. `None` until all auth variables are set; #5 makes them required.
-    pub auth: Option<AuthConfig>,
+    /// Sign-in settings.
+    pub auth: AuthConfig,
 }
+
+/// The path of the Google OAuth callback route. `GOOGLE_REDIRECT_URL` must be `APP_BASE_URL`'s
+/// origin followed by this path.
+pub const GOOGLE_CALLBACK_PATH: &str = "/auth/google/callback";
 
 /// Settings for passkeys, Sign in with Google and sessions (#5).
 #[derive(Debug, Clone)]
-#[allow(
-    dead_code,
-    reason = "read by passkey and Google sign-in and by sessions, in #5"
-)]
 pub struct AuthConfig {
     /// WebAuthn relying party ID (`WEBAUTHN_RP_ID`): our domain, e.g. `iron-oxide.example`.
     pub webauthn_rp_id: String,
@@ -142,8 +143,12 @@ pub struct AuthConfig {
     pub google_client_secret: SecretString,
     /// Google OAuth redirect URL (`GOOGLE_REDIRECT_URL`), registered in the Google console.
     pub google_redirect_url: Url,
-    /// Key for signing/encrypting the session cookie (`SESSION_KEY`).
+    /// Key for signing the session cookie (`SESSION_KEY`).
     pub session_key: SessionKey,
+    /// Whether cookies get the `Secure` attribute: true unless `APP_BASE_URL` is plain `http` on
+    /// a loopback host (local development). Not configurable on its own, so it cannot be turned
+    /// off in production.
+    pub cookie_secure: bool,
 }
 
 /// A Postgres connection URL. It usually embeds a password, so `Debug` only shows the host,
@@ -274,7 +279,6 @@ impl SessionKey {
     }
 
     /// The raw key bytes. Only pass them to the cookie/session layer.
-    #[allow(dead_code, reason = "used by the session layer in #5")]
     pub fn expose_bytes(&self) -> &[u8] {
         self.0.expose_secret()
     }
@@ -358,9 +362,15 @@ impl Config {
         let log_filter = env.optional(vars::RUST_LOG, parse_log_filter);
         let shutdown_grace = env.optional(vars::SHUTDOWN_GRACE_SECS, parse_grace);
         let auth = load_auth(&mut env);
+        let auth = match (&app_base_url, auth) {
+            (Some(app_base_url), Some(auth)) => {
+                check_auth_against_base_url(&mut env, app_base_url, auth)
+            }
+            _ => None,
+        };
 
-        match (database_url, app_base_url, env.errors.is_empty()) {
-            (Some(database_url), Some(app_base_url), true) => Ok(Self {
+        match (database_url, app_base_url, auth, env.errors.is_empty()) {
+            (Some(database_url), Some(app_base_url), Some(auth), true) => Ok(Self {
                 database_url,
                 app_base_url,
                 bind_addr: SocketAddr::new(ip.unwrap_or(DEFAULT_IP), port.unwrap_or(DEFAULT_PORT)),
@@ -373,16 +383,8 @@ impl Config {
     }
 }
 
-/// The auth variables are optional until #5, but all-or-nothing: a partial set is an error.
+/// Loads the sign-in variables. Each one is required.
 fn load_auth(env: &mut Env<'_>) -> Option<AuthConfig> {
-    let present: Vec<&str> = vars::AUTH
-        .into_iter()
-        .filter(|var| env.raw(var).is_some())
-        .collect();
-    if present.is_empty() {
-        return None;
-    }
-
     let rp_id = env.required(vars::WEBAUTHN_RP_ID, parse_rp_id);
     let origin = env.required(vars::WEBAUTHN_ORIGIN, parse_origin);
     let client_id = env.required(vars::GOOGLE_CLIENT_ID, |raw| Ok(raw.to_owned()));
@@ -408,7 +410,59 @@ fn load_auth(env: &mut Env<'_>) -> Option<AuthConfig> {
         google_client_secret: client_secret?,
         google_redirect_url: redirect_url?,
         session_key: session_key?,
+        cookie_secure: true,
     })
+}
+
+/// Checks the sign-in settings against `APP_BASE_URL`, the one public origin of the app:
+/// - `WEBAUTHN_ORIGIN` must be that origin (the CSRF check also accepts only that origin);
+/// - `GOOGLE_REDIRECT_URL` must be that origin plus [`GOOGLE_CALLBACK_PATH`];
+/// - plain `http` is only allowed on a loopback host, and only there are cookies not `Secure`.
+fn check_auth_against_base_url(
+    env: &mut Env<'_>,
+    app_base_url: &Url,
+    mut auth: AuthConfig,
+) -> Option<AuthConfig> {
+    let origin = app_base_url.origin();
+    let errors_before = env.errors.len();
+    if auth.webauthn_origin.origin() != origin {
+        env.errors.push(ConfigError::Invalid {
+            var: vars::WEBAUTHN_ORIGIN,
+            reason: "must be the origin of APP_BASE_URL (same scheme, host and port)".to_owned(),
+        });
+    }
+    let redirect = &auth.google_redirect_url;
+    if redirect.origin() != origin
+        || redirect.path() != GOOGLE_CALLBACK_PATH
+        || redirect.query().is_some()
+        || redirect.fragment().is_some()
+    {
+        env.errors.push(ConfigError::Invalid {
+            var: vars::GOOGLE_REDIRECT_URL,
+            reason: format!(
+                "must be the origin of APP_BASE_URL followed by {GOOGLE_CALLBACK_PATH}"
+            ),
+        });
+    }
+    match app_base_url.scheme() {
+        "https" => auth.cookie_secure = true,
+        _ if is_loopback_host(app_base_url) => auth.cookie_secure = false,
+        _ => env.errors.push(ConfigError::Invalid {
+            var: vars::APP_BASE_URL,
+            reason: "must use https:// (plain http:// is only allowed on localhost)".to_owned(),
+        }),
+    }
+    (env.errors.len() == errors_before).then_some(auth)
+}
+
+/// `localhost`, `127.0.0.1` (any 127/8 address) or `[::1]`.
+fn is_loopback_host(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
 }
 
 /// Reads variables and collects every error.
@@ -600,16 +654,11 @@ mod tests {
         Config::from_lookup(|name| map.get(name).cloned().ok_or(VarError::NotPresent))
     }
 
+    /// Every required variable, for local development.
     fn minimal() -> Vec<(&'static str, &'static str)> {
         vec![
             (vars::DATABASE_URL, DB),
             (vars::APP_BASE_URL, "http://localhost:8080"),
-        ]
-    }
-
-    fn with_auth() -> Vec<(&'static str, &'static str)> {
-        let mut vars = minimal();
-        vars.extend([
             (vars::WEBAUTHN_RP_ID, "localhost"),
             (vars::WEBAUTHN_ORIGIN, "http://localhost:8080"),
             (
@@ -622,8 +671,35 @@ mod tests {
                 "http://localhost:8080/auth/google/callback",
             ),
             (vars::SESSION_KEY, KEY_64),
+        ]
+    }
+
+    /// Production-like: https on a real domain.
+    fn production() -> Vec<(&'static str, &'static str)> {
+        let mut vars = minimal();
+        vars.retain(|(k, _)| {
+            ![
+                vars::APP_BASE_URL,
+                vars::WEBAUTHN_RP_ID,
+                vars::WEBAUTHN_ORIGIN,
+                vars::GOOGLE_REDIRECT_URL,
+            ]
+            .contains(k)
+        });
+        vars.extend([
+            (vars::APP_BASE_URL, "https://iron-oxyde.com"),
+            (vars::WEBAUTHN_RP_ID, "iron-oxyde.com"),
+            (vars::WEBAUTHN_ORIGIN, "https://iron-oxyde.com"),
+            (
+                vars::GOOGLE_REDIRECT_URL,
+                "https://iron-oxyde.com/auth/google/callback",
+            ),
         ]);
         vars
+    }
+
+    fn with_auth() -> Vec<(&'static str, &'static str)> {
+        minimal()
     }
 
     fn set(
@@ -664,7 +740,10 @@ mod tests {
         assert_eq!(config.app_base_url.as_str(), "http://localhost:8080/");
         assert_eq!(config.log_filter, None);
         assert_eq!(config.shutdown_grace, Duration::from_secs(20));
-        assert!(config.auth.is_none());
+        assert!(
+            !config.auth.cookie_secure,
+            "http://localhost is local development"
+        );
         assert_eq!(config.database_url.redacted(), "localhost:5433/iron_oxide");
     }
 
@@ -678,7 +757,7 @@ mod tests {
         let config = load(&vars).unwrap();
         assert_eq!(config.bind_addr, "0.0.0.0:3000".parse().unwrap());
         assert_eq!(config.log_filter.as_deref(), Some("info,sqlx=warn"));
-        let auth = config.auth.unwrap();
+        let auth = config.auth;
         assert_eq!(auth.webauthn_rp_id, "localhost");
         assert_eq!(auth.webauthn_origin.as_str(), "http://localhost:8080/");
         assert_eq!(
@@ -695,17 +774,12 @@ mod tests {
     #[test]
     fn nothing_set_reports_every_required_variable() {
         let errors = errors(&[]);
-        assert_eq!(
-            errors,
-            vec![
-                ConfigError::Missing {
-                    var: vars::DATABASE_URL
-                },
-                ConfigError::Missing {
-                    var: vars::APP_BASE_URL
-                },
-            ]
-        );
+        let expected: Vec<ConfigError> = [vars::DATABASE_URL, vars::APP_BASE_URL]
+            .into_iter()
+            .chain(vars::AUTH)
+            .map(|var| ConfigError::Missing { var })
+            .collect();
+        assert_eq!(errors, expected);
     }
 
     #[test]
@@ -741,10 +815,13 @@ mod tests {
 
     #[test]
     fn non_unicode_value_is_invalid() {
+        let valid: HashMap<&str, &str> = minimal().into_iter().collect();
         let lookup = |name: &str| match name {
             vars::DATABASE_URL => Err(VarError::NotUnicode(std::ffi::OsString::from("x"))),
-            vars::APP_BASE_URL => Ok("http://localhost:8080".to_owned()),
-            _ => Err(VarError::NotPresent),
+            _ => valid
+                .get(name)
+                .map(|v| (*v).to_owned())
+                .ok_or(VarError::NotPresent),
         };
         let errors = Config::from_lookup(lookup).unwrap_err().errors().to_vec();
         assert_eq!(
@@ -861,32 +938,92 @@ mod tests {
     fn all_errors_are_reported_together() {
         let vars = [(vars::PORT, "nope"), (vars::IP, "nope")];
         let found: Vec<&str> = errors(&vars).iter().map(ConfigError::var).collect();
-        assert_eq!(
-            found,
-            vec![vars::DATABASE_URL, vars::APP_BASE_URL, vars::IP, vars::PORT]
-        );
+        let expected: Vec<&str> = [vars::DATABASE_URL, vars::APP_BASE_URL, vars::IP, vars::PORT]
+            .into_iter()
+            .chain(vars::AUTH)
+            .collect();
+        assert_eq!(found, expected);
     }
 
     #[test]
-    fn partial_auth_config_names_the_missing_variables() {
-        let vars = set(minimal(), vars::GOOGLE_CLIENT_ID, "client-id");
-        let errors = errors(&vars);
-        let missing: Vec<&str> = errors.iter().map(ConfigError::var).collect();
-        assert_eq!(
-            missing,
-            vec![
+    fn production_config_has_secure_cookies() {
+        let config = load(&production()).unwrap();
+        assert!(config.auth.cookie_secure);
+        assert_eq!(config.auth.webauthn_rp_id, "iron-oxyde.com");
+    }
+
+    #[test]
+    fn plain_http_is_only_allowed_on_loopback_hosts() {
+        for base in [
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+            "http://LOCALHOST:8080",
+        ] {
+            let host = Url::parse(base).unwrap().host_str().unwrap().to_owned();
+            let host: &'static str = Box::leak(host.into_boxed_str());
+            let redirect: &'static str =
+                Box::leak(format!("{base}/auth/google/callback").into_boxed_str());
+            let vars = set(
+                set(
+                    set(
+                        set(minimal(), vars::APP_BASE_URL, base),
+                        vars::WEBAUTHN_ORIGIN,
+                        base,
+                    ),
+                    vars::GOOGLE_REDIRECT_URL,
+                    redirect,
+                ),
                 vars::WEBAUTHN_RP_ID,
+                host.trim_start_matches('[').trim_end_matches(']'),
+            );
+            match load(&vars) {
+                Ok(config) => assert!(!config.auth.cookie_secure, "{base}"),
+                // WebAuthn RP IDs are domains: an IP address is rejected there, not here.
+                Err(errors) => assert!(
+                    errors
+                        .errors()
+                        .iter()
+                        .all(|e| e.var() == vars::WEBAUTHN_RP_ID),
+                    "{base}: {errors:?}"
+                ),
+            }
+        }
+
+        // Only APP_BASE_URL on plain http (the sign-in URLs have their own https rule).
+        let vars = set(production(), vars::APP_BASE_URL, "http://iron-oxyde.com");
+        let found: Vec<&str> = errors(&vars).iter().map(ConfigError::var).collect();
+        assert!(found.contains(&vars::APP_BASE_URL), "{found:?}");
+    }
+
+    #[test]
+    fn webauthn_origin_must_be_the_app_origin() {
+        for origin in [
+            "http://localhost:3000",
+            "https://localhost:8080",
+            "http://sub.localhost:8080",
+        ] {
+            assert_single_invalid(
+                &set(minimal(), vars::WEBAUTHN_ORIGIN, origin),
                 vars::WEBAUTHN_ORIGIN,
-                vars::GOOGLE_CLIENT_SECRET,
+            );
+        }
+    }
+
+    #[test]
+    fn google_redirect_url_must_be_the_app_callback() {
+        for url in [
+            "http://localhost:8080/auth/google/other",
+            "http://localhost:3000/auth/google/callback",
+            "https://localhost:8080/auth/google/callback",
+            "http://evil.example/auth/google/callback",
+            "http://localhost:8080/auth/google/callback?x=1",
+            "http://localhost:8080/auth/google/callback#f",
+        ] {
+            assert_single_invalid(
+                &set(minimal(), vars::GOOGLE_REDIRECT_URL, url),
                 vars::GOOGLE_REDIRECT_URL,
-                vars::SESSION_KEY,
-            ]
-        );
-        assert!(
-            errors
-                .iter()
-                .all(|e| matches!(e, ConfigError::Missing { .. }))
-        );
+            );
+        }
     }
 
     #[test]
@@ -982,14 +1119,19 @@ mod tests {
     #[test]
     fn rp_id_may_be_a_parent_domain_of_the_origin() {
         let vars = set(
-            set(with_auth(), vars::WEBAUTHN_RP_ID, "Example.com"),
-            vars::WEBAUTHN_ORIGIN,
-            "https://app.example.com",
+            set(
+                set(
+                    set(production(), vars::WEBAUTHN_RP_ID, "Example.com"),
+                    vars::WEBAUTHN_ORIGIN,
+                    "https://app.example.com",
+                ),
+                vars::APP_BASE_URL,
+                "https://app.example.com",
+            ),
+            vars::GOOGLE_REDIRECT_URL,
+            "https://app.example.com/auth/google/callback",
         );
-        assert_eq!(
-            load(&vars).unwrap().auth.unwrap().webauthn_rp_id,
-            "example.com"
-        );
+        assert_eq!(load(&vars).unwrap().auth.webauthn_rp_id, "example.com");
     }
 
     #[test]
@@ -1010,6 +1152,18 @@ mod tests {
 
     #[test]
     fn plain_http_is_only_allowed_for_localhost() {
+        // The sign-in URLs must share APP_BASE_URL's origin (#5), so all three move together.
+        fn served_at(
+            origin: &'static str,
+            rp_id: &'static str,
+        ) -> Vec<(&'static str, &'static str)> {
+            let redirect: &'static str =
+                Box::leak(format!("{origin}/auth/google/callback").into_boxed_str());
+            let vars = set(minimal(), vars::APP_BASE_URL, origin);
+            let vars = set(vars, vars::WEBAUTHN_ORIGIN, origin);
+            let vars = set(vars, vars::GOOGLE_REDIRECT_URL, redirect);
+            set(vars, vars::WEBAUTHN_RP_ID, rp_id)
+        }
         for origin in [
             "http://localhost:8080",
             "http://127.0.0.1:8080",
@@ -1021,40 +1175,34 @@ mod tests {
             } else {
                 "example.com"
             };
-            let vars = set(with_auth(), vars::WEBAUTHN_ORIGIN, origin);
-            let vars = set(vars, vars::WEBAUTHN_RP_ID, rp_id);
-            let found = errors_or_ok(&vars);
+            let found = errors_or_ok(&served_at(origin, rp_id));
             assert!(
-                found.iter().all(|e| e.var() != vars::WEBAUTHN_ORIGIN),
+                found
+                    .iter()
+                    .all(|e| e.var() != vars::WEBAUTHN_ORIGIN
+                        && e.var() != vars::GOOGLE_REDIRECT_URL),
                 "{origin}: {found:?}"
             );
         }
-        let vars = set(
-            set(
-                with_auth(),
-                vars::WEBAUTHN_ORIGIN,
-                "http://iron-oxide.example",
-            ),
-            vars::WEBAUTHN_RP_ID,
+        let found: Vec<&str> = errors_or_ok(&served_at(
+            "http://iron-oxide.example",
             "iron-oxide.example",
-        );
-        assert_single_invalid(&vars, vars::WEBAUTHN_ORIGIN);
+        ))
+        .iter()
+        .map(ConfigError::var)
+        .collect();
+        assert_eq!(found, [vars::WEBAUTHN_ORIGIN, vars::GOOGLE_REDIRECT_URL]);
         let vars = set(
-            with_auth(),
+            minimal(),
             vars::GOOGLE_REDIRECT_URL,
             "http://iron-oxide.example/auth/google/callback",
         );
         assert_single_invalid(&vars, vars::GOOGLE_REDIRECT_URL);
-        let vars = set(
-            set(
-                with_auth(),
-                vars::WEBAUTHN_ORIGIN,
-                "https://iron-oxide.example",
-            ),
-            vars::WEBAUTHN_RP_ID,
+        load(&served_at(
+            "https://iron-oxide.example",
             "iron-oxide.example",
-        );
-        load(&vars).unwrap();
+        ))
+        .unwrap();
     }
 
     fn errors_or_ok(vars: &[(&str, &str)]) -> Vec<ConfigError> {
@@ -1254,10 +1402,12 @@ mod tests {
 
     #[test]
     fn display_lists_every_error_and_points_to_env_example() {
-        let message = load(&[]).unwrap_err().to_string();
+        let message = load(&unset(minimal(), vars::DATABASE_URL))
+            .unwrap_err()
+            .to_string();
         assert_eq!(
             message,
-            "invalid configuration:\n  - DATABASE_URL is not set\n  - APP_BASE_URL is not set\n\
+            "invalid configuration:\n  - DATABASE_URL is not set\n\
              Set these environment variables (see .env.example for the full list)."
         );
     }

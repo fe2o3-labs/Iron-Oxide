@@ -1,0 +1,280 @@
+/*
+ * App shell and account panel (#5). Mobile-first and dark-first: large type and touch targets
+ * (at least 48px) so it reads at arm's length in the gym.
+ *
+ * Colors use the `--io-*` palette tokens when they are defined, with the same values as
+ * fallbacks.
+ */
+
+:root {
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--io-bg, #141619);
+  color: var(--io-text, #f4efe8);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 1.125rem;
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+}
+
+.io-app {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 36rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+}
+
+.io-header h1 {
+  margin: 0;
+  font-size: 2rem;
+  line-height: 1.2;
+}
+
+.io-header p {
+  margin: 0.25rem 0 0;
+}
+
+.io-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.25rem 1rem;
+  background: var(--io-surface, #1d2024);
+  border-radius: 1rem;
+}
+
+.io-card h2,
+.io-card h3,
+.io-card p {
+  margin: 0;
+}
+
+.io-card h2 {
+  font-size: 1.5rem;
+  line-height: 1.25;
+}
+
+.io-card h3 {
+  margin-top: 0.5rem;
+  font-size: 1.25rem;
+}
+
+.io-muted {
+  color: var(--io-text-muted, #b9b1a7);
+}
+
+.io-hint {
+  font-size: 1rem;
+}
+
+/* Form fields */
+
+.io-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.io-field label {
+  font-weight: 600;
+}
+
+.io-field label .io-muted {
+  font-weight: 400;
+}
+
+.io-input {
+  min-height: 3rem;
+  width: 100%;
+  padding: 0.625rem 0.875rem;
+  background: var(--io-surface-2, #272b30);
+  color: var(--io-text, #f4efe8);
+  border: 2px solid var(--io-border-strong, #707780);
+  border-radius: 0.75rem;
+  font: inherit;
+}
+
+.io-input::placeholder {
+  color: var(--io-text-muted, #b9b1a7);
+  opacity: 1;
+}
+
+/* Buttons */
+
+.io-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.io-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 3.25rem;
+  min-width: 3rem;
+  padding: 0.75rem 1.25rem;
+  border: 2px solid transparent;
+  border-radius: 0.75rem;
+  font: inherit;
+  font-weight: 700;
+  text-align: center;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.io-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.io-button[aria-busy="true"] {
+  cursor: progress;
+}
+
+.io-button-primary {
+  background: var(--io-primary, #e8703a);
+  color: var(--io-on-primary, #141619);
+}
+
+.io-button-primary:hover:not(:disabled) {
+  background: var(--io-primary-strong, #f08a4b);
+}
+
+.io-button-secondary {
+  background: var(--io-surface-2, #272b30);
+  color: var(--io-text, #f4efe8);
+  border-color: var(--io-border-strong, #707780);
+}
+
+.io-button-secondary:hover:not(:disabled) {
+  border-color: var(--io-text-muted, #b9b1a7);
+}
+
+.io-button-danger {
+  background: var(--io-accent, #b3362b);
+  color: var(--io-on-accent, #f4efe8);
+}
+
+.io-button:focus-visible,
+.io-input:focus-visible {
+  outline: 3px solid var(--io-primary-strong, #f08a4b);
+  outline-offset: 2px;
+}
+
+/* Notices */
+
+.io-notice {
+  padding: 0.75rem 1rem;
+  border-radius: 0.75rem;
+  background: var(--io-surface-2, #272b30);
+  border-left: 4px solid var(--io-border-strong, #707780);
+}
+
+.io-notice-error {
+  color: var(--io-danger, #f06a5b);
+  border-left-color: var(--io-danger, #f06a5b);
+}
+
+.io-notice-info {
+  color: var(--io-text, #f4efe8);
+  border-left-color: var(--io-success, #5fbf7f);
+}
+
+.io-waiting {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-radius: 0.75rem;
+  background: var(--io-surface-2, #272b30);
+}
+
+/* Signed-in view */
+
+.io-account-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.io-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.io-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: var(--io-surface-2, #272b30);
+  border-radius: 0.75rem;
+}
+
+.io-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+  flex: 1 1 12rem;
+}
+
+.io-row-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.io-row-meta {
+  font-size: 1rem;
+}
+
+.io-badge {
+  padding: 0.125rem 0.5rem;
+  border: 1px solid var(--io-success, #5fbf7f);
+  border-radius: 999px;
+  color: var(--io-success, #5fbf7f);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+@media (min-width: 40rem) {
+  .io-app {
+    padding-top: 3rem;
+  }
+
+  .io-card {
+    padding: 1.5rem;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .io-button {
+    transition:
+      background-color 120ms ease,
+      border-color 120ms ease;
+  }
+}

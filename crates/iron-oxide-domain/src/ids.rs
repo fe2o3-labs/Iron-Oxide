@@ -15,6 +15,9 @@ use uuid::Uuid;
 
 use crate::error::ValueError;
 
+#[cfg(feature = "uuid")]
+mod v7;
+
 macro_rules! uuid_id {
     ($(#[$doc:meta])* $name:ident, $kind:literal) => {
         $(#[$doc])*
@@ -35,13 +38,35 @@ macro_rules! uuid_id {
                 self.0
             }
 
-            /// Generates a new random (version 4) ID.
+            /// Generates a new time-ordered (version 7) ID.
             ///
-            /// On `wasm32-unknown-unknown` the randomness comes from `crypto.getRandomValues`.
+            /// The first 48 bits are the current Unix time in milliseconds, so IDs sort by creation
+            /// time and keep Postgres B-tree inserts at the end of the index. The creation time is
+            /// therefore readable from the ID.
+            ///
+            /// Ordering guarantees:
+            /// - Within one process, every ID (of any type) is strictly greater than all the IDs
+            ///   generated before it, across threads, in the same millisecond, and when the clock
+            ///   goes backwards. One process-wide lock covers the clock read and a 42-bit counter
+            ///   that restarts from a random value each millisecond. When the clock is behind,
+            ///   the last millisecond is reused and the counter incremented. The embedded time
+            ///   then runs ahead of the clock by the whole step back (hours, if the clock was
+            ///   set back by hours) until the clock catches up, so it is only an approximate
+            ///   creation time.
+            /// - Across processes (server and clients), IDs are only ordered to the millisecond of
+            ///   their clocks.
+            ///
+            /// IDs are unique and ordered but **not unguessable**: the timestamp is readable, the
+            /// counter is predictable after the first ID of a millisecond, and only the last 32
+            /// bits are fresh randomness. Never use them as secrets, tokens or capability URLs.
+            ///
+            /// Works on every target: on `wasm32-unknown-unknown` the clock is `Date.now()` and the
+            /// randomness `crypto.getRandomValues` (uuid's `js` feature); elsewhere it is
+            /// `SystemTime` and the OS RNG.
             #[cfg(feature = "uuid")]
             #[must_use]
-            pub fn new_v4() -> Self {
-                Self(Uuid::new_v4())
+            pub fn new_v7() -> Self {
+                Self(v7::next())
             }
         }
 
@@ -105,7 +130,7 @@ uuid_id!(
 pub const SLUG_MAX_LEN: usize = 64;
 
 /// Returns why `value` is not a valid slug, or `None` when it is. Shared by every slug ID.
-fn slug_problem(value: &str) -> Option<&'static str> {
+pub(crate) fn slug_problem(value: &str) -> Option<&'static str> {
     if value.is_empty() {
         return Some("must not be empty");
     }
@@ -250,12 +275,92 @@ mod tests {
 
     #[cfg(feature = "uuid")]
     #[test]
-    fn new_v4_generates_distinct_version_4_ids() {
-        let a = UserId::new_v4();
-        let b = UserId::new_v4();
-        assert_ne!(a, b);
-        assert_eq!(a.as_uuid().get_version_num(), 4);
-        assert_eq!(ProgramId::new_v4().as_uuid().get_version_num(), 4);
+    fn new_v7_generates_rfc_version_7_ids() {
+        for uuid in [
+            UserId::new_v7().as_uuid(),
+            SessionId::new_v7().as_uuid(),
+            SetId::new_v7().as_uuid(),
+            ProgramId::new_v7().as_uuid(),
+            ProgramVersionId::new_v7().as_uuid(),
+        ] {
+            assert_eq!(uuid.get_version_num(), 7);
+            assert_eq!(uuid.get_version(), Some(uuid::Version::SortRand));
+            assert_eq!(uuid.get_variant(), uuid::Variant::RFC4122);
+        }
+    }
+
+    #[cfg(feature = "uuid")]
+    #[test]
+    fn new_v7_embeds_the_current_unix_time_in_milliseconds() {
+        fn unix_ms() -> u128 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        }
+        let before = unix_ms();
+        let id = SessionId::new_v7();
+        let after = unix_ms();
+        let (secs, nanos) = id.as_uuid().get_timestamp().unwrap().to_unix();
+        let embedded = u128::from(secs) * 1_000 + u128::from(nanos) / 1_000_000;
+        // uuid may bump the timestamp by a millisecond if its counter overflows; allow a margin.
+        assert!(
+            before <= embedded && embedded <= after + 5,
+            "{before} <= {embedded} <= {after}"
+        );
+    }
+
+    #[cfg(feature = "uuid")]
+    #[test]
+    fn new_v7_is_strictly_increasing_across_a_burst() {
+        // 10k IDs are generated in a few milliseconds, so many share a millisecond: the ordering
+        // within one comes from the counter. Tests running in parallel share the process-wide
+        // generator, which only removes values from this sequence.
+        let ids: Vec<SetId> = (0..10_000).map(|_| SetId::new_v7()).collect();
+        for pair in ids.windows(2) {
+            assert!(pair[0] < pair[1], "{} !< {}", pair[0], pair[1]);
+            assert!(pair[0].to_string() < pair[1].to_string());
+        }
+    }
+
+    #[cfg(feature = "uuid")]
+    #[test]
+    fn new_v7_is_strictly_increasing_per_thread_and_unique_across_threads() {
+        // Runs long enough to cross at least one second boundary, where uuid's own `now_v7`
+        // lets a thread's ids go backwards.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_100);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let mut ids = Vec::new();
+                    while ids.len() < 20_000 || std::time::Instant::now() < deadline {
+                        ids.push(SetId::new_v7());
+                    }
+                    ids
+                })
+            })
+            .collect();
+        let mut all = Vec::new();
+        for thread in threads {
+            let ids = thread.join().unwrap();
+            for pair in ids.windows(2) {
+                assert!(pair[0] < pair[1], "{} !< {}", pair[0], pair[1]);
+            }
+            all.extend(ids);
+        }
+        let total = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), total, "duplicate ids");
+    }
+
+    #[cfg(feature = "uuid")]
+    #[test]
+    fn new_v7_ids_serialize_as_a_bare_string() {
+        let id = SetId::new_v7();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, format!("\"{}\"", id.as_uuid().hyphenated()));
+        assert_eq!(serde_json::from_str::<SetId>(&json).unwrap(), id);
     }
 
     #[test]

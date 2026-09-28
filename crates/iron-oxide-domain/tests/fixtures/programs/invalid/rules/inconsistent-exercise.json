@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "name": "Same id, different exercise",
+  "days": [
+    {
+      "id": "a",
+      "name": "A",
+      "exercises": [
+        {
+          "id": "squat",
+          "name": "Back squat",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "kg": 100 },
+          "rest": 180,
+          "progression": { "add_when_top_of_range": { "increment": { "kg": 2.5 } } }
+        }
+      ]
+    },
+    {
+      "id": "b",
+      "name": "B",
+      "exercises": [
+        {
+          "id": "squat",
+          "name": "Front squat",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "percent_of_training_max": 80 },
+          "rest": 180
+        }
+      ]
+    }
+  ],
+  "rotation": ["a", "b"]
+}

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE passkeys\n         SET passkey = $2, sign_count = $3, backup_eligible = $4, backup_state = $5,\n             last_used_at = now()\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb",
+        "Int8",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "108383d2b5ff719d3576016eda9487135389e6c7ed465d96a75e93d517c56b7a"
+}

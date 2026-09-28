@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO auth_ceremonies (id, kind, user_id, state, expires_at)\n         VALUES ($1, $2, $3, $4, $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        {
+          "Custom": {
+            "name": "auth_ceremony_kind",
+            "kind": {
+              "Enum": [
+                "passkey_sign_up",
+                "passkey_sign_in",
+                "passkey_add",
+                "google_sign_in",
+                "google_link"
+              ]
+            }
+          }
+        },
+        "Uuid",
+        "Jsonb",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "08bd334b370737d0e9e4a0489af205980f228a89bd732ac750983a73cbb2671b"
+}
