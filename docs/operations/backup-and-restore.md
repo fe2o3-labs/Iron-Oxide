@@ -42,22 +42,32 @@ Things to know:
 
 ## 2. Before you restore
 
-1. **Stop the bleeding.** If the app is still doing damage (a bad deploy or a runaway job), stop it. First **record the image** you will bring back. Scaling to 0 **destroys** the Machines, so `fly scale count 1`, `fly apps restart` and `fly secrets set` can no longer start anything. The only way back is `fly deploy` ([Fly docs](https://fly.io/docs/apps/scale-count/)).
+1. **Record what to come back to**, whether or not you stop the app:
+   - `<image-ref>`: the image of the last known-good release, from `fly releases --image -a <app>`.
+   - `<good-sha>`: the git commit that release was built from, from the deploy's CI run or `git log`.
 
    ```bash
-   fly releases --image -a <app>   # note the image ref of the last known-good release -> <image-ref>
+   fly releases --image -a <app>
+   ```
+
+   **Stop the bleeding.** If the app is still doing damage (a bad deploy or a runaway job), stop it:
+
+   ```bash
    fly scale count 0 -a <app>
    ```
 
-   To bring the app back, use this command. It is referenced below as **"start the app"**. Run it from a checkout of the repo so `fly.toml` is picked up. A deploy from zero creates two Machines per process group.
+   Scaling to 0 **destroys** the Machines, so `fly scale count 1`, `fly apps restart` and `fly secrets deploy` can no longer start anything. The only way back is `fly deploy` ([Fly docs](https://fly.io/docs/apps/scale-count/)).
 
-   ```bash
-   fly deploy --image <image-ref> -a <app>   # <image-ref>: known-good release, or the fixed release
-   ```
+   **"Start the app"** (referenced below) means bringing the app back after the restore:
 
-   A bare `fly deploy` would build whatever is in your working tree, which may be the bad release.
+   - **If you scaled to 0:** run the command below from a checkout of the repo, so `fly.toml` is picked up. A deploy from zero recreates the Machines from `fly.toml`: two started Machines for each process group with services, one started plus one stopped standby for a group without ([Fly docs](https://fly.io/docs/apps/app-availability/)).
 
-   If you did not stop the app, "start the app" just means `fly apps restart <app>`, so it opens fresh connections.
+     ```bash
+     fly deploy --image <image-ref> -a <app>   # known-good release, or the fixed release
+     ```
+
+     A bare `fly deploy` would build whatever is in your working tree, which may be the bad release. Fly may prune images that haven't been deployed for a while. If the image can't be pulled, rebuild the same code instead: `git checkout <good-sha>` (or the fixed commit), then run `fly deploy -a <app>` from there.
+   - **If the app is still running:** run `fly apps restart <app>`, so it opens fresh connections. If you staged a secret, run `fly secrets deploy -a <app>` instead: it redeploys the current release with the staged secrets.
 
 2. **Find the restore point in UTC.** Neon takes RFC 3339 timestamps, and `Z` means UTC. Paris is UTC+2 in summer and UTC+1 in winter.
    - `fly logs -a <app>` and `fly releases -a <app>`: look for the bad deploy or request. Check the timestamps' zone (a `Z` suffix means UTC) before copying them.
@@ -123,10 +133,13 @@ If only a few rows were lost and you want to keep the writes made since, don't r
 
 ```bash
 # Direct endpoint: never pass --pooled (decision #39). $(...) keeps the password out of your shell history.
+# The && chain and ${url:?} stop everything if neon fails or prints nothing, so an empty DATABASE_URL is never staged.
 # --stage: store the secret without deploying (there may be no Machines to roll if you scaled to 0).
-fly secrets set --stage DATABASE_URL="$(neon connection-string restore-check)" -a <app>
-fly deploy --image <image-ref> -a <app>   # "start the app"; the new Machines pick up the staged secret
+url="$(neon connection-string restore-check)" \
+  && fly secrets set --stage DATABASE_URL="${url:?empty connection string}" -a <app>
 ```
+
+Then **start the app** ([step 2.1](#2-before-you-restore)). If you scaled to 0, run `fly deploy --image <image-ref> -a <app>`; the new Machines pick up the staged secret. If the app is still running, run `fly secrets deploy -a <app>`.
 
 ### B. Restore production in place
 
@@ -176,7 +189,7 @@ Do this once before real data matters, then after any change to the database set
 - [ ] Create `restore-check` from `<ts>` (path A) and connect with `psql`.
 - [ ] Verify a row written after `<ts>` is absent and an older row is present.
 - [ ] Optional, on a non-production project or branch: do an in-place restore (path B) and then undo it.
-- [ ] Delete `restore-check` and any backup branches you created.
+- [ ] Clean up. Delete `restore-check` first: after a `^self` restore it is moved under the backup branch, and a branch with children can't be deleted. Then delete the `_before_restore_*` backup branch. The `_before_undo_*` branch from an undo **cannot be deleted** (Neon keeps the original root when a root branch is restored from another branch), so connect to it and drop its tables to free the storage.
 - [ ] Log the drill below.
 
 | Date (UTC) | Who | Plan / history window | Path tested | Time to restored & verified | Notes |
@@ -192,7 +205,10 @@ PITR only reaches as far back as the history window, and it lives inside Neon. F
 - `pg_restore` must be at least as new as the `pg_dump` that wrote the archive.
 
 ```bash
-pg_dump -Fc -v -d "$(neon connection-string <prod-branch>)" -f ~/iron-oxide-backups/iron-oxide-$(date -u +%Y%m%dT%H%M%SZ).dump
+# The && chain and ${url:?} stop if neon fails or prints nothing (an empty -d would target a local database).
+url="$(neon connection-string <prod-branch>)" \
+  && pg_dump -Fc -v -d "${url:?empty connection string}" \
+       -f ~/iron-oxide-backups/iron-oxide-$(date -u +%Y%m%dT%H%M%SZ).dump
 ```
 
 The restore target must not already contain the application schema. A new Neon branch is a **copy of its parent**, not an empty database, so `pg_restore` into a branch of `<prod-branch>` would fail on existing objects or duplicate rows. Restore into a **freshly created database** instead, e.g. on a scratch branch:
@@ -200,8 +216,8 @@ The restore target must not already contain the application schema. A new Neon b
 ```bash
 neon branches create --name dump-check
 neon databases create --branch dump-check --name restore_target
-pg_restore -v --no-owner -d "$(neon connection-string dump-check --database-name restore_target)" \
-  ~/iron-oxide-backups/<file>.dump
+url="$(neon connection-string dump-check --database-name restore_target)" \
+  && pg_restore -v --no-owner -d "${url:?empty connection string}" ~/iron-oxide-backups/<file>.dump
 ```
 
 > **Never commit dumps.** They contain user data (accounts, emails, workout history) and this repository is **public**. Write them outside the repo, keep them encrypted, and delete old ones.
