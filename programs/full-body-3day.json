@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/guizmaii-opensource/Iron-Oxide/main/schemas/program.schema.json",
   "schema_version": 1,
   "name": "Full-body 3-day barbell",
-  "description": "Three full-body barbell sessions a week on non-consecutive days (e.g. Monday, Wednesday, Friday), rotating A, B, C. Squat every session, bench and overhead press alternate, one hinge per session. The starting loads are deliberately light: set each one so the first session feels easy with clean technique, then let the progression add weight. Warm-up sets that come out lighter than the empty bar are done with the bar.",
+  "description": "Three full-body barbell sessions a week on non-consecutive days (e.g. Monday, Wednesday, Friday), rotating A, B, C. Squat every session, bench and overhead press alternate, one hinge per session. The starting loads are deliberately light: set each one so the first session feels easy with clean technique, then let the progression add weight. Warm-up sets that come out lighter than the empty bar are done with the bar. Every increment is 2.5 kg (1.25 kg plates on each side); with lighter change plates, smaller jumps on the overhead press are fine.",
   "days": [
     {
       "id": "a",
@@ -99,7 +99,7 @@
           ],
           "progression": {
             "add_when_top_of_range": {
-              "increment": { "kg": 1.25 },
+              "increment": { "kg": 2.5 },
               "deload_after_failures": { "failures": 3, "percent": 10 }
             }
           }
@@ -134,11 +134,11 @@
           "id": "barbell-curl",
           "name": "Barbell curl",
           "work": { "reps": { "sets": 3, "reps": { "min": 8, "max": 12 } } },
-          "load": { "kg": 15 },
+          "load": { "kg": 20 },
           "rest": 90,
-          "notes": "Elbows pinned to the sides, no swinging.",
+          "notes": "Start with the empty bar. Elbows pinned to the sides, no swinging.",
           "superset": "a",
-          "progression": { "double_progression": { "increment": { "kg": 1.25 } } }
+          "progression": { "double_progression": { "increment": { "kg": 2.5 } } }
         }
       ]
     },
