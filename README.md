@@ -383,6 +383,8 @@ unhashed file in `public/` (icons, manifest) changes. What the service worker ca
 The server answers `404` (with `Cache-Control: no-store`) for unknown `/assets/…` paths
 (`src/pwa/missing_assets.rs`) instead of the SSR page that Dioxus serves for every other unknown path.
 
+To try the app on the iOS Simulator, the Android Emulator or a real phone, see [docs/dev/mobile-testing.md](docs/dev/mobile-testing.md).
+
 ## Release build
 
 ```sh
