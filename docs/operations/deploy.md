@@ -77,6 +77,11 @@ read -rs DB_URL && printf 'DATABASE_URL=%s\n' "$DB_URL" | fly secrets import --s
 fly secrets set --stage APP_BASE_URL='https://iron-oxide.fly.dev'
 ```
 
+`fly secrets import` parses its input like a `.env` file: a value is cut at its first `#` and
+surrounding `"` quotes are stripped. So a value must contain neither: in `DATABASE_URL`,
+percent-encode any special character in the password (`#` is `%23`), as a URL requires anyway.
+Base64 session keys and Google client secrets are unaffected.
+
 `--stage` stores them without deploying (the app has no machine yet); the first deploy picks them
 up. After the first deploy, drop `--stage`: Fly then restarts the machines with the new values.
 
@@ -139,7 +144,9 @@ redirects plain HTTP to it.
 ### 5. Deploy from GitHub Actions
 
 The deploy job uses the `production` GitHub environment. Restrict that environment to `main`, so
-that no other branch (and no other workflow) can read the deploy token:
+that jobs on other branches cannot read the deploy token. (Any workflow job that runs on `main`
+and declares `environment: production` can still read it, so review workflow changes on `main`
+accordingly.)
 
 ```sh
 gh api -X PUT repos/guizmaii-opensource/Iron-Oxide/environments/production \
