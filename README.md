@@ -330,11 +330,13 @@ On the client, `crate::auth::api::is_unauthorized(&error)` tells a 401 apart fro
 
 ### Plan gating in server functions
 
-Gate a feature with `server::entitlements::require(&state.db, user, Feature::…)` (or
-`require_quota` for a countable limit): it reads the user's plan from `users.plan` and fails with
-`403` when the plan does not include it. The policy itself is `iron_oxide_domain::entitlements`,
-the only code that decides what a plan may do; never compare a plan anywhere else. See
-[docs/billing.md](docs/billing.md).
+Gate a feature with `server::entitlements::require(&state.db, user, Feature::…)`: it reads the
+user's plan from `users.plan` and fails with `403` when the plan does not include it. A write that
+takes a quota slot (creating, copying or unarchiving a program) calls
+`server::entitlements::reserve_quota(&mut tx, user, Quota::…)` first, in the transaction that
+writes: it locks the user's row, counts and checks under that lock. The policy itself is
+`iron_oxide_domain::entitlements`, the only code that decides what a plan may do; never compare a
+plan anywhere else. See [docs/billing.md](docs/billing.md).
 
 ### Checks
 
