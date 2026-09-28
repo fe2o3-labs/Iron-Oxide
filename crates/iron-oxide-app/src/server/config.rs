@@ -70,6 +70,7 @@ pub mod vars {
     pub const SESSION_KEY: &str = "SESSION_KEY";
 
     /// The sign-in variables (#5), all required.
+    #[cfg(test)]
     pub const AUTH: [&str; 6] = [
         WEBAUTHN_RP_ID,
         WEBAUTHN_ORIGIN,

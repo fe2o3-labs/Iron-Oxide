@@ -2466,7 +2466,6 @@ dependencies = [
  "js-sys",
  "openidconnect",
  "openssl",
- "reqwest",
  "secrecy",
  "serde",
  "serde_json",

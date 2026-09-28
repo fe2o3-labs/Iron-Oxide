@@ -32,7 +32,7 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct AppState {
     /// The validated configuration, loaded once at startup.
-    #[allow(dead_code, reason = "read by the server functions of #5 and later")]
+    #[allow(dead_code, reason = "read by later server functions")]
     pub config: Arc<Config>,
     /// The Postgres connection pool.
     pub db: PgPool,
