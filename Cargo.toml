@@ -55,7 +55,7 @@ thiserror = "2.0.21"
 time = "0.3.55"
 # Sessions (#5). Our own Postgres store (server/auth/session.rs) implements its `SessionStore`.
 tower-sessions = { version = "0.15.0", default-features = false, features = ["axum-core", "signed"] }
-tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt", "ansi"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt"] }
 url = "2.5.8"
 # Passkeys (#5). 0.5.5 is the latest stable release (0.6 is only published as `-dev`
 # pre-releases). Links the system OpenSSL through webauthn-rs-core.
