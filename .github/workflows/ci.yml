@@ -207,9 +207,9 @@ jobs:
           curl -sSf http://127.0.0.1:8080/api/server-time | grep -Eq '^[0-9]+$'
           # PWA: the manifest and head tags are in the SSR page, and the static files are served at the root.
           curl -sSf http://127.0.0.1:8080/ | grep -q '<link rel="manifest" href="/manifest.webmanifest"'
-          curl -sSf http://127.0.0.1:8080/ | grep -q 'navigator.serviceWorker.register("/sw.js"'
+          curl -sSf http://127.0.0.1:8080/ | grep -q 'navigator.serviceWorker.register(`/sw.js?build='
           curl -sSf http://127.0.0.1:8080/manifest.webmanifest | grep -q '"short_name": "Fe2O3"'
-          curl -sSf http://127.0.0.1:8080/sw.js | grep -q 'CACHE_VERSION'
+          curl -sSf 'http://127.0.0.1:8080/sw.js?build=ci' | grep -q 'CACHE_VERSION'
           for icon in icons/icon-192.png icons/icon-512.png icons/icon-maskable-512.png icons/apple-touch-icon.png favicon.ico; do
             curl -sSf -o /dev/null "http://127.0.0.1:8080/$icon"
           done

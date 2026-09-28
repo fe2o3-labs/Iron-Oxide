@@ -12,12 +12,15 @@
 //   * Static files under /assets/ (hashed by `dx`, so their content never changes
 //     for a given URL) and the files precached below are cache-first.
 //
-// Bump CACHE_VERSION whenever this file or the precache list changes in a way
-// that must invalidate old caches. Hashed assets need no bump: new builds
-// produce new URLs, and old ones are dropped with the old cache on the next bump.
+// The page registers this worker as /sw.js?build=<id>, where the id is derived from
+// the hashed asset URLs (see src/pwa.rs). Each deploy that changes the wasm, JS or
+// CSS therefore installs a fresh worker with its own cache, and the activate step
+// deletes the previous build's cache. Bump CACHE_VERSION when only this file or an
+// unhashed file in public/ (icons, manifest) changes.
 
 const CACHE_VERSION = "v1";
-const CACHE_NAME = `iron-oxide-${CACHE_VERSION}`;
+const BUILD_ID = new URLSearchParams(self.location.search).get("build") || "unknown";
+const CACHE_NAME = `iron-oxide-${CACHE_VERSION}-${BUILD_ID}`;
 const SHELL_URL = "/";
 
 // Unhashed files from public/ that the app shell needs.

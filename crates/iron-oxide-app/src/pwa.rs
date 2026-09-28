@@ -10,18 +10,32 @@ use dioxus::prelude::*;
 /// and with `theme_color` / `background_color` in `public/manifest.webmanifest`.
 pub const THEME_COLOR: &str = "#141619";
 
-/// Registers `/sw.js` once the page has loaded. It runs as a plain inline script, so it does not
-/// wait for the wasm bundle.
+/// Registers the service worker once the page has loaded. It runs as a plain inline script, so it
+/// does not wait for the wasm bundle.
+///
+/// The worker URL carries a build id derived from the hashed `/assets/` URLs of the page. Any new
+/// deploy that changes the wasm, JS or CSS therefore changes the worker URL. The browser then
+/// installs the worker again, which precaches the new shell, and drops the previous build's cache.
+/// Otherwise the byte-identical `sw.js` would never update, and an offline launch would keep
+/// booting the first build the phone saw.
 const REGISTER_SERVICE_WORKER: &str = r#"
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch((error) => {
+    const assets = [...document.querySelectorAll('script[src*="/assets/"], link[href*="/assets/"]')]
+      .map((element) => element.getAttribute("src") || element.getAttribute("href"))
+      .sort()
+      .join("|");
+    let hash = 5381;
+    for (const character of assets) {
+      hash = (hash * 33 + character.charCodeAt(0)) % 4294967296;
+    }
+    const build = hash.toString(36);
+    navigator.serviceWorker.register(`/sw.js?build=${build}`, { scope: "/" }).catch((error) => {
       console.error("Service worker registration failed", error);
     });
   });
 }
 "#;
-
 /// Whether this build registers the service worker. Debug builds (`dx serve`) serve the wasm
 /// from an unhashed `/wasm/` folder and rebuild constantly, so caching would only get in the way.
 const REGISTER_IN_THIS_BUILD: bool = !cfg!(debug_assertions);
@@ -172,7 +186,10 @@ mod tests {
 
     #[test]
     fn registration_script_registers_the_root_scoped_worker() {
-        assert!(REGISTER_SERVICE_WORKER.contains(r#"register("/sw.js", { scope: "/" })"#));
+        assert!(
+            REGISTER_SERVICE_WORKER
+                .contains(r#"register(`/sw.js?build=${build}`, { scope: "/" })"#)
+        );
     }
 
     #[test]

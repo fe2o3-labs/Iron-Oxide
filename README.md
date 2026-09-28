@@ -89,7 +89,10 @@ release builds, because `dx serve` rebuilds constantly and serves an unhashed `/
 the PWA locally, run the release bundle (see below) and open http://127.0.0.1:8080. Chrome and
 Safari treat `localhost`/`127.0.0.1` as a secure context, so no HTTPS is needed.
 
-What the service worker caches (bump `CACHE_VERSION` in `sw.js` when you change the precache list):
+The page registers the worker as `/sw.js?build=<id>`, where the id is derived from the hashed asset
+URLs. Every deploy that changes the wasm, JS or CSS therefore installs a fresh worker with its own
+cache, and the old cache is deleted. Bump `CACHE_VERSION` in `sw.js` when only `sw.js` or an
+unhashed file in `public/` (icons, manifest) changes. What the service worker caches:
 
 - Hashed files under `/assets/` (wasm, JS, CSS): cache-first. They never change for a given URL.
 - The icons and the manifest are precached at install, and so is an anonymous render of `/`,
