@@ -39,7 +39,7 @@
       "pattern": "^[^\\u0000-\\u001f]*[^\\s\\u0085\\u0000-\\u001f][^\\u0000-\\u001f]*$"
     },
     "rotation": {
-      "description": "The suggested order of the days, repeated forever: `[\"a\", \"b\", \"c\"]`. A day may appear\nseveral times (`[\"a\", \"b\", \"a\", \"b\", \"c\"]`), and every day must appear at least once.",
+      "description": "The suggested order of the days, repeated forever: `[\"a\", \"b\", \"c\"]`. Every day appears\nexactly once.",
       "type": "array",
       "items": {
         "description": "Lowercase letters and digits in words separated by single hyphens, e.g. `a` or `upper-1`.",
@@ -48,8 +48,9 @@
         "minLength": 1,
         "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
       },
-      "maxItems": 28,
-      "minItems": 1
+      "maxItems": 14,
+      "minItems": 1,
+      "uniqueItems": true
     },
     "schema_version": {
       "description": "The version of the document format. Must be 1.",

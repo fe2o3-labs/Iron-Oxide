@@ -179,6 +179,7 @@ host), stops the server with "unsupported parameter".
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | yes | Sign in with Google: the OAuth client (secret) |
 | `GOOGLE_REDIRECT_URL` | yes | `APP_BASE_URL`'s origin + `/auth/google/callback` (must be equal) |
 | `SESSION_KEY` | yes | Session cookie signing key (secret), ≥ 64 random bytes in base64: `openssl rand 64 \| openssl base64 -A` |
+| `STRIPE_WEBHOOK_SECRET` | no | Stripe webhook signing secret (secret). Unused until billing is implemented, see [docs/billing.md](docs/billing.md) |
 
 Sign-in (passkeys, Google, sessions) is described in [docs/auth.md](docs/auth.md), including how to
 create the Google OAuth client. Every value is validated at startup. If anything is missing or invalid, the
@@ -328,6 +329,16 @@ pub async fn save_set(set: NewSet) -> Result<(), ServerFnError> {
 ```
 
 On the client, `crate::auth::api::is_unauthorized(&error)` tells a 401 apart from other errors.
+
+### Plan gating in server functions
+
+Gate a feature with `server::entitlements::require(&state.db, user, Feature::…)`: it reads the
+user's plan from `users.plan` and fails with `403` when the plan does not include it. A write that
+takes a quota slot (creating, copying or unarchiving a program) calls
+`server::entitlements::reserve_quota(&mut tx, user, Quota::…)` first, in the transaction that
+writes: it locks the user's row, counts and checks under that lock. The policy itself is
+`iron_oxide_domain::entitlements`, the only code that decides what a plan may do; never compare a
+plan anywhere else. See [docs/billing.md](docs/billing.md).
 
 ### Checks
 

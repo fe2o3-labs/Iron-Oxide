@@ -27,7 +27,12 @@
 //!
 //! [`progression::next_targets`] computes an exercise's next targets from its program rule and
 //! history, and the [`progression::ProgressionChange`] shown in the end-of-session summary.
+//!
+//! # Plans and feature gating
+//!
+//! [`entitlements`] decides what each [`entitlements::Plan`] may do: the single place for gating.
 
+pub mod entitlements;
 pub mod session;
 pub mod time;
 pub mod timer;

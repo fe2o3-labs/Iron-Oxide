@@ -137,7 +137,9 @@ pub(super) fn days(generator: &mut SchemaGenerator) -> Schema {
 }
 
 pub(super) fn rotation(generator: &mut SchemaGenerator) -> Schema {
-    list::<DayId>(generator, 1, MAX_ROTATION)
+    let mut schema = list::<DayId>(generator, 1, MAX_ROTATION);
+    schema.insert("uniqueItems".to_owned(), true.into());
+    schema
 }
 
 pub(super) fn exercises(generator: &mut SchemaGenerator) -> Schema {

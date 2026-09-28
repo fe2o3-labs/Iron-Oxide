@@ -112,12 +112,20 @@ impl<'a> Validator<'a> {
             "days",
             MAX_ROTATION,
         );
+        let mut in_rotation_at = BTreeMap::new();
         for (index, id) in program.rotation.iter().enumerate().take(MAX_ROTATION) {
-            if !all_day_ids.contains(id) {
+            let path = rotation_path.index(index);
+            if let Some(first) = in_rotation_at.insert(id, path.clone()) {
+                // The next-day logic of a session needs each day once (session::next_day).
                 self.push(
-                    rotation_path.index(index),
-                    Kind::UnknownDay { id: id.to_string() },
+                    path,
+                    Kind::DuplicateRotationDay {
+                        id: id.to_string(),
+                        first,
+                    },
                 );
+            } else if !all_day_ids.contains(id) {
+                self.push(path, Kind::UnknownDay { id: id.to_string() });
             }
         }
     }
@@ -614,14 +622,24 @@ mod tests {
             doc["days"] = days.into();
             doc["rotation"] = rotation.into();
         });
-        assert_eq!(too_many, ["days: must contain at most 14 days (got 15)"]);
-
-        let rotation = errors(|doc| doc["rotation"] = vec!["a"; MAX_ROTATION + 1].into());
         assert_eq!(
-            rotation,
-            ["rotation: must contain at most 28 days (got 29)"]
+            too_many,
+            [
+                "days: must contain at most 14 days (got 15)",
+                "rotation: must contain at most 14 days (got 15)",
+            ]
         );
-        assert!(errors(|doc| doc["rotation"] = vec!["a"; MAX_ROTATION].into()).is_empty());
+
+        // At the limit: 14 days, each once in the rotation.
+        let at_limit = errors(|doc| {
+            let days: Vec<_> = (0..MAX_DAYS)
+                .map(|i| json!({ "id": format!("d{i}"), "name": "D", "exercises": [exercise("squat")] }))
+                .collect();
+            let rotation: Vec<_> = (0..MAX_ROTATION).map(|i| format!("d{i}")).collect();
+            doc["days"] = days.into();
+            doc["rotation"] = rotation.into();
+        });
+        assert!(at_limit.is_empty(), "{at_limit:?}");
 
         let exercises = errors(|doc| {
             doc["days"][0]["exercises"] = (0..=MAX_EXERCISES_PER_DAY)
@@ -642,6 +660,30 @@ mod tests {
             warmup,
             ["days[0].exercises[0].warmup: must contain at most 10 warm-up lines (got 11)"]
         );
+    }
+
+    #[test]
+    fn a_day_appears_once_in_the_rotation() {
+        let result = errors(|doc| {
+            doc["days"] = json!([
+                { "id": "a", "name": "A", "exercises": [exercise("squat")] },
+                { "id": "b", "name": "B", "exercises": [exercise("squat")] },
+            ]);
+            doc["rotation"] = json!(["a", "b", "a", "zz", "zz", "b"]);
+        });
+        assert_eq!(
+            result,
+            [
+                "rotation[2]: day `a` appears more than once in the rotation (first at rotation[0])",
+                "rotation[3]: unknown day `zz`",
+                "rotation[4]: day `zz` appears more than once in the rotation (first at rotation[3])",
+                "rotation[5]: day `b` appears more than once in the rotation (first at rotation[1])",
+            ]
+        );
+        // Checks stop at the limit, like the other lists.
+        let long = errors(|doc| doc["rotation"] = vec!["a"; MAX_ROTATION + 1].into());
+        assert_eq!(long[0], "rotation: must contain at most 14 days (got 15)");
+        assert_eq!(long.len(), MAX_ROTATION, "{long:?}");
     }
 
     #[test]

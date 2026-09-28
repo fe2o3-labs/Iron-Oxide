@@ -49,9 +49,11 @@ removals cannot both pass.
 
 ## Passkeys
 
-The relying party ID is `WEBAUTHN_RP_ID`. In production that is `iron-oxyde.com`, the registrable
-domain, so a future `app.` subdomain can use the same passkeys. The origin is `WEBAUTHN_ORIGIN`,
-which must equal `APP_BASE_URL`'s origin. Every ceremony requires user verification (Face ID,
+The relying party ID is `WEBAUTHN_RP_ID`. In production the app is served at
+`https://app.iron-oxyde.com` (the apex is the landing page, #70), and the RP ID is the **parent**
+domain `iron-oxyde.com`, not the app's host: passkeys are bound to the RP ID, so they keep working
+if the app moves to another subdomain. The origin is `WEBAUTHN_ORIGIN`, which must equal
+`APP_BASE_URL`'s origin; the RP ID must be that origin's host or a parent domain of it. Every ceremony requires user verification (Face ID,
 Touch ID, device PIN).
 
 **Sign-up** (`passkey_sign_up_begin` → `navigator.credentials.create()` → `passkey_sign_up_finish`):
@@ -212,6 +214,14 @@ session can finish it.
   - at least one of the two headers is present.
 - Every server function that changes state is a `POST`. `GET` endpoints must never change state.
   The one cross-site `GET` that does, the Google callback, is protected by its one-time `state`.
+- **One exemption: `POST /webhooks/stripe`** (billing, see `docs/billing.md`). Stripe's deliveries
+  are server-to-server `POST`s with no `Origin`, no `Sec-Fetch-Site` and no cookie, so the check
+  would refuse them. The route is merged into the router *after* `auth::install`, so it sits
+  outside the session and CSRF layers: it has no session and never sees the user's cookie. It is
+  authenticated by Stripe's signature instead (HMAC-SHA256 with the endpoint secret, 5-minute
+  replay window, deduplication by event id). Until that is implemented it only answers `501`,
+  after reading at most 256 KiB of body. Any other path, including `/webhooks/stripe/…`, stays
+  behind the check.
 
 ## `AuthUser` in server functions
 
@@ -240,6 +250,7 @@ server-side: which check failed, and database errors.
 | **Session fixation** | New random session id on every sign-in; old session deleted; unknown ids never adopted (the store draws a fresh id); `__Host-` cookie cannot be set by subdomains | `the_session_id_changes_on_sign_in`, `google_sign_in_creates_then_finds_the_account_by_sub` |
 | **Session theft (DB copy, XSS)** | Only SHA-256 of ids stored; `HttpOnly`; signed cookie; idle 14 d and absolute 30 d expiry; server-side sign-out | `session_ids_are_stored_hashed`, `sign_out_deletes_the_session_server_side`, `an_expired_session_is_401`, `a_session_past_the_absolute_timeout_is_401_and_deleted` |
 | **CSRF** | `SameSite=Lax` + `Sec-Fetch-Site`/`Origin` check on every non-safe method; state changes only via `POST` | `csrf::tests`, `cross_site_posts_are_refused_without_side_effects` |
+| **Forged billing events** (a cross-site or scripted `POST /webhooks/stripe`) | The route is outside the CSRF and session layers by design, so it must authenticate every request itself: Stripe signature (HMAC-SHA256, constant-time compare, 5-minute tolerance) and event-id deduplication, see `docs/billing.md`. Today it is a stub: it answers `501` and changes nothing, with a 256 KiB body limit | `billing::tests::stripe_deliveries_are_not_blocked_by_the_csrf_check`, `billing::tests::the_exemption_is_only_the_webhook_route`, `billing::tests::the_body_limit_is_enforced` |
 | **Login CSRF** (victim signed into the attacker's account) | Google: `state` bound to the victim's session, single-use; passkeys: the challenge lives in the victim's session | `a_forged_callback_cannot_log_the_victim_into_the_attackers_account` |
 | **Forwarded authorization URL** (attacker starts a flow, victim completes it at Google) | The callback completes only with the ceremony of its own session and matching `state`; no code is ever stored or handed to another session | `a_forwarded_sign_in_url_cannot_sign_the_attacker_in_as_the_victim`, `a_forwarded_link_url_cannot_bind_the_victims_google_to_the_attacker` |
 | **Forged callback cancelling a flow** (cross-site navigation to the callback) | The ceremony is consumed only when its own `state` comes back, `?error=` included | `a_forged_callback_cannot_cancel_a_flow_in_progress`, `googles_error_with_the_right_state_ends_the_flow` |
@@ -265,7 +276,8 @@ In the [Google Cloud console](https://console.cloud.google.com/):
 
 1. Create a project, e.g. "Iron Oxide".
 2. **Google Auth Platform → Branding** (the OAuth consent screen): app name "Iron Oxide", a
-   support email, and `iron-oxyde.com` under authorized domains. **Audience**: External.
+   support email, and `iron-oxyde.com` under authorized domains (the registrable domain; it
+   covers `app.iron-oxyde.com`). **Audience**: External.
    **Data access**: no scopes need adding. The app asks for `openid` only, which needs no Google
    verification. Publish the app ("In production") when it goes live. In "Testing", only the
    listed test users can sign in.
@@ -274,7 +286,7 @@ In the [Google Cloud console](https://console.cloud.google.com/):
    - **Local:** name "Iron Oxide (local)". Authorized redirect URI:
      `http://localhost:8080/auth/google/callback`.
    - **Production:** name "Iron Oxide". Authorized redirect URI:
-     `https://iron-oxyde.com/auth/google/callback`.
+     `https://app.iron-oxyde.com/auth/google/callback`.
    - No "Authorized JavaScript origins" are needed: the flow runs on the server.
 4. Copy the client ID and secret into `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. Set
    `GOOGLE_REDIRECT_URL` to the exact redirect URI registered for that client. The server refuses
@@ -297,15 +309,17 @@ page's host to match it.
 
 To try the installed-PWA flow on a phone you need https on the real domain. Passkeys registered
 on a temporary host (e.g. the Fly default hostname) will not carry over to `iron-oxyde.com`.
+Passkeys made on `app.iron-oxyde.com` (RP ID `iron-oxyde.com`) keep working on any other
+`*.iron-oxyde.com` host the app may move to.
 
 ## Production settings
 
 | Variable | Value |
 |---|---|
-| `APP_BASE_URL` | `https://iron-oxyde.com` |
-| `WEBAUTHN_RP_ID` | `iron-oxyde.com` |
-| `WEBAUTHN_ORIGIN` | `https://iron-oxyde.com` |
-| `GOOGLE_REDIRECT_URL` | `https://iron-oxyde.com/auth/google/callback` |
+| `APP_BASE_URL` | `https://app.iron-oxyde.com` |
+| `WEBAUTHN_RP_ID` | `iron-oxyde.com` (the parent domain, not the app's host) |
+| `WEBAUTHN_ORIGIN` | `https://app.iron-oxyde.com` |
+| `GOOGLE_REDIRECT_URL` | `https://app.iron-oxyde.com/auth/google/callback` |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | the production client (secret) |
 | `SESSION_KEY` | `openssl rand 64 \| openssl base64 -A`, generated for production only (secret) |
 

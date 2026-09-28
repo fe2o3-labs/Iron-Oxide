@@ -24,8 +24,8 @@ endpoint_isolation=$(grep -cE '^test server::api::\S+::another_users\w* \.\.\. o
 echo "schema tests passed: $schema, isolation tests passed: $isolation," \
   "endpoint isolation tests passed: $endpoint_isolation"
 # Floors: today's counts. Raise them when adding tests; lowering one needs a reason.
-if [ "$schema" -lt 20 ] || [ "$isolation" -lt 9 ] || [ "$endpoint_isolation" -lt 8 ]; then
-  echo "::error::isolation or schema tests missing (schema $schema < 20, isolation $isolation < 9" \
+if [ "$schema" -lt 20 ] || [ "$isolation" -lt 11 ] || [ "$endpoint_isolation" -lt 8 ]; then
+  echo "::error::isolation or schema tests missing (schema $schema < 20, isolation $isolation < 11" \
     "or endpoint isolation $endpoint_isolation < 8)"
   exit 1
 fi
