@@ -102,14 +102,21 @@ else
   fi
 fi
 
+echo "Secret scan"
+if command -v gitleaks >/dev/null 2>&1; then
+  ok "gitleaks ('make check', 'make deploy')"
+else
+  miss "gitleaks, needed by 'make check' and 'make deploy': brew install gitleaks"
+fi
+
 echo "Optional"
 check_opt() {
   if command -v "$1" >/dev/null 2>&1; then ok "$1 ($2)"; else opt "$1 not installed ($2): $3"; fi
 }
 check_opt node "service worker tests in 'make test'" "brew install node"
 check_opt psql "'make smoke'" "brew install libpq"
-check_opt gitleaks "'make secrets'" "brew install gitleaks"
 check_opt fly "'make deploy', 'make logs'" "brew install flyctl"
+check_opt gh "'make deploy' checks that CI passed" "brew install gh"
 check_opt adb "Android helpers" "Android Studio, then add platform-tools to the PATH"
 check_opt tailscale "real iPhone over HTTPS" "brew install --cask tailscale-app"
 

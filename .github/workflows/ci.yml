@@ -130,6 +130,9 @@ jobs:
       # cargo, and the service worker's caching rule with the runner's Node.js (node:test).
       - name: Unit tests
         run: make test
+      # The Makefile's own guards (deploy, clean, check), in a scratch repository with stub tools.
+      - name: Makefile guard tests
+        run: make test-make
 
   # Builds the whole workspace with SQLX_OFFLINE=true (set globally above), so a query whose
   # `.sqlx/` metadata is missing or stale fails CI without needing a database.

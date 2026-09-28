@@ -50,6 +50,7 @@ Dev
 Quality
   compile          Type-check everything, fast: the workspace, the server and the wasm client
   test             Run the unit tests (no database)
+  test-make        Test the Makefile's own safety guards (deploy, clean, check, test)
   test-db          Run the Postgres tests and check .sqlx/ (starts the compose database if needed)
   test-all         Run all the tests
   fmt              Format the code
@@ -64,7 +65,7 @@ Build & deploy
   build            Build the release bundle (dx bundle --web --release)
   docker-build     Build the production Docker image (IMAGE=iron-oxide)
   docker-run       Run the Docker image against the local Postgres, on DOCKER_PORT
-  deploy           Deploy main to Fly.io after `make check` (CONFIRM=1)
+  deploy           Redeploy origin/main to Fly.io after `make check` (CONFIRM=1)
   logs             Tail the production logs on Fly.io
 
 Mobile
@@ -84,7 +85,9 @@ Useful variables, set on the command line (`make test-db PG_PORT=5444`):
 | Variable | Default | What |
 |---|---|---|
 | `V` | `0` | `1` echoes every command |
-| `CONFIRM` | `0` | `1` is required by `db-reset`, `clean-all`, `deploy`, and by `clean` when `CARGO_TARGET_DIR` is outside the checkout |
+| `CONFIRM` | `0` | `1` is required by `db-reset`, `clean-all` and `deploy` |
+| `CONFIRM_SHARED` | `0` | `1` is required by `clean` and `clean-all` when `CARGO_TARGET_DIR` is outside the checkout (it may be shared) |
+| `SKIP_SECRETS` | `0` | `1` lets `check` run without gitleaks (never allowed for `deploy`) |
 | `COMPOSE_PROJECT`, `PG_PORT` | `iron-oxide`, `5433` | Compose project and host port of the local Postgres: set both to run a second, independent database |
 | `APP_PORT` | `8080` | Port of `dev`, `run-release`, `smoke` and the phone helpers |
 | `DX_ARGS` | | Extra `dx serve` arguments for `dev` |
@@ -306,10 +309,10 @@ pub async fn me() -> Result<Profile, ServerFnError> {
 
 | CI job | Target | What |
 |---|---|---|
-| Secret scan (gitleaks) | `make secrets` | gitleaks on the commits not on `origin/main` (skipped by `check` if gitleaks is not installed) |
+| Secret scan (gitleaks) | `make secrets` | gitleaks on the commits not on `origin/main` (`check` fails without gitleaks, unless `SKIP_SECRETS=1`) |
 | rustfmt | `make fmt-check` | `cargo fmt --all --check` (`make fmt` formats) |
 | clippy | `make lint` | clippy with `-D warnings`: the workspace, the app with `server`, the app with `web` on wasm32 |
-| Unit tests | `make test` | the workspace, the app with `server`, the domain crate alone, the service worker tests (Node.js) |
+| Unit tests | `make test`, `make test-make` | the workspace, the app with `server`, the domain crate alone, the service worker tests (Node.js; fails if there are none), then the Makefile's own guards |
 | sqlx offline build | `make sqlx-check` | `cargo check` with `SQLX_OFFLINE=true` |
 | Integration tests (Postgres) | `make test-db` | migrations, `cargo sqlx prepare --check`, the `--ignored` tests |
 | dx bundle + smoke test | `make smoke` | `make build`, then `scripts/smoke-test.sh` runs the server against Postgres and checks it over HTTP |
@@ -377,11 +380,15 @@ IP=0.0.0.0 PORT=8080 DATABASE_URL=... APP_BASE_URL=... target/dx/iron-oxide-app/
 ```sh
 make docker-build       # the production image, tagged iron-oxide
 make docker-run         # run it on http://127.0.0.1:8080 against the local Postgres
-make deploy CONFIRM=1   # from a clean main: make check, then fly deploy
+make deploy CONFIRM=1   # manual redeploy of origin/main (see below)
 make logs               # fly logs
 ```
 
-Pushes to `main` deploy through GitHub Actions. First-time setup (Fly app, secrets, deploy token)
+Pushes to `main` deploy through GitHub Actions. `make deploy` is for a manual redeploy: it only
+runs on a clean `main` at exactly `origin/main` (it fetches first) whose CI run passed (checked
+with `gh`), runs `make check` including the secret scan, checks the checkout again, then runs
+`fly deploy`. The image is built from the local checkout on Fly's builder, not taken from CI, so
+it is the same commit CI tested but not the same build. First-time setup (Fly app, secrets, deploy token)
 and the custom domain: [docs/operations/deploy.md](docs/operations/deploy.md).
 
 ## Testing on phones

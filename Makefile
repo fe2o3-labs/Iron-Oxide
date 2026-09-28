@@ -73,7 +73,7 @@ WASM_TARGET := wasm32-unknown-unknown
 APP_DIR := crates/$(APP)
 MIGRATIONS := $(APP_DIR)/migrations
 SW_TESTS := $(wildcard $(APP_DIR)/tests/sw/*.test.mjs)
-TARGET_DIR = $(or $(CARGO_TARGET_DIR),$(CURDIR)/target)
+TARGET_DIR = $(abspath $(or $(CARGO_TARGET_DIR),$(CURDIR)/target))
 BUNDLE_DIR = $(TARGET_DIR)/dx/$(APP)/release/web
 
 # `make test LOCKED=` to let cargo update Cargo.lock; CI always passes --locked.
@@ -82,6 +82,8 @@ CARGO ?= cargo
 DX ?= dx
 SQLX ?= sqlx
 FLY ?= fly
+GH ?= gh
+GITLEAKS ?= gitleaks
 # Extra arguments for `dx serve` (`make dev DX_ARGS="--port 8081"`).
 DX_ARGS ?=
 # Port the app listens on locally (dx serve, the release server, the phone helpers).
@@ -135,6 +137,8 @@ need-cmd = command -v $(1) >/dev/null 2>&1 || { echo "make $@: '$(1)' is not ins
 # $(call need-confirm,what): refuse unless CONFIRM=1.
 need-confirm = test "$(CONFIRM)" = 1 || { echo "make $@: this $(1). Re-run with CONFIRM=1 to go ahead." >&2; exit 1; }
 CONFIRM ?= 0
+CONFIRM_SHARED ?= 0
+SKIP_SECRETS ?= 0
 # dx at exactly the dioxus version.
 need-dx = $(call need-cmd,$(DX),Run 'make setup'.); \
 	have="$$($(DX) --version | awk '{ print $$2 }')"; \
@@ -149,7 +153,7 @@ need-compose = $(need-docker)
 
 .PHONY: help setup env versions \
 	dev run run-release db-up db-down db-reset db-psql migrate sqlx-prepare schema icons \
-	compile test test-db test-all fmt fmt-check lint sqlx-check smoke secrets check \
+	compile test test-make test-db test-all fmt fmt-check lint sqlx-check smoke secrets check \
 	build docker-build docker-run deploy logs \
 	adb-reverse android-open ios-open tailscale-serve tailscale-reset \
 	clean clean-all
@@ -251,11 +255,14 @@ test: ## Run the unit tests (no database)
 	$(Q)$(CARGO) test -p $(APP) --features server $(LOCKED)
 	$(Q)$(call step,cargo test (domain crate on its own))
 	$(Q)$(CARGO) test -p $(DOMAIN) $(LOCKED)
-ifneq ($(SW_TESTS),)
 	$(Q)$(call step,service worker tests (node --test))
+	$(Q)test -n "$(SW_TESTS)" || { echo "make $@: no service worker tests found ($(APP_DIR)/tests/sw/*.test.mjs)." >&2; exit 1; }
 	$(Q)$(call need-cmd,node,Install Node.js: brew install node)
 	$(Q)node --test $(SW_TESTS)
-endif
+
+test-make: ## Test the Makefile's own safety guards (deploy, clean, check, test)
+	$(Q)$(call step,Makefile guard tests)
+	$(Q)scripts/test-make-guards.sh
 
 test-db: ## Run the Postgres tests and check .sqlx/ (starts the compose database if needed)
 	$(Q)$(need-sqlx)
@@ -308,14 +315,18 @@ endif
 	$(Q)DATABASE_URL="$$SMOKE_DATABASE_URL" PORT=$(APP_PORT) scripts/smoke-test.sh "$(BUNDLE_DIR)"
 
 secrets: ## Scan the commits not on origin/main for secrets (needs gitleaks)
-	$(Q)$(call need-cmd,gitleaks,brew install gitleaks)
-	$(Q)gitleaks git --redact --exit-code 1 --log-opts="--remerge-diff $(SECRETS_RANGE)" .
+	$(Q)$(call need-cmd,$(GITLEAKS),brew install gitleaks (see 'make setup'))
+	$(Q)$(GITLEAKS) git --redact --exit-code 1 --log-opts="--remerge-diff $(SECRETS_RANGE)" .
 SECRETS_RANGE ?= origin/main..HEAD
 
 check: ## Run everything CI runs, in CI order (starts the compose database)
-	$(Q)if command -v gitleaks >/dev/null 2>&1; then $(MAKE) secrets; \
-		else echo "==> secret scan skipped: gitleaks is not installed (CI runs it)"; fi
-	$(Q)$(MAKE) fmt-check lint test sqlx-check
+ifeq ($(SKIP_SECRETS),1)
+	$(Q)echo "==> secret scan skipped (SKIP_SECRETS=1)"
+else
+	$(Q)command -v $(GITLEAKS) >/dev/null 2>&1 || { echo "make $@: gitleaks is not installed, so the secret scan cannot run. Install it (see 'make setup'), or pass SKIP_SECRETS=1 to skip it." >&2; exit 1; }
+	$(Q)$(MAKE) secrets
+endif
+	$(Q)$(MAKE) fmt-check lint test test-make sqlx-check
 	$(Q)$(MAKE) test-db smoke
 	$(Q)echo "==> check: all green"
 
@@ -339,13 +350,28 @@ docker-run: db-up ## Run the Docker image against the local Postgres, on DOCKER_
 		-e APP_BASE_URL=http://localhost:$(DOCKER_PORT) -e DATABASE_URL \
 		$(IMAGE)
 
-deploy: ## Deploy main to Fly.io after `make check` (CONFIRM=1)
+# Deploys only what CI has seen: a clean checkout of `main` at exactly `origin/main`, whose CI run
+# passed. It still builds the image from this checkout (on Fly's builder), not CI's image; pushes to
+# main deploy through GitHub Actions, and this target is for a manual redeploy.
+deploy: ## Redeploy origin/main to Fly.io after `make check` (CONFIRM=1)
 	$(Q)$(call need-cmd,$(FLY),brew install flyctl)
+	$(Q)$(call need-cmd,$(GH),brew install gh (checks that CI passed for the commit))
+	$(Q)$(call need-cmd,$(GITLEAKS),brew install gitleaks (see 'make setup'))
 	$(Q)$(call need-confirm,deploys to production)
-	$(Q)test "$$(git rev-parse --abbrev-ref HEAD)" = main || { echo "make $@: deploy from main only." >&2; exit 1; }
-	$(Q)test -z "$$(git status --porcelain)" || { echo "make $@: the working tree has uncommitted changes." >&2; exit 1; }
-	$(Q)$(MAKE) check
+	$(Q)test "$(SKIP_SECRETS)" != 1 || { echo "make $@: SKIP_SECRETS=1 is not allowed for a deploy." >&2; exit 1; }
+	$(Q)$(deploy-guard)
+	$(Q)sha="$$(git rev-parse HEAD)"; \
+		ok="$$($(GH) run list --commit "$$sha" --workflow ci.yml --event push --status success --json databaseId --jq length)"; \
+		test "$$ok" -gt 0 || { echo "make $@: CI has not passed for $$sha on main yet." >&2; exit 1; }
+	$(Q)$(MAKE) check SECRETS_RANGE=HEAD
+	$(Q)$(deploy-guard)
 	$(Q)$(FLY) deploy
+# On main, with a clean tree, at exactly origin/main (not ahead, behind or diverged). Run before
+# and again after `make check`, which takes minutes.
+deploy-guard = test "$$(git rev-parse --abbrev-ref HEAD)" = main || { echo "make $@: deploy from main only." >&2; exit 1; }; \
+	test -z "$$(git status --porcelain)" || { echo "make $@: the working tree has uncommitted changes." >&2; exit 1; }; \
+	git fetch --quiet origin main; \
+	test "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" || { echo "make $@: HEAD is not origin/main (ahead, behind or diverged): deploy exactly what is on origin/main." >&2; exit 1; }
 
 logs: ## Tail the production logs on Fly.io
 	$(Q)$(call need-cmd,$(FLY),brew install flyctl)
@@ -381,7 +407,7 @@ tailscale-reset: ## Stop publishing the app to your tailnet
 clean: ## Delete the build output: cargo's target dir (the one in use) and dx's output
 	$(Q)case "$(TARGET_DIR)/" in \
 		"$(CURDIR)/"*) ;; \
-		*) $(call need-confirm,deletes $(TARGET_DIR) which is outside this checkout and may be shared) ;; \
+		*) test "$(CONFIRM_SHARED)" = 1 || { echo "make $@: this deletes $(TARGET_DIR)$(comma) which is outside this checkout and may be shared. Re-run with CONFIRM_SHARED=1 to go ahead." >&2; exit 1; } ;; \
 	esac
 	$(Q)$(call step,cargo clean ($(TARGET_DIR)))
 	$(Q)$(CARGO) clean
@@ -389,5 +415,5 @@ clean: ## Delete the build output: cargo's target dir (the one in use) and dx's 
 
 clean-all: ## clean, and delete the local Postgres data (CONFIRM=1)
 	$(Q)$(call need-confirm,deletes the build output and every database of compose project '$(COMPOSE_PROJECT)')
-	$(Q)$(MAKE) clean
+	$(Q)$(MAKE) clean CONFIRM=0
 	$(Q)$(COMPOSE) down -v
