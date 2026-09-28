@@ -225,9 +225,7 @@ Postgres"]`, inside the `server/db` modules (the app is a binary crate, so integ
 applies every migration and drops it afterwards, so tests are isolated and run in parallel.
 
 ```sh
-docker compose up -d --wait
-DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
-  cargo test -p iron-oxide-app --features server -- --ignored
+make test-db   # starts the compose database, migrates it, checks .sqlx/, runs the tests
 ```
 
 `server/db/testing.rs` has the helpers: `users_a_and_b` (A owns the data, B tries to reach it),
@@ -269,7 +267,7 @@ CI runs them in the "Integration tests (Postgres)" job. It fails unless every
 `#[ignore = "needs Postgres"]` test in the app's `src/` appears as passed in the log, and unless at
 least as many schema tests (module `schema_tests`) and repository isolation tests (names containing
 `another_users`, `users_only`, `nobody_can`, `two_users` or `only_the_users`) passed as today.
-Follow the naming convention for new isolation tests and raise the floors in `ci.yml`.
+Follow the naming convention for new isolation tests and raise the floors in `scripts/check-postgres-tests.sh`.
 
 ### Adding a user-owned table
 

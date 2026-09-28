@@ -151,7 +151,7 @@ Tests that need Postgres go under `server::api::<area>::tests`, with
 checks that every one of them passed.
 
 **Isolation tests are required for every endpoint.** Name them `another_users_*`. CI counts them and
-enforces a floor, so raise the floor in `ci.yml` when you add some. For each of A's ids that an
+enforces a floor, so raise the floor in `scripts/check-postgres-tests.sh` when you add some. For each of A's ids that an
 endpoint accepts, B gets 404 from reads, updates and deletes, and nothing of A's appears in B's
 lists. After a refused write, A's data is unchanged.
 
