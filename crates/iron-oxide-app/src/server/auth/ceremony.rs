@@ -183,6 +183,18 @@ pub async fn take_google(
     checked(row.kind, row.user_id, row.state, row.live, current)
 }
 
+/// Deletes any Google ceremony that sent `state` to Google, whichever session holds it.
+pub async fn discard_google_by_state(pool: &PgPool, state: &str) -> Result<u64, AuthError> {
+    Ok(sqlx::query!(
+        "DELETE FROM auth_ceremonies
+         WHERE kind IN ('google_sign_in', 'google_link') AND state ->> 'state' = $1",
+        state,
+    )
+    .execute(pool)
+    .await?
+    .rows_affected())
+}
+
 /// Keeps a signed-out session short-lived once its ceremony is gone, even if it failed.
 async fn shorten_if_signed_out(session: &Session) -> Result<(), AuthError> {
     if session.get::<UserId>(keys::USER_ID).await?.is_none() {

@@ -292,21 +292,29 @@ async fn user_verification_is_required(db: PgPool) {
 #[sqlx::test]
 #[ignore = "needs Postgres"]
 async fn a_user_handle_pointing_at_another_account_is_rejected(db: PgPool) {
-    let app = TestApp::new(db).await;
+    let app = TestApp::new(db.clone()).await;
     let (mut alice, mut bob) = (app.browser(), app.browser());
     let mut bob_key = Passkey::new();
     let (alice_me, _) = sign_up(&mut alice, &mut Passkey::new(), "alice").await;
     let (_, bob_cred) = sign_up(&mut bob, &mut bob_key, "bob").await;
     let () = bob.call(SIGN_OUT, json!({})).await.unwrap();
 
-    // Bob signs with his own passkey but claims Alice's user handle.
-    let mut assertion = sign_in_assertion(&mut bob, &mut bob_key, &bob_cred).await;
-    assertion.response.user_handle = Some(alice_me.user_id.as_uuid().as_bytes().to_vec().into());
-    let error = bob
-        .call::<Me>(SIGN_IN_FINISH, json!({ "credential": assertion }))
-        .await
-        .unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    // Bob signs with his own passkey but claims Alice's user handle, or her user id.
+    let alice_handle: uuid::Uuid =
+        sqlx::query_scalar("SELECT user_handle FROM webauthn_user_handles WHERE user_id = $1")
+            .bind(alice_me.user_id.as_uuid())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    for claimed in [alice_handle, alice_me.user_id.as_uuid()] {
+        let mut assertion = sign_in_assertion(&mut bob, &mut bob_key, &bob_cred).await;
+        assertion.response.user_handle = Some(claimed.as_bytes().to_vec().into());
+        let error = bob
+            .call::<Me>(SIGN_IN_FINISH, json!({ "credential": assertion }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
     assert_eq!(
         me(&mut bob).await.unwrap_err().status,
         StatusCode::UNAUTHORIZED
@@ -595,7 +603,12 @@ async fn deleting_a_user_deletes_their_auth_rows(db: PgPool) {
         .execute(&db)
         .await
         .unwrap();
-    for table in ["passkeys", "oauth_identities", "sessions"] {
+    for table in [
+        "passkeys",
+        "oauth_identities",
+        "sessions",
+        "webauthn_user_handles",
+    ] {
         let n: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
             .fetch_one(&db)
             .await
@@ -755,6 +768,23 @@ async fn a_forwarded_sign_in_url_cannot_sign_the_attacker_in_as_the_victim(db: P
         assert!(body.contains(r#""type":"error""#), "{body}");
         assert!(!body.contains(&code), "the code is not echoed: {body}");
         // The attacker is not signed in, and there is no endpoint that could hand it the code.
+        assert_eq!(
+            me(&mut attacker).await.unwrap_err().status,
+            StatusCode::UNAUTHORIZED
+        );
+        // The forwarded flow is dead: even if the victim's code leaks later, the attacker's
+        // own callback with it finds no ceremony.
+        let google: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM auth_ceremonies WHERE kind IN ('google_sign_in', 'google_link')",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(google, 0);
+        let (_, _, body) = attacker
+            .get(&callback_path(&code, &query_param(&url, "state")))
+            .await;
+        assert!(body.contains(r#""type":"error""#), "{body}");
         assert_eq!(
             me(&mut attacker).await.unwrap_err().status,
             StatusCode::UNAUTHORIZED
@@ -1298,4 +1328,72 @@ async fn auth_rows_never_change_owner(db: PgPool) {
         );
     }
     me(&mut browser).await.unwrap();
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn the_webauthn_user_handle_is_random_stable_and_not_the_user_id(db: PgPool) {
+    let app = TestApp::new(db.clone()).await;
+    let mut browser = app.browser();
+    let ccr: CreationChallengeResponse = browser
+        .call(SIGN_UP_BEGIN, json!({ "display_name": "a" }))
+        .await
+        .unwrap();
+    let sign_up_handle = ccr.public_key.user.id.to_vec();
+    let mut phone = Passkey::new();
+    let credential = phone.register(ccr);
+    let me1: Me = browser
+        .call(SIGN_UP_FINISH, json!({ "credential": credential }))
+        .await
+        .unwrap();
+    let stored: uuid::Uuid =
+        sqlx::query_scalar("SELECT user_handle FROM webauthn_user_handles WHERE user_id = $1")
+            .bind(me1.user_id.as_uuid())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(sign_up_handle, stored.as_bytes().to_vec());
+    assert_ne!(stored, me1.user_id.as_uuid());
+    assert_eq!(stored.get_version_num(), 4, "random, not time-based");
+
+    // A second passkey gets the same handle.
+    let ccr: CreationChallengeResponse = browser.call(ADD_BEGIN, json!({})).await.unwrap();
+    assert_eq!(ccr.public_key.user.id.to_vec(), stored.as_bytes().to_vec());
+
+    // A Google-only account gets its own handle on its first passkey.
+    let mut other = app.browser();
+    google_sign_in_or_link(&app, &mut other, "SignIn", "sub-handle")
+        .await
+        .unwrap();
+    let ccr: CreationChallengeResponse = other.call(ADD_BEGIN, json!({})).await.unwrap();
+    let other_handle = ccr.public_key.user.id.to_vec();
+    assert_ne!(other_handle, stored.as_bytes().to_vec());
+    let other_id = me(&mut other).await.unwrap().user_id;
+    assert_ne!(other_handle, other_id.as_uuid().as_bytes().to_vec());
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn new_users_get_uuidv7_ids_by_default(db: PgPool) {
+    let id: uuid::Uuid = sqlx::query_scalar("INSERT INTO users DEFAULT VALUES RETURNING id")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(id.get_version_num(), 7);
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn a_callback_with_repeated_parameters_gets_the_error_page(db: PgPool) {
+    let app = TestApp::new(db).await;
+    let mut browser = app.browser();
+    let url = google_begin(&mut browser, "SignIn").await;
+    let state = query_param(&url, "state");
+    let (status, _, body) = browser
+        .get(&format!(
+            "/auth/google/callback?code=a&state={state}&state={state}"
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(r#""type":"error""#), "{body}");
 }

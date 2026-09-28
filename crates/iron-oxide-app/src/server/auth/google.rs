@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use dioxus::logger::tracing;
 use dioxus::server::axum::{
-    extract::Query,
+    extract::RawQuery,
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -261,7 +261,7 @@ async fn sign_in_or_create(ctx: &AuthContext, subject: &str) -> Result<UserId, A
     }
 
     let mut tx = ctx.db().begin().await?;
-    let user = sqlx::query_scalar!("INSERT INTO users (id) VALUES (uuidv7()) RETURNING id")
+    let user = sqlx::query_scalar!("INSERT INTO users DEFAULT VALUES RETURNING id")
         .fetch_one(&mut *tx)
         .await?;
     let linked = sqlx::query_scalar!(
@@ -351,11 +351,31 @@ pub async fn unlink(ctx: &AuthContext, user: UserId) -> Result<Me, AuthError> {
 }
 
 /// Query parameters of the callback.
-#[derive(Debug, Deserialize)]
-pub struct CallbackParams {
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CallbackParams {
     code: Option<String>,
     state: Option<String>,
     error: Option<String>,
+}
+
+impl CallbackParams {
+    /// Parses the query string. A repeated `code`, `state` or `error` is refused (the page then
+    /// shows the usual error); other parameters are ignored.
+    fn parse(query: Option<&str>) -> Result<Self, AuthError> {
+        let mut params = Self::default();
+        for (key, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+            let slot = match key.as_ref() {
+                "code" => &mut params.code,
+                "state" => &mut params.state,
+                "error" => &mut params.error,
+                _ => continue,
+            };
+            if slot.replace(value.into_owned()).is_some() {
+                return Err(AuthError::Google(format!("repeated `{key}` parameter")));
+            }
+        }
+        Ok(params)
+    }
 }
 
 /// What the callback page does once it has posted its message.
@@ -370,9 +390,13 @@ enum AfterMessage {
 }
 
 /// `GET /auth/google/callback`: see the module docs.
-pub async fn callback(ctx: AuthContext, Query(params): Query<CallbackParams>) -> Response {
+pub async fn callback(ctx: AuthContext, RawQuery(query): RawQuery) -> Response {
     let origin = ctx.auth.origin().to_owned();
-    let (message, after) = match callback_outcome(&ctx, params).await {
+    let outcome = match CallbackParams::parse(query.as_deref()) {
+        Ok(params) => callback_outcome(&ctx, params).await,
+        Err(error) => Err(error),
+    };
+    let (message, after) = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
             let message = GoogleCallbackMessage::Error {
@@ -399,6 +423,7 @@ async fn callback_outcome(
         {
             let current = ctx.current_user().await?;
             let _ = ceremony::take_google(ctx.db(), &ctx.session, current, state).await;
+            ceremony::discard_google_by_state(ctx.db(), state).await?;
         }
         return Err(AuthError::Google(format!("Google returned {error:.64}")));
     }
@@ -407,7 +432,19 @@ async fn callback_outcome(
             "callback without code or state".to_owned(),
         ));
     };
-    let popup = finish(ctx, &code, &state).await?;
+    let popup = match finish(ctx, &code, &state).await {
+        Ok(popup) => popup,
+        Err(error) => {
+            // A `state` that belongs to a flow of another session means its authorization URL
+            // was forwarded (or its code leaked): that flow must never complete, so a code that
+            // leaks later cannot be redeemed by whoever started it. Only the flow's creator and
+            // this browser know that `state`, so this cannot cancel an unrelated flow.
+            if check_param(&state).is_ok() {
+                ceremony::discard_google_by_state(ctx.db(), &state).await?;
+            }
+            return Err(error);
+        }
+    };
     let after = if popup {
         AfterMessage::Close
     } else {
@@ -520,6 +557,37 @@ mod tests {
         assert!(!state_matches("abc", "abd"));
         assert!(!state_matches("abc", "abcd"));
         assert!(!state_matches("abc", ""));
+    }
+
+    #[test]
+    fn callback_params_are_parsed_and_repeats_refused() {
+        assert_eq!(
+            CallbackParams::parse(Some("code=c&state=s&scope=openid")).unwrap(),
+            CallbackParams {
+                code: Some("c".to_owned()),
+                state: Some("s".to_owned()),
+                error: None,
+            }
+        );
+        assert_eq!(
+            CallbackParams::parse(None).unwrap(),
+            CallbackParams::default()
+        );
+        assert_eq!(
+            CallbackParams::parse(Some("error=access_denied&state=a%2Bb")).unwrap(),
+            CallbackParams {
+                code: None,
+                state: Some("a+b".to_owned()),
+                error: Some("access_denied".to_owned()),
+            }
+        );
+        for query in [
+            "state=a&state=b",
+            "code=a&code=a",
+            "error=x&error=y&state=s",
+        ] {
+            assert!(CallbackParams::parse(Some(query)).is_err(), "{query}");
+        }
     }
 
     #[test]

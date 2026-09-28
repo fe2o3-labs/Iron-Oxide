@@ -1,58 +1,35 @@
-//! The server's logger: the same output as `dioxus::logger::initialize_default`, with a filter
-//! that keeps sign-in material out of the logs at every `RUST_LOG` level.
+//! The server's logger: the same output as `dioxus::logger::initialize_default`, with sign-in
+//! material kept out of the logs at every `RUST_LOG` level.
 //!
 //! `webauthn-rs-core` logs credential ids and public keys at `debug`, and the challenge and the
-//! whole registration at `trace`. Those targets are capped at `info` whatever `RUST_LOG` says:
-//! any directive for them (or scoped to a span, which could re-enable them) is dropped before
-//! ours are appended.
+//! whole registration at `trace`. A per-event filter drops every event and span whose target is
+//! in `webauthn_rs*` below `INFO`, after and independently of the `RUST_LOG` filter, so no
+//! directive (span-scoped, prefixed, or otherwise) can let them through.
 
-use dioxus::logger::tracing;
-use tracing_subscriber::EnvFilter;
+use dioxus::logger::tracing::{self, Level, Metadata};
+use tracing_subscriber::{
+    EnvFilter, Layer, filter::filter_fn, layer::SubscriberExt, util::SubscriberInitExt,
+};
 
-/// Targets that must never log below `info`.
-const CAPPED_TARGETS: [&str; 2] = ["webauthn_rs_core", "webauthn_rs"];
+/// Targets under this prefix never log below `INFO` (`webauthn_rs`, `webauthn_rs_core`, …).
+const CAPPED_PREFIX: &str = "webauthn_rs";
 
-/// Builds the filter directives: the user's (`RUST_LOG`, already validated) or the default
-/// level, minus anything that could lower the cap, plus the caps.
-#[must_use]
-pub fn filter_directives(user: Option<&str>) -> String {
+/// The `RUST_LOG` filter (already validated at startup) or the default level, plus the Dioxus
+/// logger's `hyper_util=warn`.
+pub fn env_filter(user: Option<&str>) -> Result<EnvFilter, String> {
     let default = if cfg!(debug_assertions) {
         "debug"
     } else {
         "info"
     };
-    let user = user.unwrap_or(default);
-    let mut directives: Vec<String> = user
-        .split(',')
-        .map(str::trim)
-        .filter(|directive| !directive.is_empty())
-        .filter(|directive| !could_lower_the_cap(directive))
-        .map(str::to_owned)
-        .collect();
-    // hyper has spammy `debug!` calls, as in `dioxus::logger`.
-    directives.push("hyper_util=warn".to_owned());
-    directives.extend(CAPPED_TARGETS.iter().map(|target| format!("{target}=info")));
-    directives.join(",")
+    let directives = format!("{},hyper_util=warn", user.unwrap_or(default));
+    EnvFilter::try_new(directives).map_err(|error| error.to_string())
 }
 
-/// A span-scoped directive, or one whose target is (inside) a capped crate.
-fn could_lower_the_cap(directive: &str) -> bool {
-    if directive.starts_with('[') {
-        return true;
-    }
-    let target = directive
-        .split(['[', '='])
-        .next()
-        .unwrap_or(directive)
-        .trim();
-    CAPPED_TARGETS
-        .iter()
-        .any(|capped| target == *capped || target.starts_with(&format!("{capped}::")))
-}
-
-/// The filter for [`filter_directives`].
-pub fn env_filter(user: Option<&str>) -> Result<EnvFilter, String> {
-    EnvFilter::try_new(filter_directives(user)).map_err(|error| error.to_string())
+/// Whether the event or span may be logged, whatever the `RUST_LOG` filter says.
+#[must_use]
+pub fn allowed(metadata: &Metadata<'_>) -> bool {
+    !(metadata.target().starts_with(CAPPED_PREFIX) && *metadata.level() > Level::INFO)
 }
 
 /// Installs the global logger. Does nothing if one is already set (tests).
@@ -60,16 +37,18 @@ pub fn init(user: Option<&str>) {
     if tracing::dispatcher::has_been_set() {
         return;
     }
-    match env_filter(user) {
-        Ok(filter) => {
-            let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
-        }
+    let filter = match env_filter(user) {
+        Ok(filter) => filter,
         Err(error) => {
-            // RUST_LOG was validated at startup; fall back to the Dioxus default.
+            // RUST_LOG was validated at startup; fall back to the default level.
             eprintln!("warning: cannot build the log filter ({error}); using the default");
-            dioxus::logger::initialize_default();
+            EnvFilter::new("info")
         }
-    }
+    };
+    let layer = tracing_subscriber::fmt::layer()
+        .with_filter(filter)
+        .with_filter(filter_fn(allowed));
+    let _ = tracing_subscriber::registry().with(layer).try_init();
 }
 
 #[cfg(test)]
@@ -92,63 +71,87 @@ mod tests {
         }
     }
 
-    /// Logs a few events under the filter built from `rust_log`; returns what was written.
+    /// Logs a few events through the same layers as [`init`], with `rust_log`; returns the
+    /// output.
     fn logged(rust_log: &str) -> String {
         let out = Captured::default();
         let writer = out.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(env_filter(Some(rust_log)).unwrap())
+        let layer = tracing_subscriber::fmt::layer()
             .with_writer(move || writer.clone())
-            .with_ansi(false)
-            .finish();
+            .with_filter(env_filter(Some(rust_log)).unwrap())
+            .with_filter(filter_fn(allowed));
+        let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, || {
             tracing::trace!(target: "webauthn_rs_core::core", "SECRET-trace-state");
             tracing::debug!(target: "webauthn_rs_core::core", "SECRET-debug-credential");
             tracing::debug!(target: "webauthn_rs", "SECRET-debug-webauthn-rs");
             tracing::info!(target: "webauthn_rs_core::core", "info-is-fine");
             tracing::trace!(target: "iron_oxide_app::server", "app-trace");
-            let span = tracing::info_span!("x");
+            let span = tracing::info_span!(target: "tower_sessions", "call");
             let _entered = span.enter();
             tracing::trace!(target: "webauthn_rs_core::core", "SECRET-in-span");
+            tracing::trace!(target: "webauthn_rs_core:", "SECRET-odd-target");
         });
         let bytes = out.0.lock().unwrap().clone();
         String::from_utf8(bytes).unwrap()
     }
 
     #[test]
-    fn webauthn_stays_at_info_even_when_everything_is_traced() {
+    fn webauthn_stays_at_info_whatever_rust_log_says() {
         for rust_log in [
             "trace",
             "webauthn_rs_core=trace",
             "webauthn_rs_core::core=trace,webauthn_rs=debug",
             "trace,[x]=trace,[{a}]=trace",
             "info,webauthn_rs_core[x]=trace",
+            // From the second security review.
+            "tower_sessions[call]=trace",
+            "webauthn_rs_core:=trace",
         ] {
             let logs = logged(rust_log);
             assert!(!logs.contains("SECRET"), "{rust_log}: {logs}");
-            assert!(logs.contains("info-is-fine"), "{rust_log}: {logs}");
         }
-        assert!(logged("trace").contains("app-trace"));
+        let logs = logged("trace");
+        assert!(logs.contains("info-is-fine"), "{logs}");
+        assert!(logs.contains("app-trace"), "{logs}");
     }
 
     #[test]
-    fn other_directives_are_kept() {
-        let directives = filter_directives(Some("info, sqlx=warn ,webauthn_rs_core=trace"));
-        assert_eq!(
-            directives,
-            "info,sqlx=warn,hyper_util=warn,webauthn_rs_core=info,webauthn_rs=info"
-        );
-        assert!(filter_directives(None).ends_with("webauthn_rs_core=info,webauthn_rs=info"));
+    fn only_webauthn_below_info_is_dropped() {
+        let meta = |target: &'static str, level: Level| {
+            let callsite = tracing::callsite::Identifier(&CALLSITE);
+            Metadata::new(
+                "event",
+                target,
+                level,
+                None,
+                None,
+                None,
+                tracing::field::FieldSet::new(&[], callsite),
+                tracing::metadata::Kind::EVENT,
+            )
+        };
+        assert!(!allowed(&meta("webauthn_rs_core::core", Level::DEBUG)));
+        assert!(!allowed(&meta("webauthn_rs", Level::TRACE)));
+        assert!(!allowed(&meta("webauthn_rs_proto", Level::DEBUG)));
+        assert!(allowed(&meta("webauthn_rs_core", Level::INFO)));
+        assert!(allowed(&meta("webauthn_rs_core", Level::WARN)));
+        assert!(allowed(&meta("iron_oxide_app", Level::TRACE)));
+        assert!(allowed(&meta("tower_sessions", Level::TRACE)));
+    }
+
+    struct Callsite;
+    static CALLSITE: Callsite = Callsite;
+    impl tracing::callsite::Callsite for Callsite {
+        fn set_interest(&self, _: tracing::subscriber::Interest) {}
+        fn metadata(&self) -> &Metadata<'_> {
+            unimplemented!()
+        }
     }
 
     #[test]
-    fn only_capped_targets_are_dropped() {
-        assert!(could_lower_the_cap("webauthn_rs_core"));
-        assert!(could_lower_the_cap("webauthn_rs=trace"));
-        assert!(could_lower_the_cap("webauthn_rs_core::core=debug"));
-        assert!(could_lower_the_cap("[span]=trace"));
-        assert!(!could_lower_the_cap("webauthn_rs_proto=trace"));
-        assert!(!could_lower_the_cap("iron_oxide_app=trace"));
-        assert!(!could_lower_the_cap("trace"));
+    fn env_filter_accepts_the_default_and_user_filters() {
+        assert!(env_filter(None).is_ok());
+        assert!(env_filter(Some("info,sqlx=warn")).is_ok());
     }
 }

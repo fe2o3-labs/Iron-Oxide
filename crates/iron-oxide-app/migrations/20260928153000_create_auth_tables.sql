@@ -2,8 +2,9 @@
 -- Every row that belongs to a user is deleted with the user (ON DELETE CASCADE, #22).
 -- See docs/auth.md for the design.
 --
--- Row ids are UUIDv7 (`uuidv7()`, Postgres 18; #65). Nothing secret is a UUIDv7: session ids and the
--- OAuth state, nonce and PKCE verifier are cryptographically random.
+-- Row ids are UUIDv7 (`uuidv7()`, Postgres 18; #65). Nothing secret or exposed to authenticators
+-- is a UUIDv7: session ids, WebAuthn user handles and the OAuth state, nonce and PKCE verifier are
+-- cryptographically random.
 --
 -- Like every user-owned table (#17): `user_id` cascades from `users`, is indexed, and never
 -- changes once written (trigger `forbid_owner_change`).
@@ -20,6 +21,18 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+-- The WebAuthn user handle of each user who has registered a passkey. Random (UUIDv4 from the OS
+-- CSPRNG), never the user id: authenticators store it, and a UUIDv7 user id would tell them when
+-- the account was created. One per user, the same for all their passkeys.
+CREATE TABLE webauthn_user_handles (
+    user_id     uuid        PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+    user_handle uuid        NOT NULL UNIQUE,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TRIGGER webauthn_user_handles_owner BEFORE UPDATE OF user_id ON webauthn_user_handles
+    FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
 
 -- WebAuthn credentials (passkeys). A user may have several.
 CREATE TABLE passkeys (
@@ -106,5 +119,9 @@ CREATE TABLE auth_ceremonies (
 
 CREATE INDEX auth_ceremonies_expires_at_idx ON auth_ceremonies (expires_at);
 CREATE INDEX auth_ceremonies_user_id_idx ON auth_ceremonies (user_id);
+-- Google callbacks find a ceremony by the `state` they carry (to discard it when it arrives in
+-- another session).
+CREATE INDEX auth_ceremonies_google_state_idx ON auth_ceremonies ((state ->> 'state'))
+    WHERE kind IN ('google_sign_in', 'google_link');
 CREATE TRIGGER auth_ceremonies_owner BEFORE UPDATE OF user_id ON auth_ceremonies
     FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();

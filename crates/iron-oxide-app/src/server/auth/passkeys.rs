@@ -1,10 +1,14 @@
 //! Passkey ceremonies (WebAuthn, through `webauthn-rs`) and the account queries around them.
 //!
-//! - Sign-up creates the user and registers their first passkey. The user id is drawn when the
-//!   ceremony starts (it is the WebAuthn user handle) and the row is only inserted once the
-//!   passkey verifies.
+//! - Sign-up creates the user and registers their first passkey. The user id (UUIDv7) and the
+//!   WebAuthn user handle are drawn when the ceremony starts, and the rows are only inserted once
+//!   the passkey verifies.
+//! - The user handle is random (UUIDv4 from the OS CSPRNG), one per user, stored in
+//!   `webauthn_user_handles`, and never the user id: authenticators keep it, and a UUIDv7 would
+//!   tell them when the account was created.
 //! - Sign-in is discoverable (username-less): the browser picks the credential and returns the
-//!   user handle, and only that user's passkey with that credential id is accepted.
+//!   user handle, and only the passkey with that credential id belonging to the user with that
+//!   handle is accepted.
 //! - Every passkey is created with user verification required and as a discoverable ("resident")
 //!   credential.
 
@@ -36,6 +40,7 @@ pub const MAX_PASSKEYS_PER_USER: i64 = 20;
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SignUpState {
     user_id: Uuid,
+    user_handle: Uuid,
     display_name: Option<String>,
     registration: PasskeyRegistration,
 }
@@ -97,13 +102,15 @@ pub async fn sign_up_begin(
     let display_name = normalize_name(display_name)
         .map_err(|reason| AuthError::Invalid(format!("The name {reason}.")))?;
     let user_id = Uuid::now_v7();
+    let user_handle = new_user_handle();
     let label = display_name.as_deref().unwrap_or(DEFAULT_ACCOUNT_NAME);
-    let (ccr, registration) = ctx
-        .auth
-        .webauthn()
-        .start_passkey_registration(user_id, label, label, None)?;
+    let (ccr, registration) =
+        ctx.auth
+            .webauthn()
+            .start_passkey_registration(user_handle, label, label, None)?;
     let state = SignUpState {
         user_id,
+        user_handle,
         display_name,
         registration,
     };
@@ -137,6 +144,13 @@ pub async fn sign_up_finish(
         "INSERT INTO users (id, display_name) VALUES ($1, $2)",
         user.as_uuid(),
         state.display_name,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "INSERT INTO webauthn_user_handles (user_id, user_handle) VALUES ($1, $2)",
+        user.as_uuid(),
+        state.user_handle,
     )
     .execute(&mut *tx)
     .await?;
@@ -179,9 +193,10 @@ pub async fn sign_in_finish(
     // counter update.
     let mut tx = ctx.db().begin().await?;
     let row = sqlx::query!(
-        "SELECT id, user_id, passkey FROM passkeys
-         WHERE credential_id = $1 AND user_id = $2
-         FOR UPDATE",
+        "SELECT p.id, p.user_id, p.passkey
+         FROM passkeys p JOIN webauthn_user_handles h ON h.user_id = p.user_id
+         WHERE p.credential_id = $1 AND h.user_handle = $2
+         FOR UPDATE OF p",
         credential_id,
         user_handle,
     )
@@ -239,12 +254,11 @@ pub async fn add_begin(
     .ok_or(AuthError::Unauthenticated)?;
     let label = display_name.as_deref().unwrap_or(DEFAULT_ACCOUNT_NAME);
     let exclude = existing.iter().map(|p| p.cred_id().clone()).collect();
-    let (ccr, registration) = ctx.auth.webauthn().start_passkey_registration(
-        user.as_uuid(),
-        label,
-        label,
-        Some(exclude),
-    )?;
+    let user_handle = user_handle(ctx.db(), user).await?;
+    let (ccr, registration) =
+        ctx.auth
+            .webauthn()
+            .start_passkey_registration(user_handle, label, label, Some(exclude))?;
     ceremony::start(
         ctx.db(),
         &ctx.session,
@@ -282,6 +296,29 @@ pub async fn add_finish(
     insert_passkey(&mut tx, user, &passkey, &nickname).await?;
     tx.commit().await?;
     me(ctx, user).await
+}
+
+/// A new random WebAuthn user handle (UUIDv4: 122 bits from the OS CSPRNG).
+fn new_user_handle() -> Uuid {
+    Uuid::new_v4()
+}
+
+/// The user's WebAuthn user handle, created on first use (a Google-only user adding a passkey).
+async fn user_handle(pool: &PgPool, user: UserId) -> Result<Uuid, AuthError> {
+    sqlx::query!(
+        "INSERT INTO webauthn_user_handles (user_id, user_handle) VALUES ($1, $2)
+         ON CONFLICT (user_id) DO NOTHING",
+        user.as_uuid(),
+        new_user_handle(),
+    )
+    .execute(pool)
+    .await?;
+    Ok(sqlx::query_scalar!(
+        "SELECT user_handle FROM webauthn_user_handles WHERE user_id = $1",
+        user.as_uuid()
+    )
+    .fetch_one(pool)
+    .await?)
 }
 
 /// Removes one of the user's passkeys, unless it is their last way to sign in.
