@@ -161,20 +161,59 @@ async fn deleting_a_user_removes_their_rows_in_every_table_and_keeps_others(pool
 #[sqlx::test(migrator = "MIGRATOR")]
 #[ignore = "needs Postgres"]
 async fn no_row_can_change_owner(pool: PgPool) {
-    let (a, b) = testing::users_a_and_b(&pool).await;
+    let a = testing::user(&pool).await;
     testing::populate(&pool, a).await;
-    testing::populate(&pool, b).await;
+    // C has no rows at all, so moving A's rows to C breaks no key or foreign key in the
+    // single-owner tables: only the owner trigger stands in the way.
+    let c = testing::user(&pool).await;
     for table in user_owned_tables(&pool).await {
         let before = count_owned_by(&pool, &table, a).await;
         let sql = format!("UPDATE \"{table}\" SET user_id = $2 WHERE user_id = $1");
-        let result = sqlx::query(&sql)
+        let error = sqlx::query(&sql)
             .bind(a.as_uuid())
-            .bind(b.as_uuid())
+            .bind(c.as_uuid())
             .execute(&pool)
-            .await;
-        assert!(result.is_err(), "{table}: {result:?}");
+            .await
+            .unwrap_err();
+        let db_error = error.as_database_error().unwrap();
+        // Postgres checks row triggers before keys: the error must be the trigger's.
+        assert_eq!(
+            db_error.code().as_deref(),
+            Some("23000"),
+            "{table}: {error}"
+        );
+        assert!(
+            db_error.message().contains("cannot change")
+                || db_error.message().contains("immutable"),
+            "{table}: {error}"
+        );
         assert_eq!(count_owned_by(&pool, &table, a).await, before, "{table}");
+        assert_eq!(count_owned_by(&pool, &table, c).await, 0, "{table}");
     }
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn every_user_owned_table_has_an_owner_trigger(pool: PgPool) {
+    let guarded = sqlx::query_scalar!(
+        r#"SELECT DISTINCT cls.relname AS "table!" FROM pg_trigger trg
+           JOIN pg_class cls ON cls.oid = trg.tgrelid
+           JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+           JOIN pg_proc proc ON proc.oid = trg.tgfoid
+           WHERE ns.nspname = 'public' AND NOT trg.tgisinternal
+             AND proc.proname IN ('forbid_owner_change', 'forbid_update')
+             -- A row-level (bit 0) BEFORE (bit 1) UPDATE (bit 4) trigger.
+             AND trg.tgtype & 1 = 1 AND trg.tgtype & 2 = 2 AND trg.tgtype & 16 = 16"#
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let missing: Vec<String> = user_owned_tables(&pool)
+        .await
+        .into_iter()
+        .filter(|table| !guarded.contains(table))
+        .collect();
+    assert!(missing.is_empty(), "no owner trigger on {missing:?}");
 }
 
 /// Runs raw SQL and returns whether Postgres accepted it.
