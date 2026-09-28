@@ -62,10 +62,23 @@ fn describe(error: dotenvy::Error, content: &str, path: String) -> DotenvError {
     }
 }
 
-/// 1-based line number where `rest` (the unparsed remainder dotenvy reports) starts.
+/// 1-based line number of the entry dotenvy failed on. `rest` is the unparsed text it reports,
+/// which can start mid-line (at the value).
+///
+/// The same text can appear earlier (e.g. in a comment), so this takes the last match whose line
+/// is preceded only by entries that parse: any later match has the bad entry before it.
 fn line_of(content: &str, rest: &str) -> usize {
-    let offset = content.find(rest).unwrap_or(0);
-    content[..offset].matches('\n').count() + 1
+    let parses = |prefix: &str| dotenvy::from_read_iter(prefix.as_bytes()).all(|item| item.is_ok());
+    let line_start = content
+        .rmatch_indices(rest)
+        .map(|(index, _)| {
+            content[..index]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1)
+        })
+        .find(|&start| parses(&content[..start]))
+        .unwrap_or(0);
+    content[..line_start].matches('\n').count() + 1
 }
 
 #[cfg(test)]
@@ -154,5 +167,7 @@ mod tests {
         assert_eq!(line_of("A=1\nB=2\nC\n", "C\n"), 3);
         assert_eq!(line_of("C\n", "C\n"), 1);
         assert_eq!(line_of("A=1\n", "not found"), 1);
+        // The same text in an earlier comment is not the bad line.
+        assert_eq!(line_of("A=ok\n# C=x y\nC=x y\n", "C=x y\n"), 3);
     }
 }

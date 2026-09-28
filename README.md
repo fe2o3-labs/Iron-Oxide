@@ -81,6 +81,14 @@ In `DATABASE_URL`, percent-encode special characters in the user name and passwo
 the wrong place, so the server rejects such URLs rather than risk logging part of the password.
 Logs only ever show `host:port/database`.
 
+Query parameters are limited to the ones sqlx supports: `sslmode` and the TLS file options,
+`statement-cache-capacity`, `dbname`, `user`, `password`, `application_name` and `options`, plus
+the Neon ones below. Anything else, including `host`, `hostaddr` and `port` (the URL names the only
+host), stops the server with "unsupported parameter".
+
+`WEBAUTHN_ORIGIN` and `GOOGLE_REDIRECT_URL` must use `https://`, except on `localhost`,
+`127.0.0.1` or `[::1]`.
+
 | Variable | Required | What |
 |---|---|---|
 | `DATABASE_URL` | yes | Postgres connection URL (secret: it embeds the password) |
@@ -161,8 +169,11 @@ DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
   The startup migrations hold a session-level advisory lock, which Neon's transaction-mode pooler
   (PgBouncer) cannot keep across transactions. The app's own pool is small (5 connections), so it
   does not need Neon's pooler.
-- Keep `?sslmode=require` (or `verify-full`). sqlx ignores Neon's `channel_binding=require`
-  parameter with a warning; drop it from the URL to silence it.
+- Keep `?sslmode=require` (or `verify-full`). Neon's connection strings can be pasted as they are.
+  - `options=endpoint%3D...` and `application_name` are passed to sqlx.
+  - `channel_binding`, `connect_timeout` and `sslnegotiation` are accepted but removed before
+    the URL reaches sqlx, which does not support them. TLS still applies through `sslmode`, and
+    the app bounds each connection attempt itself.
 - The Neon project must run the same Postgres major version as `docker-compose.yml` and CI (18).
 - Pool settings follow Neon's advice: at most 5 connections, none kept while idle, idle
   connections closed after 2 minutes, every connection recycled after 5 minutes, and the first
