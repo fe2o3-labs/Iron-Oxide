@@ -10,6 +10,16 @@ publish.workspace = true
 dioxus = { workspace = true, features = ["fullstack"] }
 iron-oxide-domain = { workspace = true }
 
+# Server-only: optional, enabled by the `server` feature so the wasm client never pulls them in.
+base64 = { workspace = true, optional = true }
+dotenvy = { workspace = true, optional = true }
+secrecy = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["time"] }
+tracing-subscriber = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
 tower = { workspace = true }
@@ -19,7 +29,17 @@ default = []
 # Browser client, compiled to wasm32-unknown-unknown.
 web = ["dioxus/web"]
 # axum server: server functions, SSR, and custom routes such as /healthz.
-server = ["dioxus/server"]
+server = [
+  "dioxus/server",
+  "dep:base64",
+  "dep:dotenvy",
+  "dep:secrecy",
+  "dep:sqlx",
+  "dep:thiserror",
+  "dep:tokio",
+  "dep:tracing-subscriber",
+  "dep:url",
+]
 
 [lints]
 workspace = true

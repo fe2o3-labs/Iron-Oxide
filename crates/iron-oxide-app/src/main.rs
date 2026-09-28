@@ -12,11 +12,30 @@ mod api;
 mod server;
 mod ui;
 
+#[cfg(not(feature = "server"))]
 fn main() {
-    #[cfg(not(feature = "server"))]
     dioxus::launch(ui::App);
+}
 
-    // `dioxus::serve` binds to the `IP` and `PORT` environment variables (set by `dx serve`).
-    #[cfg(feature = "server")]
-    dioxus::serve(|| async { Ok(server::router()) });
+/// Loads the configuration and starts the server. A bad configuration exits with status 1 and a
+/// message naming each missing or invalid variable, before anything else starts.
+#[cfg(feature = "server")]
+fn main() {
+    // A local `.env` is optional (production sets real environment variables, which win).
+    match dotenvy::dotenv() {
+        Ok(_) => {}
+        Err(error) if error.not_found() => {}
+        Err(error) => {
+            eprintln!("error: cannot read the .env file: {error}");
+            std::process::exit(1);
+        }
+    }
+
+    match server::Config::from_env() {
+        Ok(config) => server::serve(config),
+        Err(errors) => {
+            eprintln!("error: {errors}");
+            std::process::exit(1);
+        }
+    }
 }

@@ -196,7 +196,9 @@ jobs:
           bundle=target/dx/iron-oxide-app/release/web
           ls -la "$bundle"
           cd "$bundle"
-          IP=127.0.0.1 PORT=8080 ./server > "$RUNNER_TEMP/server.log" 2>&1 &
+          IP=127.0.0.1 PORT=8080 APP_BASE_URL=http://127.0.0.1:8080 \
+            DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide_test \
+            ./server > "$RUNNER_TEMP/server.log" 2>&1 &
           for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
             sleep 1
