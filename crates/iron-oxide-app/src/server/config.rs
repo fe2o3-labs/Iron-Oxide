@@ -633,13 +633,12 @@ mod tests {
 
     #[test]
     fn invalid_database_url_error_does_not_echo_the_value() {
-        let secret = "hunter2-in-a-bad-url";
-        let value = "mysql://user:hunter2-in-a-bad-url@localhost/db";
+        let value = "mysql://user:fake-pw@localhost/db";
         let message = load(&set(minimal(), vars::DATABASE_URL, value))
             .unwrap_err()
             .to_string();
         assert!(message.contains("DATABASE_URL is invalid"), "{message}");
-        assert!(!message.contains(secret), "{message}");
+        assert!(!message.contains("fake-pw"), "{message}");
     }
 
     #[test]

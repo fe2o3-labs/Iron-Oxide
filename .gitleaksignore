@@ -1,0 +1,3 @@
+# False positive: a fake password ("hunter2-in-a-bad-url") in a unit test checking that config
+# errors never echo DATABASE_URL. The fixture was renamed in a later commit; history is kept.
+a49bcc2f7b61137b7921d1ef11e18b5b6b0e66dc:crates/iron-oxide-app/src/server/config.rs:generic-api-key:636
