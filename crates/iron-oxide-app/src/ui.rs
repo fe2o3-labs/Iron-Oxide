@@ -3,6 +3,10 @@
 use dioxus::prelude::*;
 
 use crate::api::server_time;
+use crate::pwa::PwaHead;
+
+/// Colour tokens shared by every screen (see docs/palette.md).
+const TOKENS_CSS: Asset = asset!("/assets/tokens.css");
 
 /// Root component: a hello-world page with one server function round-trip.
 #[component]
@@ -11,6 +15,8 @@ pub fn App() -> Element {
 
     rsx! {
         document::Title { "Iron Oxide" }
+        PwaHead {}
+        document::Stylesheet { href: TOKENS_CSS }
         main {
             h1 { "Iron Oxide" }
             p { "Zero-cost gains. The only overhead is the barbell." }
