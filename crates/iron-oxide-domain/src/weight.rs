@@ -41,8 +41,9 @@ pub enum Rounding {
 ///   integer number of grams would make lb loads drift by fractions of a gram and break equality.
 /// - `Eq`, `Ord` and `Hash` are real, so weights can be compared for PRs and used as map keys.
 ///
-/// Values enter and leave through `f64` in a chosen [`Unit`] and are rounded to the nearest nanogram,
-/// which is far below anything a scale or a plate can resolve.
+/// Values enter and leave through `f64` in a chosen [`Unit`]. Input is rounded exactly to the nearest
+/// nanogram (computed from the bits of the `f64`, halfway rounds up), which is far below anything a
+/// scale or a plate can resolve.
 ///
 /// # Serde
 ///
@@ -58,7 +59,7 @@ impl Weight {
     /// sums belong in their own type.
     pub const MAX: Self = Self(MAX_NANOGRAMS);
 
-    /// Converts a value in `unit`, rounding to the nearest nanogram.
+    /// Converts a value in `unit`, rounding exactly to the nearest nanogram (halfway rounds up).
     ///
     /// `-0.0` is accepted as zero.
     ///
@@ -77,16 +78,10 @@ impl Weight {
                 value,
             });
         }
-        #[allow(clippy::cast_precision_loss)] // both constants are below 2^53, so exact
-        let nanograms = (value * unit.nanograms() as f64).round();
-        #[allow(clippy::cast_precision_loss)]
-        let max = MAX_NANOGRAMS as f64;
-        if nanograms > max {
-            return Err(too_large());
+        match nearest_nanograms(value, unit.nanograms()) {
+            Some(nanograms) if nanograms <= MAX_NANOGRAMS => Ok(Self(nanograms)),
+            _ => Err(too_large()),
         }
-        // In range [0, MAX_NANOGRAMS] and integral, so the cast is exact.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        Ok(Self(nanograms as u64))
     }
 
     /// Shorthand for [`Weight::new`] in kilograms.
@@ -243,11 +238,51 @@ impl Weight {
 
     /// A displayable value with its unit symbol, e.g. `102.5 kg`.
     ///
-    /// Shows up to 2 decimals by default; a format precision overrides it (`{:.1}`).
+    /// Shows up to 2 decimals by default; a format precision overrides it (`{:.1}`). Width, fill and
+    /// alignment are honoured (`{:>10}`).
     #[must_use]
     pub const fn display_in(self, unit: Unit) -> WeightDisplay {
         WeightDisplay { weight: self, unit }
     }
+}
+
+/// `value × per_unit` rounded to the nearest integer (halfway rounds up), computed exactly from the
+/// bits of `value`. Multiplying in `f64` first would round twice and can land 1 ng off.
+///
+/// `value` must be finite and non-negative. Returns `None` when the result does not fit a `u64`.
+fn nearest_nanograms(value: f64, per_unit: u64) -> Option<u64> {
+    const MANTISSA_BITS: u32 = 52;
+    const EXPONENT_BIAS: i32 = 1_075; // 1023 + 52: value = mantissa × 2^(exponent - 1075)
+    let bits = value.to_bits();
+    let fraction = bits & ((1_u64 << MANTISSA_BITS) - 1);
+    // The biased exponent is 11 bits, so it always fits an i32.
+    let biased = i32::try_from((bits >> MANTISSA_BITS) & 0x7ff).ok()?;
+    let (mantissa, exponent) = if biased == 0 {
+        (fraction, 1 - EXPONENT_BIAS) // subnormal
+    } else {
+        (fraction | (1_u64 << MANTISSA_BITS), biased - EXPONENT_BIAS)
+    };
+    // mantissa < 2^53 and per_unit < 2^40, so the product fits in 93 bits.
+    let product = u128::from(mantissa) * u128::from(per_unit);
+    let rounded = if exponent >= 0 {
+        let shift = exponent.unsigned_abs();
+        if shift >= 35 {
+            // product ≥ 2^52 · 2^35 > u64::MAX unless it is zero
+            return if product == 0 { Some(0) } else { None };
+        }
+        product << shift
+    } else {
+        let shift = exponent.unsigned_abs();
+        if shift > 94 {
+            // product < 2^93, so the exact value is below 0.5
+            return Some(0);
+        }
+        let whole = product >> shift;
+        let remainder = product & ((1_u128 << shift) - 1);
+        let half = 1_u128 << (shift - 1);
+        if remainder >= half { whole + 1 } else { whole }
+    };
+    u64::try_from(rounded).ok()
 }
 
 pub(crate) const fn too_large() -> ValueError {
@@ -269,12 +304,12 @@ impl fmt::Display for WeightDisplay {
         let decimals = f.precision().map_or(DEFAULT_DISPLAY_DECIMALS, |precision| {
             u8::try_from(precision).unwrap_or(MAX_FORMAT_DECIMALS)
         });
-        write!(
-            f,
+        let text = format!(
             "{} {}",
             self.weight.format_value(self.unit, decimals),
             self.unit.symbol()
-        )
+        );
+        crate::display::pad(f, &text)
     }
 }
 
@@ -565,6 +600,101 @@ mod tests {
         );
     }
 
+    #[test]
+    fn new_rounds_exactly_to_the_nearest_nanogram() {
+        // Exact product is 961175748098983.4903... ng; multiplying in f64 first gave ...984.
+        assert_eq!(
+            Weight::from_kg(961.175_748_098_983_5)
+                .unwrap()
+                .as_nanograms(),
+            961_175_748_098_983
+        );
+        // 2^-13 kg is exactly 122070312.5 ng: halfway rounds up.
+        assert_eq!(kg(2_f64.powi(-13)).as_nanograms(), 122_070_313);
+        assert_eq!(
+            kg(2_f64.powi(-13)).as_nanograms(),
+            reference_nanograms(2_f64.powi(-13), Unit::Kg)
+        );
+        // Subnormals and the smallest normal are far below 1 ng.
+        assert_eq!(kg(f64::from_bits(1)), Weight::ZERO);
+        assert_eq!(lb(f64::MIN_POSITIVE), Weight::ZERO);
+        // Large finite values are rejected, not wrapped.
+        assert!(Weight::from_kg(f64::MAX).is_err());
+        assert!(Weight::from_lb(1e30).is_err());
+        assert!(Weight::from_kg(2_f64.powi(40)).is_err());
+    }
+
+    /// Independent oracle: the exact decimal expansion of `value` (Rust prints every digit when asked
+    /// for enough precision), multiplied digit by digit by the unit's nanograms, rounded half-up.
+    fn reference_nanograms(value: f64, unit: Unit) -> u64 {
+        let text = format!("{value:.1100}");
+        let (whole, fraction) = text.split_once('.').unwrap();
+        let mut digits: Vec<u32> = whole
+            .chars()
+            .chain(fraction.chars())
+            .map(|c| c.to_digit(10).unwrap())
+            .collect();
+        let mut point = whole.len();
+        // lb: 453592370000 = 45359237 × 10^4; kg: 10^12.
+        let (factor, shift) = match unit {
+            Unit::Kg => (1_u64, 12),
+            Unit::Lb => (45_359_237_u64, 4),
+        };
+        let mut carry = 0_u64;
+        for digit in digits.iter_mut().rev() {
+            let product = u64::from(*digit) * factor + carry;
+            *digit = u32::try_from(product % 10).unwrap();
+            carry = product / 10;
+        }
+        while carry > 0 {
+            digits.insert(0, u32::try_from(carry % 10).unwrap());
+            carry /= 10;
+            point += 1;
+        }
+        point += shift;
+        let integer = digits[..point]
+            .iter()
+            .fold(0_u64, |acc, d| acc * 10 + u64::from(*d));
+        if digits[point] >= 5 {
+            integer + 1
+        } else {
+            integer
+        }
+    }
+
+    #[test]
+    fn display_honours_width_fill_and_alignment() {
+        let w = kg(20.0).display_in(Unit::Kg);
+        assert_eq!(format!("{w:>8}|"), "   20 kg|");
+        assert_eq!(format!("{w:<8}|"), "20 kg   |");
+        assert_eq!(format!("{w:8}|"), "20 kg   |");
+        assert_eq!(format!("{w:^9}|"), "  20 kg  |");
+        assert_eq!(format!("{w:^8}|"), " 20 kg  |");
+        assert_eq!(format!("{w:*>8}"), "***20 kg");
+        assert_eq!(format!("{w:3}"), "20 kg");
+        // Precision stays the number of decimals and does not truncate.
+        assert_eq!(
+            format!("{:>10.1}|", kg(20.45).display_in(Unit::Kg)),
+            "   20.5 kg|"
+        );
+    }
+
+    #[test]
+    fn format_value_just_below_a_half_step_rounds_down() {
+        assert_eq!(
+            Weight::from_nanograms(499_999_999_999)
+                .unwrap()
+                .format_value(Unit::Kg, 0),
+            "0"
+        );
+        assert_eq!(
+            Weight::from_nanograms(500_000_000_000)
+                .unwrap()
+                .format_value(Unit::Kg, 0),
+            "1"
+        );
+    }
+
     fn any_weight() -> impl Strategy<Value = Weight> {
         (0..=MAX_NANOGRAMS).prop_map(Weight)
     }
@@ -574,6 +704,28 @@ mod tests {
         fn serde_round_trips_exactly(weight in any_weight()) {
             let json = serde_json::to_string(&weight).unwrap();
             prop_assert_eq!(serde_json::from_str::<Weight>(&json).unwrap(), weight);
+        }
+
+        #[test]
+        fn new_matches_the_exact_decimal_oracle(
+            fraction in 0.0..=1.0_f64,
+            unit in prop_oneof![Just(Unit::Kg), Just(Unit::Lb)],
+        ) {
+            // Uniform over [0, MAX] in the unit, so most values are long binary fractions.
+            let value = fraction * Weight::MAX.value_in(unit);
+            if let Ok(weight) = Weight::new(value, unit) {
+                prop_assert_eq!(weight.as_nanograms(), reference_nanograms(value, unit));
+            }
+        }
+
+        #[test]
+        fn new_matches_the_oracle_for_arbitrary_bits(bits in 0..0x40A0_0000_0000_0000_u64) {
+            // Every non-negative f64 below 2048, including subnormals.
+            let value = f64::from_bits(bits);
+            match Weight::from_kg(value) {
+                Ok(weight) => prop_assert_eq!(weight.as_nanograms(), reference_nanograms(value, Unit::Kg)),
+                Err(_) => prop_assert!(reference_nanograms(value, Unit::Kg) > MAX_NANOGRAMS),
+            }
         }
 
         #[test]

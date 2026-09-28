@@ -12,12 +12,14 @@
 //! - [`Reps`], [`Percent`] and [`Seconds`].
 //! - [`ValueError`] for every rejected value.
 
+mod display;
 mod duration;
 mod error;
 mod ids;
 mod percent;
 pub mod program;
 mod reps;
+pub mod session;
 mod units;
 mod weight;
 
@@ -28,5 +30,9 @@ pub use ids::{
 };
 pub use percent::Percent;
 pub use reps::Reps;
+pub use session::{
+    Change, LoggedSet, RotationError, Session, SessionError, SessionLog, SessionOutcome,
+    SessionStatus, next_day,
+};
 pub use units::Unit;
 pub use weight::{Rounding, Weight, WeightDisplay};

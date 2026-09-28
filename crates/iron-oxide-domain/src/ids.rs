@@ -295,6 +295,10 @@ mod tests {
                 "bänk",
                 "only lowercase letters, digits and hyphens are allowed",
             ),
+            (
+                "back_squat",
+                "only lowercase letters, digits and hyphens are allowed",
+            ),
             ("-squat", "must not start or end with a hyphen"),
             ("squat-", "must not start or end with a hyphen"),
             ("back--squat", "must not contain consecutive hyphens"),
