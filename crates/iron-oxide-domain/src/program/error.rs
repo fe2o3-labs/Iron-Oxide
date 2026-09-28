@@ -6,8 +6,27 @@ use std::fmt;
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
+use super::limits::{MAX_ECHOED_CHARS, MAX_REPORTED_ERRORS};
 use super::values::UnitWeight;
 use crate::{Percent, Reps, Unit};
+
+/// Longest parse error message, in characters. serde's messages repeat the offending key or
+/// value, which an upload controls.
+const MAX_MESSAGE_CHARS: usize = 512;
+
+/// `text` cut to `max` characters, with `…` when something was cut.
+fn shorten(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        None => text.to_owned(),
+        Some((end, _)) => format!("{}…", text.get(..end).unwrap_or_default()),
+    }
+}
+
+/// A user value as repeated in an error message: at most
+/// [`MAX_ECHOED_CHARS`](super::limits::MAX_ECHOED_CHARS) characters.
+pub(crate) fn echo(value: &str) -> String {
+    shorten(value, MAX_ECHOED_CHARS)
+}
 
 /// One step of a [`JsonPath`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -67,10 +86,8 @@ impl From<&serde_path_to_error::Path> for JsonPath {
             path.iter()
                 .filter_map(|segment| match segment {
                     Segment::Seq { index } => Some(PathSegment::Index(*index)),
-                    Segment::Map { key } => Some(PathSegment::Key(Cow::Owned(key.clone()))),
-                    Segment::Enum { variant } => {
-                        Some(PathSegment::Key(Cow::Owned(variant.clone())))
-                    }
+                    Segment::Map { key } => Some(PathSegment::Key(Cow::Owned(echo(key)))),
+                    Segment::Enum { variant } => Some(PathSegment::Key(Cow::Owned(echo(variant)))),
                     Segment::Unknown => None,
                 })
                 .collect(),
@@ -274,6 +291,17 @@ pub enum ValidationErrorKind {
     /// Intervals inside a superset.
     #[error("intervals cannot be part of a superset")]
     SupersetWithIntervals,
+    /// A percent-of-training-max load on a hold or on intervals.
+    #[error("timed work cannot use a percent_of_training_max load")]
+    TrainingMaxOnTimedWork,
+    /// A progression increment above its limit.
+    #[error("must be at most {max} {unit}")]
+    IncrementTooLarge {
+        /// The limit, in `unit`.
+        max: u32,
+        /// The increment's unit.
+        unit: Unit,
+    },
 }
 
 /// A rule broken by a program that parsed, with the JSON path of the offending value.
@@ -319,7 +347,7 @@ impl Serialize for ValidationError {
 pub struct ParseError {
     /// Where parsing stopped, as far as it is known.
     pub path: JsonPath,
-    /// What went wrong, without the position.
+    /// What went wrong, without the position, at most 512 characters.
     pub message: String,
     /// 1-based line, or 0 when unknown.
     pub line: usize,
@@ -332,7 +360,10 @@ impl ParseError {
         let (line, column) = (error.line(), error.column());
         let full = error.to_string();
         let suffix = format!(" at line {line} column {column}");
-        let message = full.strip_suffix(&suffix).unwrap_or(&full).to_owned();
+        let message = shorten(
+            full.strip_suffix(&suffix).unwrap_or(&full),
+            MAX_MESSAGE_CHARS,
+        );
         Self {
             path,
             message,
@@ -355,26 +386,49 @@ impl fmt::Display for ParseError {
     }
 }
 
-/// Every rule a program breaks. Never empty when returned as an error.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, thiserror::Error)]
-#[serde(transparent)]
-pub struct ValidationErrors(Vec<ValidationError>);
+/// Every rule a program breaks, up to
+/// [`MAX_REPORTED_ERRORS`](super::limits::MAX_REPORTED_ERRORS); the rest are only counted. Never
+/// empty when returned as an error.
+///
+/// Serializes as `{"errors": [{"path", "message"}, …], "omitted": 0}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, thiserror::Error)]
+pub struct ValidationErrors {
+    errors: Vec<ValidationError>,
+    omitted: usize,
+}
 
 impl ValidationErrors {
-    pub(super) const fn new(errors: Vec<ValidationError>) -> Self {
-        Self(errors)
+    /// Records an error, or only counts it past the limit.
+    pub(super) fn push(&mut self, error: ValidationError) {
+        if self.errors.len() < MAX_REPORTED_ERRORS {
+            self.errors.push(error);
+        } else {
+            self.omitted = self.omitted.saturating_add(1);
+        }
     }
 
-    /// The errors, in document order.
+    /// Whether no error was recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    /// The reported errors, in document order.
     #[must_use]
     pub fn as_slice(&self) -> &[ValidationError] {
-        &self.0
+        &self.errors
     }
 
-    /// The errors, in document order.
+    /// The reported errors, in document order.
     #[must_use]
     pub fn into_vec(self) -> Vec<ValidationError> {
-        self.0
+        self.errors
+    }
+
+    /// How many more errors were found but not reported.
+    #[must_use]
+    pub const fn omitted(&self) -> usize {
+        self.omitted
     }
 }
 
@@ -383,20 +437,24 @@ impl<'a> IntoIterator for &'a ValidationErrors {
     type IntoIter = std::slice::Iter<'a, ValidationError>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        self.errors.iter()
     }
 }
 
 impl fmt::Display for ValidationErrors {
-    /// One error per line.
+    /// One error per line, then `… and N more errors` if some were omitted.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (position, error) in self.0.iter().enumerate() {
+        for (position, error) in self.errors.iter().enumerate() {
             if position > 0 {
                 f.write_str("\n")?;
             }
             write!(f, "{error}")?;
         }
-        Ok(())
+        match self.omitted {
+            0 => Ok(()),
+            1 => f.write_str("\n… and 1 more error"),
+            omitted => write!(f, "\n… and {omitted} more errors"),
+        }
     }
 }
 
@@ -414,6 +472,7 @@ pub enum ProgramError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::program::limits::MAX_ECHOED_CHARS;
 
     #[test]
     fn path_display() {
@@ -452,12 +511,17 @@ mod tests {
         let root = ValidationError::new(JsonPath::root(), ValidationErrorKind::Blank);
         assert_eq!(root.to_string(), "must not be blank");
 
-        let errors = ValidationErrors::new(vec![error.clone(), root.clone()]);
+        let mut errors = ValidationErrors::default();
+        assert!(errors.is_empty());
+        errors.push(error.clone());
+        errors.push(root.clone());
+        assert!(!errors.is_empty());
         assert_eq!(
             errors.to_string(),
             "days[1]: min 12 is greater than max 8\nmust not be blank"
         );
         assert_eq!(errors.as_slice().len(), 2);
+        assert_eq!(errors.omitted(), 0);
         assert_eq!((&errors).into_iter().count(), 2);
         assert_eq!(
             ProgramError::Invalid(errors.clone()).to_string(),
@@ -465,12 +529,66 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(&errors).unwrap(),
-            serde_json::json!([
-                {"path": "days[1]", "message": "min 12 is greater than max 8"},
-                {"path": "", "message": "must not be blank"},
-            ])
+            serde_json::json!({
+                "errors": [
+                    {"path": "days[1]", "message": "min 12 is greater than max 8"},
+                    {"path": "", "message": "must not be blank"},
+                ],
+                "omitted": 0,
+            })
         );
         assert_eq!(errors.into_vec(), vec![error, root]);
+    }
+
+    #[test]
+    fn errors_past_the_limit_are_only_counted() {
+        let blank = ValidationError::new(JsonPath::root(), ValidationErrorKind::Blank);
+        let mut errors = ValidationErrors::default();
+        for _ in 0..MAX_REPORTED_ERRORS {
+            errors.push(blank.clone());
+        }
+        assert_eq!(
+            (errors.as_slice().len(), errors.omitted()),
+            (MAX_REPORTED_ERRORS, 0)
+        );
+        assert!(!errors.to_string().contains("more"));
+        errors.push(blank.clone());
+        assert_eq!(
+            (errors.as_slice().len(), errors.omitted()),
+            (MAX_REPORTED_ERRORS, 1)
+        );
+        assert!(
+            errors
+                .to_string()
+                .ends_with("must not be blank\n… and 1 more error")
+        );
+        errors.push(blank);
+        assert!(errors.to_string().ends_with("\n… and 2 more errors"));
+        assert_eq!(serde_json::to_value(&errors).unwrap()["omitted"], 2);
+    }
+
+    #[test]
+    fn echoed_values_and_messages_are_shortened() {
+        assert_eq!(echo("short"), "short");
+        let exact = "é".repeat(MAX_ECHOED_CHARS);
+        assert_eq!(echo(&exact), exact);
+        let long = "é".repeat(MAX_ECHOED_CHARS + 1);
+        assert_eq!(echo(&long), format!("{exact}…"));
+        assert_eq!(shorten("abc", 0), "…");
+        assert_eq!(shorten("", 0), "");
+
+        // A huge unknown key: the path and the message stay short.
+        let key = "k".repeat(10_000);
+        let json = format!(r#"{{"{key}": 1}}"#);
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Strict {}
+        let deserializer = &mut serde_json::Deserializer::from_str(&json);
+        let error = serde_path_to_error::deserialize::<_, Strict>(deserializer).unwrap_err();
+        let parse = ParseError::from_serde(error.path().into(), error.inner());
+        assert_eq!(parse.path.to_string().chars().count(), MAX_ECHOED_CHARS + 1);
+        assert_eq!(parse.message.chars().count(), MAX_MESSAGE_CHARS + 1);
+        assert!(parse.message.ends_with('…'));
     }
 
     #[test]

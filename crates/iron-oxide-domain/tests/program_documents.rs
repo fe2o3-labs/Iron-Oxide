@@ -13,7 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use iron_oxide_domain::program::{
-    PROGRAM_SCHEMA_JSON, Program, ProgramError, ValidationErrorKind, builtin_programs,
+    PROGRAM_SCHEMA_JSON, Program, ProgramError, ValidationErrorKind, builtin_programs, limits,
 };
 use serde_json::Value;
 
@@ -183,4 +183,111 @@ fn validate_works_on_programs_built_in_code() {
             "rotation: must contain at least one day",
         ]
     );
+}
+
+/// Arrays where the schema has objects, and `{"none": …}`: serde's derives accept them, the
+/// structural check rejects them with the path of the offending node.
+#[test]
+fn shape_errors_point_at_the_offending_node() {
+    let validator = schema_validator();
+    for path in fixtures("invalid/shape") {
+        let json = fs::read_to_string(&path).unwrap();
+        let error = Program::from_json(&json).unwrap_err();
+        assert!(
+            matches!(error, ProgramError::Parse(_)),
+            "{}: {error}",
+            path.display()
+        );
+        check_snapshot(&path, &error.to_string());
+        assert!(
+            !schema_errors(&validator, &json).is_empty(),
+            "{}: the schema accepts what serde rejects",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn oversized_documents_are_rejected_before_parsing() {
+    let padding = " ".repeat(limits::MAX_DOCUMENT_BYTES);
+    let error = Program::from_json(&format!("{{{padding}}}")).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the document is {} bytes; the limit is {} bytes",
+            limits::MAX_DOCUMENT_BYTES + 2,
+            limits::MAX_DOCUMENT_BYTES
+        )
+    );
+    // Exactly at the limit, the document is read.
+    let padding = " ".repeat(limits::MAX_DOCUMENT_BYTES - 2);
+    let error = Program::from_json(&format!("{{{padding}}}")).unwrap_err();
+    assert!(error.to_string().starts_with("missing field"), "{error}");
+}
+
+#[test]
+fn integral_floats_count_as_whole_numbers() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/programs/valid/minimal.json");
+    let json = fs::read_to_string(path).unwrap();
+    let floats = json
+        .replace(r#""schema_version": 1"#, r#""schema_version": 1.0"#)
+        .replace(r#""sets": 3"#, r#""sets": 3.0"#)
+        .replace(r#""rest": 60"#, r#""rest": 60.0"#);
+    assert_ne!(floats, json);
+    assert_eq!(
+        Program::from_json(&floats).unwrap(),
+        Program::from_json(&json).unwrap()
+    );
+    let error =
+        Program::from_json(&json.replace(r#""schema_version": 1"#, r#""schema_version": 2.0"#))
+            .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "schema_version: unsupported schema_version 2 (this app reads version 1)"
+    );
+}
+
+/// Every error is bounded: at most `MAX_REPORTED_ERRORS` are listed, and items past a list's
+/// limit are not checked.
+#[test]
+fn errors_are_bounded() {
+    let bad_exercise =
+        r#"{"id": "x", "name": "", "work": {"reps": {"sets": 0, "reps": 0}}, "rest": 0}"#;
+    let exercises = vec![bad_exercise; 1_000].join(",");
+    let json = format!(
+        r#"{{"schema_version": 1, "name": "Big", "days": [{{"id": "a", "name": "A", "exercises": [{exercises}]}}], "rotation": ["a"]}}"#
+    );
+    let ProgramError::Invalid(errors) = Program::from_json(&json).unwrap_err() else {
+        panic!("expected validation errors");
+    };
+    assert_eq!(errors.as_slice().len(), limits::MAX_REPORTED_ERRORS);
+    assert!(errors.omitted() > 0);
+    // 30 exercises checked (3 errors each, plus duplicates), not 1 000.
+    let total = errors.as_slice().len() + errors.omitted();
+    assert!(total < 200, "{total}");
+    assert!(
+        errors
+            .to_string()
+            .ends_with(&format!("… and {} more errors", errors.omitted()))
+    );
+
+    // Days past the limit: no errors from them, and rotation entries naming them are fine.
+    let days: Vec<_> = (0..40)
+        .map(|i| format!(r#"{{"id": "d{i}", "name": "", "exercises": []}}"#))
+        .collect();
+    let json = format!(
+        r#"{{"schema_version": 1, "name": "Many days", "days": [{}], "rotation": ["d39"]}}"#,
+        days.join(",")
+    );
+    let ProgramError::Invalid(errors) = Program::from_json(&json).unwrap_err() else {
+        panic!("expected validation errors");
+    };
+    let messages = errors.to_string();
+    assert!(
+        messages.starts_with("days: must contain at most 14 days (got 40)"),
+        "{messages}"
+    );
+    assert!(!messages.contains("days[14]"), "{messages}");
+    assert!(!messages.contains("unknown day"), "{messages}");
 }

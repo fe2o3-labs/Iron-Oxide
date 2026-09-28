@@ -95,7 +95,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::program::{Load, ProgressionRule, Work};
+    use crate::program::{Load, ProgressionRule, SchemaUrl, Work};
     use crate::{DayId, ExerciseId, Seconds};
 
     #[test]
@@ -114,7 +114,7 @@ mod tests {
                 *builtin.program()
             );
             assert_eq!(
-                builtin.program().schema.as_deref(),
+                builtin.program().schema.map(SchemaUrl::as_str),
                 Some(crate::program::PROGRAM_SCHEMA_URL)
             );
         }

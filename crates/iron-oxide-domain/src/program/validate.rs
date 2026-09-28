@@ -5,48 +5,16 @@ use std::mem;
 
 use super::error::{JsonPath, ValidationError, ValidationErrorKind as Kind, ValidationErrors};
 use super::ids::SupersetId;
+use super::limits::*;
 use super::model::{Day, Exercise, Program, ProgressionRule, WarmupSet, Work};
 use super::values::{Load, RepTarget, UnitWeight, WarmupLoad};
 use crate::{ExerciseId, Percent, Seconds, Unit};
 
-/// Limits checked by [`Program::validate`]. They keep hand-written and uploaded programs within
-/// what the app can show, and catch typos such as `"rest": 9000`.
-pub mod limits {
-    /// Longest program, day or exercise name, in characters.
-    pub const MAX_NAME_CHARS: usize = 100;
-    /// Longest program description or exercise notes, in characters.
-    pub const MAX_TEXT_CHARS: usize = 2_000;
-    /// Most days in a program.
-    pub const MAX_DAYS: usize = 14;
-    /// Longest rotation.
-    pub const MAX_ROTATION: usize = 28;
-    /// Most exercises in a day.
-    pub const MAX_EXERCISES_PER_DAY: usize = 30;
-    /// Most working sets (or holds) of an exercise.
-    pub const MAX_SETS: u16 = 20;
-    /// Most reps in a set (working or warm-up).
-    pub const MAX_REPS: u16 = 100;
-    /// Longest rest, hold, or interval phase, in seconds (one hour).
-    pub const MAX_SECONDS: u32 = 3_600;
-    /// Most interval rounds.
-    pub const MAX_ROUNDS: u16 = 100;
-    /// Most lines in a warm-up.
-    pub const MAX_WARMUP_LINES: usize = 10;
-    /// Most sets in one warm-up line.
-    pub const MAX_WARMUP_SETS: u16 = 10;
-    /// Most failed sessions a deload can wait for.
-    pub const MAX_DELOAD_FAILURES: u16 = 10;
-}
-
-use limits::*;
-
 /// The document format version this crate reads and writes.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
-/// Largest load as a percentage of the training max: 150 %, in basis points.
-const MAX_PERCENT_OF_TRAINING_MAX: u32 = 15_000;
-/// Largest deload: 50 %, in basis points.
-const MAX_DELOAD_PERCENT: u32 = 5_000;
+/// Basis points (hundredths of a percent) in one percent.
+const BASIS_POINTS: u32 = 100;
 
 /// How an exercise's load is expressed, for the cross-day consistency check.
 #[derive(PartialEq, Eq)]
@@ -67,21 +35,21 @@ impl LoadKind {
 }
 
 struct Validator<'a> {
-    errors: Vec<ValidationError>,
+    errors: ValidationErrors,
     /// First occurrence of each exercise id in the program.
     exercises: BTreeMap<&'a ExerciseId, (JsonPath, &'a Exercise)>,
 }
 
 pub(super) fn validate(program: &Program) -> Result<(), ValidationErrors> {
     let mut validator = Validator {
-        errors: Vec::new(),
+        errors: ValidationErrors::default(),
         exercises: BTreeMap::new(),
     };
     validator.program(program);
     if validator.errors.is_empty() {
         Ok(())
     } else {
-        Err(ValidationErrors::new(validator.errors))
+        Err(validator.errors)
     }
 }
 
@@ -108,9 +76,13 @@ impl<'a> Validator<'a> {
 
         let days_path = root.key("days");
         self.list_len(&days_path, program.days.len(), "day", "days", MAX_DAYS);
+        // Items past a list's limit are not checked: the limit error is enough, and an upload
+        // cannot make validation work (or its output) grow further. Lookups still use every
+        // item, so an over-long list does not also cause "unknown day" errors.
         let in_rotation: BTreeSet<_> = program.rotation.iter().collect();
+        let all_day_ids: BTreeSet<_> = program.days.iter().map(|day| &day.id).collect();
         let mut day_ids = BTreeMap::new();
-        for (index, day) in program.days.iter().enumerate() {
+        for (index, day) in program.days.iter().enumerate().take(MAX_DAYS) {
             let path = days_path.index(index);
             let id_path = path.key("id");
             if let Some(first) = day_ids.insert(&day.id, id_path.clone()) {
@@ -140,8 +112,8 @@ impl<'a> Validator<'a> {
             "days",
             MAX_ROTATION,
         );
-        for (index, id) in program.rotation.iter().enumerate() {
-            if !day_ids.contains_key(id) {
+        for (index, id) in program.rotation.iter().enumerate().take(MAX_ROTATION) {
+            if !all_day_ids.contains(id) {
                 self.push(
                     rotation_path.index(index),
                     Kind::UnknownDay { id: id.to_string() },
@@ -160,8 +132,12 @@ impl<'a> Validator<'a> {
             "exercises",
             MAX_EXERCISES_PER_DAY,
         );
+        let exercises = day
+            .exercises
+            .get(..MAX_EXERCISES_PER_DAY)
+            .unwrap_or(&day.exercises);
         let mut in_day = BTreeMap::new();
-        for (index, exercise) in day.exercises.iter().enumerate() {
+        for (index, exercise) in exercises.iter().enumerate() {
             let path = exercises_path.index(index);
             if let Some(first) = in_day.insert(&exercise.id, path.clone()) {
                 self.push(
@@ -176,7 +152,7 @@ impl<'a> Validator<'a> {
             }
             self.exercise(&path, exercise);
         }
-        self.supersets(&exercises_path, &day.exercises);
+        self.supersets(&exercises_path, exercises);
     }
 
     /// An exercise id means the same exercise on every day: same name, rule and kind of load,
@@ -187,16 +163,17 @@ impl<'a> Validator<'a> {
                 .insert(&exercise.id, (path.clone(), exercise));
             return;
         };
+        // Point at the key when this occurrence has it, at the exercise when it is left out.
         let differences = [
-            (first.name != exercise.name, "name", "name"),
+            (first.name != exercise.name, Some("name"), "name"),
             (
                 first.progression != exercise.progression,
-                "progression",
+                (!exercise.progression.is_none()).then_some("progression"),
                 "progression",
             ),
             (
                 LoadKind::of(first.load) != LoadKind::of(exercise.load),
-                "load",
+                exercise.load.is_some().then_some("load"),
                 "kind of load",
             ),
         ];
@@ -204,7 +181,7 @@ impl<'a> Validator<'a> {
         for (differs, key, field) in differences {
             if differs {
                 self.push(
-                    path.key(key),
+                    key.map_or_else(|| path.clone(), |key| path.key(key)),
                     Kind::InconsistentExercise {
                         id: exercise.id.to_string(),
                         field,
@@ -226,12 +203,18 @@ impl<'a> Validator<'a> {
             let load_path = path.key("load");
             match load {
                 Load::Weight(weight) => self.positive_weight(unit_key(&load_path, weight), weight),
-                Load::PercentOfTrainingMax(percent) => self.percent(
-                    load_path.key("percent_of_training_max"),
-                    percent,
-                    MAX_PERCENT_OF_TRAINING_MAX,
-                    "above 0% and at most 150%",
-                ),
+                Load::PercentOfTrainingMax(percent) => {
+                    let percent_path = load_path.key("percent_of_training_max");
+                    if exercise.work.is_timed() {
+                        self.push(percent_path.clone(), Kind::TrainingMaxOnTimedWork);
+                    }
+                    self.percent(
+                        percent_path,
+                        percent,
+                        MAX_PERCENT_OF_TRAINING_MAX,
+                        "above 0% and at most 150%",
+                    );
+                }
             }
         }
         self.warmup(&path.key("warmup"), exercise);
@@ -290,7 +273,7 @@ impl<'a> Validator<'a> {
             "warm-up lines",
             MAX_WARMUP_LINES,
         );
-        for (index, line) in exercise.warmup.iter().enumerate() {
+        for (index, line) in exercise.warmup.iter().enumerate().take(MAX_WARMUP_LINES) {
             self.warmup_line(&path.index(index), line, exercise.load);
         }
     }
@@ -319,7 +302,9 @@ impl<'a> Validator<'a> {
                 let percent_path = load_path.key("percent_of_working_weight");
                 if working.is_none() {
                     self.push(percent_path, Kind::WarmupNeedsWorkingLoad);
-                } else if percent == Percent::ZERO || percent >= Percent::HUNDRED {
+                } else if percent == Percent::ZERO
+                    || percent.basis_points() >= WARMUP_PERCENT_BELOW * BASIS_POINTS
+                {
                     self.push(
                         percent_path,
                         Kind::PercentOutOfRange {
@@ -345,6 +330,19 @@ impl<'a> Validator<'a> {
         let rule_path = path.key(name);
         let increment_path = rule_path.key("increment");
         self.positive_weight(unit_key(&increment_path, increment), increment);
+        let max = match increment.unit() {
+            Unit::Kg => MAX_INCREMENT_KG,
+            Unit::Lb => MAX_INCREMENT_LB,
+        };
+        if increment.weight().value_in(increment.unit()) > f64::from(max) {
+            self.push(
+                unit_key(&increment_path, increment),
+                Kind::IncrementTooLarge {
+                    max,
+                    unit: increment.unit(),
+                },
+            );
+        }
         match rule {
             ProgressionRule::AddWhenTopOfRange { .. }
             | ProgressionRule::DoubleProgression { .. } => {
@@ -469,7 +467,7 @@ impl<'a> Validator<'a> {
 
     fn text(&mut self, path: JsonPath, text: &str, max: usize) {
         let len = text.chars().count();
-        if text.trim().is_empty() {
+        if is_blank(text) {
             self.push(path, Kind::Blank);
         } else if len > max {
             self.push(path, Kind::TooLong { max, len });
@@ -517,14 +515,8 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn percent(
-        &mut self,
-        path: JsonPath,
-        value: Percent,
-        max_basis_points: u32,
-        range: &'static str,
-    ) {
-        if value == Percent::ZERO || value.basis_points() > max_basis_points {
+    fn percent(&mut self, path: JsonPath, value: Percent, max_percent: u32, range: &'static str) {
+        if value == Percent::ZERO || value.basis_points() > max_percent * BASIS_POINTS {
             self.push(path, Kind::PercentOutOfRange { value, range });
         }
     }
@@ -534,6 +526,12 @@ impl<'a> Validator<'a> {
             self.push(path, Kind::ZeroWeight);
         }
     }
+}
+
+/// Whether `text` has nothing but whitespace: Unicode `White_Space` plus U+FEFF (the byte order
+/// mark), exactly what the schema's `[^\s\u0085]` pattern treats as blank.
+fn is_blank(text: &str) -> bool {
+    text.chars().all(|c| c.is_whitespace() || c == '\u{feff}')
 }
 
 /// `path.kg` or `path.lb`, where the number of a [`UnitWeight`] is written.
@@ -805,6 +803,94 @@ mod tests {
             [
                 "days[0].exercises[0].progression: timed work cannot use `training_max`; use \"none\""
             ]
+        );
+    }
+
+    #[test]
+    fn training_max_loads_need_sets_of_reps() {
+        let result = errors(|doc| {
+            doc["days"][0]["exercises"][0] = json!({
+                "id": "plank", "name": "Plank",
+                "work": { "hold": { "sets": 3, "seconds": 30 } },
+                "load": { "percent_of_training_max": 50 },
+                "rest": 60
+            });
+        });
+        assert_eq!(
+            result,
+            [
+                "days[0].exercises[0].load.percent_of_training_max: timed work cannot use a percent_of_training_max load"
+            ]
+        );
+    }
+
+    #[test]
+    fn increments_are_capped_per_unit() {
+        let with = |increment: Value, load: Value| {
+            errors(move |doc| {
+                let squat = &mut doc["days"][0]["exercises"][0];
+                squat["load"] = load;
+                squat["progression"] =
+                    json!({ "add_when_top_of_range": { "increment": increment } });
+            })
+        };
+        assert!(with(json!({ "kg": 20 }), json!({ "kg": 100 })).is_empty());
+        assert_eq!(
+            with(json!({ "kg": 20.25 }), json!({ "kg": 100 })),
+            [
+                "days[0].exercises[0].progression.add_when_top_of_range.increment.kg: must be at most 20 kg"
+            ]
+        );
+        assert!(with(json!({ "lb": 45 }), json!({ "lb": 225 })).is_empty());
+        assert_eq!(
+            with(json!({ "lb": 45.5 }), json!({ "lb": 225 })),
+            [
+                "days[0].exercises[0].progression.add_when_top_of_range.increment.lb: must be at most 45 lb"
+            ]
+        );
+    }
+
+    #[test]
+    fn consistency_errors_point_at_keys_that_exist() {
+        let result = errors(|doc| {
+            let mut loaded = exercise("squat");
+            loaded["load"] = json!({ "kg": 60 });
+            loaded["progression"] =
+                json!({ "add_when_top_of_range": { "increment": { "kg": 2.5 } } });
+            doc["days"] = json!([
+                { "id": "a", "name": "A", "exercises": [exercise("squat")] },
+                { "id": "b", "name": "B", "exercises": [loaded] },
+            ]);
+            doc["rotation"] = json!(["a", "b"]);
+        });
+        assert_eq!(
+            result,
+            [
+                "days[1].exercises[0].progression: exercise `squat` must have the same progression everywhere (see days[0].exercises[0])",
+                "days[1].exercises[0].load: exercise `squat` must have the same kind of load everywhere (see days[0].exercises[0])",
+            ]
+        );
+    }
+
+    #[test]
+    fn blank_means_whitespace_or_a_byte_order_mark() {
+        assert!(is_blank(""));
+        assert!(is_blank(" \t\n\u{a0}\u{85}\u{2003}\u{3000}\u{feff}"));
+        assert!(!is_blank(" x "));
+        assert!(!is_blank("\u{200b}"));
+    }
+
+    #[test]
+    fn warmup_lines_past_the_limit_are_not_checked() {
+        let result = errors(|doc| {
+            doc["days"][0]["exercises"][0]["warmup"] =
+                vec![json!({ "reps": 0, "load": { "kg": 0 } }); MAX_WARMUP_LINES + 5].into();
+        });
+        assert_eq!(result.len(), 1 + 2 * MAX_WARMUP_LINES, "{result:?}");
+        assert!(
+            !result
+                .iter()
+                .any(|e| e.contains(&format!("warmup[{MAX_WARMUP_LINES}]")))
         );
     }
 

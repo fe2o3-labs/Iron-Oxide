@@ -8,6 +8,8 @@ use std::str::FromStr;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::PROGRAM_SCHEMA_URL;
+use super::error::echo;
 use crate::{Percent, Reps, Unit, ValueError, Weight};
 
 /// A weight together with the unit it was written in: `{"kg": 60}` or `{"lb": 135}`.
@@ -65,10 +67,10 @@ impl fmt::Display for UnitWeight {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum UnitWeightRepr {
     /// Kilograms.
-    #[cfg_attr(test, schemars(schema_with = "super::schema::weight_number"))]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::increment_kg"))]
     Kg(f64),
     /// Pounds.
-    #[cfg_attr(test, schemars(schema_with = "super::schema::weight_number"))]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::increment_lb"))]
     Lb(f64),
 }
 
@@ -130,12 +132,14 @@ impl Load {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum LoadRepr {
     /// A fixed weight in kilograms.
-    #[cfg_attr(test, schemars(schema_with = "super::schema::weight_number"))]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::load_kg"))]
     Kg(f64),
     /// A fixed weight in pounds.
-    #[cfg_attr(test, schemars(schema_with = "super::schema::weight_number"))]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::load_lb"))]
     Lb(f64),
     /// A percentage of this exercise's training max, which the lifter enters in the app.
+    #[serde(deserialize_with = "super::whole::percent")]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::training_max_percent"))]
     PercentOfTrainingMax(Percent),
 }
 
@@ -181,12 +185,14 @@ pub enum WarmupLoad {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum WarmupLoadRepr {
     /// A fixed weight in kilograms (20 for the empty bar).
-    #[cfg_attr(test, schemars(schema_with = "super::schema::weight_number"))]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::load_kg"))]
     Kg(f64),
     /// A fixed weight in pounds (45 for the empty bar).
-    #[cfg_attr(test, schemars(schema_with = "super::schema::weight_number"))]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::load_lb"))]
     Lb(f64),
     /// A percentage of the exercise's working weight, below 100.
+    #[serde(deserialize_with = "super::whole::percent")]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::warmup_percent"))]
     PercentOfWorkingWeight(Percent),
 }
 
@@ -222,8 +228,12 @@ impl From<WarmupLoad> for WarmupLoadRepr {
 #[serde(deny_unknown_fields)]
 pub struct RepRange {
     /// The fewest reps that count as a successful set.
+    #[serde(deserialize_with = "super::whole::reps")]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::rep_count"))]
     pub min: Reps,
     /// The top of the range.
+    #[serde(deserialize_with = "super::whole::reps")]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::rep_count"))]
     pub max: Reps,
 }
 
@@ -285,6 +295,13 @@ impl<'de> Deserialize<'de> for RepTarget {
                     .map_err(|_| E::invalid_value(de::Unexpected::Unsigned(value), &self))
             }
 
+            /// An integral float such as `5.0` counts, as in JSON Schema.
+            fn visit_f64<E: de::Error>(self, value: f64) -> Result<RepTarget, E> {
+                super::whole::integral(value)
+                    .ok_or_else(|| E::invalid_value(de::Unexpected::Float(value), &self))
+                    .and_then(|value| self.visit_u64(value))
+            }
+
             fn visit_i64<E: de::Error>(self, value: i64) -> Result<RepTarget, E> {
                 u64::try_from(value)
                     .map_err(|_| E::invalid_value(de::Unexpected::Signed(value), &self))
@@ -326,7 +343,8 @@ impl fmt::Display for TempoPhase {
      (each 0 to 99 seconds, or X for explosive)"
 )]
 pub struct InvalidTempo {
-    /// The rejected input.
+    /// The rejected input, shortened to
+    /// [`MAX_ECHOED_CHARS`](super::limits::MAX_ECHOED_CHARS) characters.
     pub value: String,
 }
 
@@ -379,9 +397,7 @@ impl FromStr for Tempo {
     type Err = InvalidTempo;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let invalid = || InvalidTempo {
-            value: s.to_owned(),
-        };
+        let invalid = || InvalidTempo { value: echo(s) };
         let mut phases = [TempoPhase::Explosive; 4];
         let mut parts = s.split('-');
         for phase in &mut phases {
@@ -422,25 +438,35 @@ impl fmt::Display for Tempo {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
 #[error("invalid demo URL `{value}`: {reason}")]
 pub struct InvalidDemoUrl {
-    /// The rejected input.
+    /// The rejected input, shortened to
+    /// [`MAX_ECHOED_CHARS`](super::limits::MAX_ECHOED_CHARS) characters.
     pub value: String,
     /// Why it was rejected.
     pub reason: &'static str,
 }
 
-/// A link to a demonstration of the exercise (a video, an article): an absolute `http://` or
-/// `https://` URL.
+/// A link to a demonstration of the exercise (a video, an article).
 ///
-/// The check is deliberately strict and small instead of pulling a full URL parser (with its
-/// IDNA tables) into the wasm client: lowercase `http`/`https` scheme, a non-empty host, no
-/// credentials, no whitespace or control characters, at most 2 048 characters. The app only
-/// ever renders it as a link.
+/// Uploaded programs are untrusted and the app renders this as a link, so the check is an
+/// allow-list rather than a URL parser (which would also pull IDNA tables into the wasm client):
+///
+/// - `https://` only. Every mainstream video and article host serves https, and a plain-http
+///   link from an https app is a downgrade the lifter cannot see.
+/// - Printable ASCII only, without `\`, `"`, `<`, `>`, `^`, `` ` ``, `{`, `|` or `}`. This rules
+///   out whitespace, control characters and every invisible or bidirectional Unicode character
+///   (U+200B, U+202E…), so the text shown is the address visited. Browsers treat `\` as `/`,
+///   which would let `https://evil.example\.youtube.com` read like a YouTube link. Internationalised
+///   hosts and paths are written in their ASCII form (punycode, percent-encoding), as browsers
+///   copy them.
+/// - A host made of letters, digits and hyphens in dot-separated labels, or an IPv6 literal in
+///   brackets, with an optional port of 1 to 5 digits. No user name or password.
+/// - At most [`DemoUrl::MAX_LEN`] characters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct DemoUrl(String);
 
 impl DemoUrl {
-    /// Longest accepted URL, in bytes.
+    /// Longest accepted URL, in characters (all ASCII, so also in bytes).
     pub const MAX_LEN: usize = 2_048;
 
     /// Validates a URL.
@@ -451,7 +477,10 @@ impl DemoUrl {
         let value = value.into();
         match demo_url_problem(&value) {
             None => Ok(Self(value)),
-            Some(reason) => Err(InvalidDemoUrl { value, reason }),
+            Some(reason) => Err(InvalidDemoUrl {
+                value: echo(&value),
+                reason,
+            }),
         }
     }
 
@@ -462,28 +491,69 @@ impl DemoUrl {
     }
 }
 
+/// The characters allowed anywhere in a [`DemoUrl`]. `schema.rs` mirrors this set.
+pub(super) const fn is_url_char(byte: u8) -> bool {
+    matches!(byte, b'!'..=b'~')
+        && !matches!(
+            byte,
+            b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}'
+        )
+}
+
+fn is_host(host: &str) -> bool {
+    if let Some(inner) = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    {
+        return !inner.is_empty()
+            && inner
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.');
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
+}
+
+fn is_port(port: &str) -> bool {
+    (1..=5).contains(&port.len()) && port.bytes().all(|b| b.is_ascii_digit())
+}
+
 fn demo_url_problem(value: &str) -> Option<&'static str> {
+    if !value.bytes().all(is_url_char) {
+        return Some(
+            "may only contain printable ASCII characters, without spaces or \\ \" < > ^ ` { | }",
+        );
+    }
     if value.len() > DemoUrl::MAX_LEN {
         return Some("must be at most 2048 characters");
     }
-    let Some(rest) = value
-        .strip_prefix("https://")
-        .or_else(|| value.strip_prefix("http://"))
-    else {
-        return Some("must start with https:// or http://");
+    let Some(rest) = value.strip_prefix("https://") else {
+        return Some("must start with https://");
     };
-    if value.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Some("must not contain spaces or control characters");
-    }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     if authority.contains('@') {
         return Some("must not contain a user name or password");
     }
-    let host = authority
-        .rsplit_once(':')
-        .map_or(authority, |(host, _port)| host);
-    if host.is_empty() {
-        return Some("must have a host");
+    // An IPv6 literal contains colons, so the port is whatever follows its closing bracket.
+    let (host, port) = match authority.rfind(']') {
+        Some(end) => authority.split_at(end + 1),
+        None => authority
+            .rfind(':')
+            .map_or((authority, ""), |colon| authority.split_at(colon)),
+    };
+    if host.is_empty() || !is_host(host) {
+        return Some("must have a host name such as www.example.com");
+    }
+    if let Some(port) = port.strip_prefix(':') {
+        if !is_port(port) {
+            return Some("the port must be 1 to 5 digits");
+        }
+    } else if !port.is_empty() {
+        return Some("must have a host name such as www.example.com");
     }
     None
 }
@@ -511,6 +581,39 @@ impl AsRef<str> for DemoUrl {
 impl fmt::Display for DemoUrl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// The `$schema` field of a program document: only [`PROGRAM_SCHEMA_URL`] is accepted, so the
+/// app never stores and serves back an arbitrary link.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct SchemaUrl;
+
+impl SchemaUrl {
+    /// The URL, [`PROGRAM_SCHEMA_URL`].
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        PROGRAM_SCHEMA_URL
+    }
+}
+
+impl Serialize for SchemaUrl {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(PROGRAM_SCHEMA_URL)
+    }
+}
+
+impl<'de> Deserialize<'de> for SchemaUrl {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let url = String::deserialize(deserializer)?;
+        if url == PROGRAM_SCHEMA_URL {
+            Ok(Self)
+        } else {
+            Err(de::Error::custom(format_args!(
+                "`$schema` must be \"{PROGRAM_SCHEMA_URL}\" or be left out (got \"{}\")",
+                echo(&url)
+            )))
+        }
     }
 }
 
@@ -692,12 +795,14 @@ mod tests {
     }
 
     #[test]
-    fn demo_url_accepts_http_and_https() {
+    fn demo_url_accepts_well_formed_https() {
         for good in [
-            "https://www.youtube.com/watch?v=abc",
-            "http://example.com",
+            "https://www.youtube.com/watch?v=abc&t=10s",
+            "https://example.com",
             "https://example.com:8443/x#t=1",
             "https://[::1]/demo",
+            "https://[2001:db8::1]:443",
+            "https://xn--bcher-kva.example/%C3%A9t%C3%A9?q=[1]~_!$&'()*+,;=:@",
         ] {
             let url = DemoUrl::new(good).unwrap();
             assert_eq!(url.as_str(), good);
@@ -712,22 +817,41 @@ mod tests {
 
     #[test]
     fn demo_url_rejects_everything_else() {
+        const CHARS: &str =
+            "may only contain printable ASCII characters, without spaces or \\ \" < > ^ ` { | }";
+        const HOST: &str = "must have a host name such as www.example.com";
         let cases = [
-            ("ftp://example.com", "must start with https:// or http://"),
-            ("javascript:alert(1)", "must start with https:// or http://"),
-            ("HTTPS://example.com", "must start with https:// or http://"),
-            ("example.com", "must start with https:// or http://"),
-            ("https://", "must have a host"),
-            ("https:///path", "must have a host"),
-            ("https://:80/", "must have a host"),
+            ("http://example.com", "must start with https://"),
+            ("ftp://example.com", "must start with https://"),
+            ("javascript:alert(1)", "must start with https://"),
+            ("HTTPS://example.com", "must start with https://"),
+            ("example.com", "must start with https://"),
+            ("https://", HOST),
+            ("https:///path", HOST),
+            ("https://:80/x", HOST),
+            ("https://a..b/", HOST),
+            ("https://a.b./", HOST),
+            ("https://a_b.c/", HOST),
+            ("https://[]/", HOST),
+            ("https://[::1]x/", HOST),
+            ("https://[zz]/", HOST),
+            ("https://a]b/", HOST),
+            ("https://example.com:/x", "the port must be 1 to 5 digits"),
             (
-                "https://exa mple.com",
-                "must not contain spaces or control characters",
+                "https://example.com:123456/x",
+                "the port must be 1 to 5 digits",
             ),
-            (
-                "https://example.com/\n",
-                "must not contain spaces or control characters",
-            ),
+            ("https://example.com:8a/x", "the port must be 1 to 5 digits"),
+            ("https://evil.example\\.youtube.com/", CHARS),
+            ("https://exa mple.com", CHARS),
+            ("https://example.com/\n", CHARS),
+            ("https://example.com/\u{1}", CHARS),
+            ("https://evil.example/\u{202e}moc.elgoog", CHARS),
+            ("https://evil.example/\u{200b}", CHARS),
+            ("https://ex\u{e4}mple.com/", CHARS),
+            ("https://example.com/<script>", CHARS),
+            ("https://example.com/\"", CHARS),
+            ("https://example.com/{x}|^`", CHARS),
             (
                 "https://user:pw@example.com",
                 "must not contain a user name or password",
@@ -746,14 +870,58 @@ mod tests {
             );
         }
         let long = format!("https://example.com/{}", "a".repeat(DemoUrl::MAX_LEN));
+        let err = DemoUrl::new(long).unwrap_err();
+        assert_eq!(err.reason, "must be at most 2048 characters");
+        // The rejected value is echoed shortened.
         assert_eq!(
-            DemoUrl::new(long).unwrap_err().reason,
-            "must be at most 2048 characters"
+            err.value.chars().count(),
+            crate::program::limits::MAX_ECHOED_CHARS + 1
         );
         let max = format!("https://e.com/{}", "a".repeat(DemoUrl::MAX_LEN - 14));
         assert_eq!(max.len(), DemoUrl::MAX_LEN);
         assert!(DemoUrl::new(max).is_ok());
+        // Non-ASCII is rejected by its characters before its byte length is counted.
+        let accents = format!("https://a.b/{}", "é".repeat(1_100));
+        assert_eq!(DemoUrl::new(accents).unwrap_err().reason, CHARS);
         assert!(serde_json::from_str::<DemoUrl>("\"ftp://x\"").is_err());
+    }
+
+    #[test]
+    fn url_characters() {
+        for byte in 0_u8..=255 {
+            let expected = (0x21..=0x7e).contains(&byte) && !b"\"<>\\^`{|}".contains(&byte);
+            assert_eq!(is_url_char(byte), expected, "{byte:#x}");
+        }
+    }
+
+    #[test]
+    fn schema_url_accepts_only_the_published_url() {
+        let json = format!("\"{PROGRAM_SCHEMA_URL}\"");
+        assert_eq!(serde_json::from_str::<SchemaUrl>(&json).unwrap(), SchemaUrl);
+        assert_eq!(serde_json::to_string(&SchemaUrl).unwrap(), json);
+        assert_eq!(SchemaUrl.as_str(), PROGRAM_SCHEMA_URL);
+        let err = serde_json::from_str::<SchemaUrl>("\"javascript:alert(1)\"").unwrap_err();
+        assert!(
+            err.to_string().starts_with(&format!(
+                "`$schema` must be \"{PROGRAM_SCHEMA_URL}\" or be left out (got \"javascript:alert(1)\")"
+            )),
+            "{err}"
+        );
+        let long = format!("\"{}\"", "x".repeat(100_000));
+        let err = serde_json::from_str::<SchemaUrl>(&long).unwrap_err();
+        assert!(err.to_string().len() < 300, "{err}");
+        assert!(serde_json::from_str::<SchemaUrl>("1").is_err());
+    }
+
+    #[test]
+    fn tempo_and_slug_errors_echo_a_shortened_value() {
+        let long = "9-".repeat(1_000);
+        let err = long.parse::<Tempo>().unwrap_err();
+        assert_eq!(
+            err.value.chars().count(),
+            crate::program::limits::MAX_ECHOED_CHARS + 1
+        );
+        assert!(err.value.ends_with('…'));
     }
 
     fn any_unit_weight() -> impl Strategy<Value = UnitWeight> {

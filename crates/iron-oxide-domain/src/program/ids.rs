@@ -6,6 +6,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use super::error::echo;
 use crate::ids::slug_problem;
 
 /// A slug identifier was rejected. Slugs follow the same rules as
@@ -16,7 +17,8 @@ use crate::ids::slug_problem;
 pub struct InvalidSlug {
     /// Which identifier was being parsed (e.g. `day id`).
     pub kind: &'static str,
-    /// The rejected input.
+    /// The rejected input, shortened to
+    /// [`MAX_ECHOED_CHARS`](super::limits::MAX_ECHOED_CHARS) characters.
     pub value: String,
     /// Why it was rejected.
     pub reason: &'static str,
@@ -40,7 +42,7 @@ macro_rules! slug_id {
                     None => Ok(Self(value)),
                     Some(reason) => Err(InvalidSlug {
                         kind: $kind,
-                        value,
+                        value: echo(&value),
                         reason,
                     }),
                 }
@@ -133,6 +135,15 @@ mod tests {
         assert_eq!(
             SupersetId::new("a--b").unwrap_err().to_string(),
             "invalid superset id `a--b`: must not contain consecutive hyphens"
+        );
+    }
+
+    #[test]
+    fn rejected_values_are_echoed_shortened() {
+        let err = SupersetId::new("X".repeat(10_000)).unwrap_err();
+        assert_eq!(
+            err.value,
+            format!("{}…", "X".repeat(crate::program::limits::MAX_ECHOED_CHARS))
         );
     }
 
