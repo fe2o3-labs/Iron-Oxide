@@ -96,8 +96,9 @@ export SQLX_OFFLINE ?= true
 
 # The CI-like targets build without incremental compilation, as CI does: incremental caches take
 # many GB and only help the edit-compile loop (`compile`, `dev`), which keeps them. Sub-makes of
-# `check` inherit it. Set CARGO_INCREMENTAL yourself to override.
-check fmt-check lint test sqlx-check test-db smoke build deploy: export CARGO_INCREMENTAL ?= 0
+# `check` inherit it (including its `sqlx-check`, which `compile` also runs, incrementally). Set
+# CARGO_INCREMENTAL yourself to override.
+check fmt-check lint test test-db smoke build deploy: export CARGO_INCREMENTAL ?= 0
 
 # --- Local Postgres (docker compose) ------------------------------------------------------------
 # Use another project name and port to run a second, independent database:
@@ -435,19 +436,11 @@ clean: ## Delete the build output: cargo's target dir (the one in use) and dx's 
 	$(Q)$(CARGO) clean
 	$(Q)rm -rf dist
 
-# cargo sweep only deletes build artefacts in the target dir: never sources, `.sqlx/` or anything
-# tracked. Artefacts are rebuilt when needed.
-prune: ## Delete build artefacts older than PRUNE_DAYS (14), of removed toolchains (PRUNE_MAXSIZE=10GB caps)
-	$(Q)test "$(TARGET_DIR)" != "$(CURDIR)" && test -z "$$(git ls-files -- "$(TARGET_DIR)" 2>/dev/null)" \
-		|| { echo "make $@: $(TARGET_DIR) holds tracked files: refusing to sweep it." >&2; exit 1; }
-	$(Q)$(call need-cmd,cargo-sweep,Run 'make setup'.)
-	$(Q)$(call step,cargo sweep $(TARGET_DIR) (older than $(PRUNE_DAYS) days$(comma) then other toolchains))
-	$(Q)before="$$(du -sk "$(TARGET_DIR)" 2>/dev/null | cut -f1 || echo 0)"; \
-		$(CARGO) sweep $(if $(filter 1,$(DRY_RUN)),--dry-run) --time $(PRUNE_DAYS) . ; \
-		$(CARGO) sweep $(if $(filter 1,$(DRY_RUN)),--dry-run) --installed . ; \
-		$(if $(PRUNE_MAXSIZE),$(CARGO) sweep $(if $(filter 1,$(DRY_RUN)),--dry-run) --maxsize $(PRUNE_MAXSIZE) . ;) \
-		after="$$(du -sk "$(TARGET_DIR)" 2>/dev/null | cut -f1 || echo 0)"; \
-		echo "$(TARGET_DIR): $$((before / 1024)) MB -> $$((after / 1024)) MB"
+# See scripts/prune.sh: it resolves the target dir cargo really uses, refuses anything that is not
+# a cargo target dir (or is /, $$HOME, this checkout or a parent), and never touches sources.
+prune: ## Delete build artefacts older than PRUNE_DAYS (14) or of removed toolchains (PRUNE_MAXSIZE=10GB caps)
+	$(Q)CARGO='$(CARGO)' PRUNE_DAYS='$(PRUNE_DAYS)' PRUNE_MAXSIZE='$(PRUNE_MAXSIZE)' DRY_RUN='$(DRY_RUN)' \
+		scripts/prune.sh
 PRUNE_DAYS ?= 14
 # Optional size cap, e.g. PRUNE_MAXSIZE=10GB: then the oldest artefacts go until the dir fits.
 PRUNE_MAXSIZE ?=
