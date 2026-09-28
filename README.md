@@ -45,7 +45,12 @@ the pinned toolchain and the wasm target on first use.
 unstable browser APIs behind this cfg, and the rest timer needs one of them: the
 [Screen Wake Lock API](https://developer.mozilla.org/docs/Web/API/Screen_Wake_Lock_API), which keeps
 the phone screen on during a session. The app refuses to compile for wasm without it, so a build
-that bypasses the config (for example, one that sets `RUSTFLAGS`, which overrides it) fails loudly.
+that bypasses the config fails loudly.
+
+> **`RUSTFLAGS` replaces `.cargo/config.toml`'s `rustflags`; it does not add to them.** If you set
+> `RUSTFLAGS` (or `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS`) for a build that includes the
+> wasm client, for example in a Dockerfile or a CI step, it must also contain
+> `--cfg=web_sys_unstable_apis`.
 
 ## Install the Dioxus CLI
 
@@ -66,8 +71,15 @@ The server reads its configuration from environment variables at startup
 cp .env.example .env
 ```
 
-`.env` is git-ignored and optional; real environment variables take precedence over it. Never
-commit real values: `.env.example` holds placeholders only.
+`.env` is git-ignored and optional, and only read from the working directory (not its parents);
+real environment variables take precedence over it. A malformed `.env` stops the server with the
+line number only, never the line's content. Never commit real values: `.env.example` holds
+placeholders only.
+
+In `DATABASE_URL`, percent-encode special characters in the user name and password (`/` as
+`%2F`, `@` as `%40`, `#` as `%23`, `?` as `%3F`, `%` as `%25`). An unencoded one splits the URL in
+the wrong place, so the server rejects such URLs rather than risk logging part of the password.
+Logs only ever show `host:port/database`.
 
 | Variable | Required | What |
 |---|---|---|
@@ -75,6 +87,7 @@ commit real values: `.env.example` holds placeholders only.
 | `APP_BASE_URL` | yes | Public URL of the app, e.g. `http://localhost:8080` |
 | `IP`, `PORT` | no | Bind address, default `127.0.0.1:8080`. `dx serve` sets them itself |
 | `RUST_LOG` | no | Log filter, e.g. `info,sqlx=warn` |
+| `SHUTDOWN_GRACE_SECS` | no | Time in-flight requests get after a shutdown signal, 1 to 300, default 20. Keep it below the platform's kill timeout |
 | `WEBAUTHN_RP_ID`, `WEBAUTHN_ORIGIN` | with sign-in | Passkeys: our domain and exact origin |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URL` | with sign-in | Sign in with Google |
 | `SESSION_KEY` | with sign-in | Session cookie key, ≥ 64 random bytes in base64: `openssl rand 64 \| openssl base64 -A` |
@@ -175,8 +188,12 @@ Probes:
 - `GET /readyz`: readiness, `200 ok` when Postgres answers `SELECT 1` within 2 seconds, `503`
   otherwise (the cause is logged, not returned).
 
-On SIGTERM or Ctrl-C the server stops accepting connections, lets in-flight requests finish,
-closes the database pool and exits with status 0.
+On SIGINT (Ctrl-C, and Fly's default kill signal) or SIGTERM (Docker's), the server stops accepting
+connections and lets in-flight requests finish, then closes the database pool and exits with
+status 0. The drain is bounded by `SHUTDOWN_GRACE_SECS` (default 20 s, below the 30 s
+`kill_timeout` in `fly.toml`): past it, remaining connections, such as a client that never
+finishes its request, are dropped and the exit status is 1. A second signal stops the server at
+once.
 
 ### Shared server state in server functions
 

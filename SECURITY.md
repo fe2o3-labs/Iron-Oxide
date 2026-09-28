@@ -20,9 +20,10 @@ The repository is public and built in the open.
 
 - Never commit secrets, credentials, private keys or real `.env` files. Configuration comes from
   environment variables; `.env.example` holds placeholders only.
-- CI runs [gitleaks](https://github.com/gitleaks/gitleaks) on every pull request (the PR's commits)
-  and every push to `main` (the pushed commits), and scans the full history of `main` weekly.
-  A detected secret fails the build.
+- CI runs [gitleaks](https://github.com/gitleaks/gitleaks) on every pull request (the PR's commits,
+  including what merge commits change) and every push to `main` (the pushed commits), and scans the
+  full history of `main` weekly. A detected secret fails the build. GitHub secret scanning and push
+  protection are also enabled on the repository.
 - Scan before you push: `gitleaks git --redact` (committed history) and
   `gitleaks dir --redact .` (working tree, including untracked files).
 - If a secret is ever committed, treat it as leaked: **revoke and rotate it first**, then remove
@@ -39,7 +40,8 @@ in order of preference:
 3. If the line can't be edited (for example, the finding is in an already-pushed commit), add its
    fingerprint to `.gitleaksignore`, with a comment line above it that says why it is not a
    secret. The fingerprint is printed by gitleaks: `<commit>:<file>:<rule-id>:<line>`. It contains
-   the commit SHA, so it only survives merge-commit merges. A squash or rebase creates a new commit,
-   and the finding comes back: prefer options 1 and 2.
+   the commit SHA, and PRs are squash-merged, which creates a new commit on `main`: a fingerprint
+   of a PR commit stops matching once the PR is merged. So use it only for findings in commits
+   that are already on `main`, and prefer options 1 and 2.
 
 Never use these to silence a real secret. A real secret must be revoked and rotated.
