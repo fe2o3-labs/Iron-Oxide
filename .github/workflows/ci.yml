@@ -23,7 +23,7 @@ env:
 
 jobs:
   # The repo is public and built in the open: a leaked secret must fail CI.
-  # Runs on every push and PR and scans the full git history, not only the diff.
+  # Runs on every push and PR and scans the branch's full git history, not only the diff.
   # The gitleaks binary is used directly because `gitleaks/gitleaks-action`
   # requires a paid license for organisation-owned repositories.
   gitleaks:
@@ -48,7 +48,10 @@ jobs:
           grep " ${archive}\$" "gitleaks_${GITLEAKS_VERSION}_checksums.txt" | sha256sum --check --strict
           tar -xzf "$archive" gitleaks
       - name: Scan git history
-        run: '"$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 .'
+        # `--log-opts=HEAD`: scan every commit reachable from the checked-out commit (for a PR, the
+        # merge of the PR into its base). The default is `git log --all`, which would also scan every
+        # other branch fetched by `fetch-depth: 0` and fail this PR for someone else's commit.
+        run: '"$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 --log-opts=HEAD .'
 
   # The Rust jobs below are skipped until a root `Cargo.toml` exists (it lands with #2).
   detect:
