@@ -12,6 +12,7 @@ tests can treat them all alike.
 | `crates/iron-oxide-app/src/api/error.rs` | Client side: `ApiFailure::classify` for the UI and the retry queue |
 | `crates/iron-oxide-app/src/server/api/<area>.rs` | Server-only logic behind the area's functions, and its tests |
 | `crates/iron-oxide-app/src/server/api/error.rs` | `ApiError` and its conversions |
+| `crates/iron-oxide-app/src/server/api/errors_layer.rs` | The layer that gives every `/api/` error the same body |
 | `crates/iron-oxide-app/src/server/api/testing.rs` | The endpoint test harness |
 
 Sign-in (`src/auth/api.rs`, #5) predates this layout and keeps its own `AuthError`, with the same
@@ -76,14 +77,40 @@ The conversions:
 
 Messages written for users go in the variant. Anything else goes in the log.
 
+`ApiError` is meant to grow: an area that needs another status adds a variant with its `public()`
+status and message (and, for structured data such as a list of problems, `details` on the
+`ServerFnError`). The client maps statuses, not variants.
+
+### The error body
+
+Every failed `/api/` call answers with the same JSON, whatever produced it:
+
+```json
+{ "message": "Not found.", "code": 404, "data": { "ServerError": { "message": "Not found.", "code": 404 } } }
+```
+
+Dioxus produces two shapes on its own. An error returned by a server function has Dioxus's
+`Display` text (`error running server function: Not found. (details: None)`) as `message`. An
+extractor rejection (`AuthUser`'s 401, the CSRF 403) or arguments that do not decode give
+`{"error": text}`. `server::api::errors_layer` rewrites both into the shape above, with our message
+on top and in `data.ServerError`, keeping any `details`.
+
+**Arguments that do not decode** are `422 Invalid request.` They include a malformed id, a wrong
+type or a missing field. Dioxus answers them with a `500` whose text is a serde error. Any other
+raw `500` gets the generic message. The original text is logged in both cases.
+
 ### On the client
 
-`crate::api::error::ApiFailure::classify(&ServerFnError)` gives a `FailureKind` and the message to
-show:
+`crate::api::error::ApiFailure::classify(&ServerFnError)` gives a `FailureKind`, the message to
+show and any structured `details`:
 
-- It handles a decoded `ServerError { code, .. }` and a bare `RequestError::Status(_, code)`.
-- The server's message is kept for every 4xx and for 503. 500s and unknown statuses get a generic
-  message.
+- It handles a decoded `ServerError { code, details, .. }` and a bare
+  `RequestError::Status(_, code)`.
+- The message shown is only ever **ours**, from `details.ServerError.message`, for every 4xx and
+  for 503. It never shows the `ServerFnError`'s own `message` or `Display`, which can be Dioxus's
+  text or a proxy's page. Without our message, and for 500s and unknown statuses, it shows a
+  generic message for the kind.
+- 413 counts as `Invalid`.
 - **Retryable:** `Transient` (503, 502, 504), `RateLimited` (429, honouring `Retry-After`), and
   `Network` (timeouts, connection failures, the request never answered).
 - **Not retryable:** 400, 401, 403, 404, 409, 413, 422 and 500. Retrying the same request cannot fix

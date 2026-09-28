@@ -207,7 +207,10 @@ pub fn router(state: AppState, auth: auth::AuthState) -> Router {
         .merge(custom_routes())
         .layer(from_fn(missing_assets_are_not_found));
     // Sign-in (#5): sessions, the CSRF check and the Google callback around the app.
-    auth::install(app, auth, state.db.clone()).layer(Extension(state))
+    auth::install(app, auth, state.db.clone())
+        // One error body for every `/api/` failure, CSRF and sign-in rejections included (#68).
+        .layer(from_fn(api::errors_layer::normalize))
+        .layer(Extension(state))
 }
 
 /// Routes served by axum directly, outside of Dioxus. They read [`AppState`] from the
