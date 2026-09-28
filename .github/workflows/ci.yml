@@ -221,8 +221,8 @@ jobs:
           endpoint_isolation=$(grep -cE '^test server::api::\S+::another_users\w* \.\.\. ok$' "$RUNNER_TEMP/server-tests.log" || true)
           echo "schema tests passed: $schema, isolation tests passed: $isolation, endpoint isolation tests passed: $endpoint_isolation"
           # Floors: today's counts. Raise them when adding tests; lowering one needs a reason.
-          if [ "$schema" -lt 20 ] || [ "$isolation" -lt 9 ] || [ "$endpoint_isolation" -lt 1 ]; then
-            echo "::error::isolation or schema tests missing (schema $schema < 20, isolation $isolation < 9 or endpoint isolation $endpoint_isolation < 1)"; exit 1
+          if [ "$schema" -lt 20 ] || [ "$isolation" -lt 10 ] || [ "$endpoint_isolation" -lt 5 ]; then
+            echo "::error::isolation or schema tests missing (schema $schema < 20, isolation $isolation < 10 or endpoint isolation $endpoint_isolation < 5)"; exit 1
           fi
 
   # Builds the release bundle exactly as the Dockerfile (#7) will, then runs the server and checks

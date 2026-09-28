@@ -143,3 +143,56 @@ async fn another_users_session_is_not_found(db: PgPool) {
 ```
 
 Unit tests without a database stay next to the code as usual.
+
+## Endpoints
+
+### History (`src/api/history.rs`, #20)
+
+The history is the user's **ended** sessions (completed, skipped or abandoned). Weights are the
+domain `Weight` (kg numbers on the wire); the UI converts them to the user's unit. e1RM uses the
+Epley formula.
+
+| Path | Arguments | Result |
+|---|---|---|
+| `/api/history/page` | `cursor: Option<HistoryCursor>`, `limit: Option<u32>` (default 20, 1 to 100) | `HistoryPage { sessions, next }`: ended sessions, most recently finished first (ties by id, descending). `next` is `None` on the last page. |
+| `/api/history/session` | `session_id` | `SessionDetails`: the session (ended or still in progress) and its sets grouped by exercise (in the order each was first logged), with each exercise's top set, best e1RM and volume. |
+| `/api/history/exercise-series` | `exercise_id` (a slug) | `ExerciseSeries`: one point per ended session with a weighted working set, oldest first: the top set and the best e1RM. |
+| `/api/history/exercises` | none | The exercises logged in ended sessions, most recently trained first, with the number of sessions. |
+
+- **Cursor.** `HistoryCursor` is opaque to the client: pass back the `next` of the previous page.
+  It holds the last session's `finished_at` in **microseconds** (the database's precision) and its
+  id. A millisecond cursor would skip sessions finished within the same millisecond. A cursor
+  whose time is out of range is `422`; another user's cursor just gives an empty page.
+- **Charts.** A point's key is the session's start time and id (`SeriesKey`), so two sessions
+  started in the same millisecond stay apart. Sets without a weight (body-weight work) have no
+  point; sets of abandoned sessions count (they were lifted). A session still in progress is left
+  out until it ends.
+- Errors: `422` for a page size out of range, a bad cursor or an exercise id that is not a slug;
+  `404` for a session that is not the user's.
+
+### Settings (`src/api/settings.rs`, #20)
+
+| Path | Arguments | Result |
+|---|---|---|
+| `/api/settings/get` | none | `Settings`. A user who never saved any gets `Settings::defaults()`: kg, a 20 kg bar, the domain's default kg plate inventory (`PlateInventory::default_for(Kg)`), 120 s of rest, sound on. |
+| `/api/settings/update` | `settings: SettingsUpdate` | The saved `Settings` (plates sorted heaviest first). A full replace, so a retry is harmless. |
+| `/api/settings/training-maxes` | none | The user's `TrainingMax`es, by exercise id. |
+| `/api/settings/training-max/set` | `exercise_id`, `weight` (kg) | The saved `TrainingMax`. |
+| `/api/settings/training-max/delete` | `exercise_id` | Nothing; `404` if the user has no training max for it. |
+
+- **Validation (`422`, with the reason).** `SettingsUpdate` carries the values the user types
+  unchecked: `bar_weight` and each plate as kg numbers (the same JSON as a `Weight`), the plate
+  inventory as a plain list. The server validates them with the domain (`Weight::from_kg`,
+  `PlateInventory::new`: no zero, duplicate or off-grid plate, at most 50 pairs and 16 sizes), and
+  the default rest must be at most one hour. A typed `Weight` or `PlateInventory` argument would
+  fail while the body is decoded, before the function runs, which Dioxus reports as a `500` with
+  the decoding error.
+- **Defaults only when nothing was saved.** A user who saves an empty plate inventory keeps an
+  empty one; the defaults apply only while there is no `user_settings` row
+  (`settings::find` returns `None`).
+- **Training maxes and the progression anchor.** Setting a training max always moves its `set_at`
+  to now, on the server's clock, even when the weight is unchanged: the progression (#57) restarts
+  from this value and replays only the sets logged after it. This is the one write whose time
+  comes from the server, since the point is "from now on". A retried request moves the anchor by a
+  few seconds, which only matters if a set was logged in between. The weight must be more than
+  zero.
