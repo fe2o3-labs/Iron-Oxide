@@ -387,8 +387,9 @@ make logs               # fly logs
 Pushes to `main` deploy through GitHub Actions. `make deploy` is for a manual redeploy: it only
 runs on a clean `main` at exactly `origin/main` (it fetches first) whose CI run passed (checked
 with `gh`), runs `make check` including the secret scan, checks the checkout again, then runs
-`fly deploy`. The image is built from the local checkout on Fly's builder, not taken from CI, so
-it is the same commit CI tested but not the same build. First-time setup (Fly app, secrets, deploy token)
+`fly deploy` from a pristine `git archive` of that commit in a temporary directory, so no local
+file (ignored, excluded or skip-worktree) reaches the build. The image is built on Fly's builder,
+not taken from CI: the same commit CI tested, but not the same build. First-time setup (Fly app, secrets, deploy token)
 and the custom domain: [docs/operations/deploy.md](docs/operations/deploy.md).
 
 ## Testing on phones

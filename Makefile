@@ -351,26 +351,32 @@ docker-run: db-up ## Run the Docker image against the local Postgres, on DOCKER_
 		$(IMAGE)
 
 # Deploys only what CI has seen: a clean checkout of `main` at exactly `origin/main`, whose CI run
-# passed. It still builds the image from this checkout (on Fly's builder), not CI's image; pushes to
-# main deploy through GitHub Actions, and this target is for a manual redeploy.
+# passed. `fly deploy` runs from a pristine `git archive` of that commit in a temporary directory,
+# never from this working directory, so ignored, excluded or skip-worktree files cannot reach the
+# build. The image is built on Fly's builder, not taken from CI. Pushes to main deploy through
+# GitHub Actions; this target is for a manual redeploy.
 deploy: ## Redeploy origin/main to Fly.io after `make check` (CONFIRM=1)
 	$(Q)$(call need-cmd,$(FLY),brew install flyctl)
 	$(Q)$(call need-cmd,$(GH),brew install gh (checks that CI passed for the commit))
 	$(Q)$(call need-cmd,$(GITLEAKS),brew install gitleaks (see 'make setup'))
 	$(Q)$(call need-confirm,deploys to production)
 	$(Q)test "$(SKIP_SECRETS)" != 1 || { echo "make $@: SKIP_SECRETS=1 is not allowed for a deploy." >&2; exit 1; }
-	$(Q)$(deploy-guard)
-	$(Q)sha="$$(git rev-parse HEAD)"; \
-		ok="$$($(GH) run list --commit "$$sha" --workflow ci.yml --event push --status success --json databaseId --jq length)"; \
-		test "$$ok" -gt 0 || { echo "make $@: CI has not passed for $$sha on main yet." >&2; exit 1; }
+	$(Q)$(deploy-guard); $(deploy-ci-passed)
 	$(Q)$(MAKE) check SECRETS_RANGE=HEAD
-	$(Q)$(deploy-guard)
-	$(Q)$(FLY) deploy
+	$(Q)$(deploy-guard); $(deploy-ci-passed); \
+		src="$$(mktemp -d)"; trap 'rm -rf "$$src"' EXIT; \
+		git archive "$$sha" | tar -x -C "$$src"; \
+		$(call step,fly deploy of $$sha (pristine export)); \
+		cd "$$src" && $(FLY) deploy
+# CI's workflow passed on a push of this exact commit. Sets `sha`.
+deploy-ci-passed = sha="$$(git rev-parse HEAD)"; \
+	ok="$$($(GH) run list --commit "$$sha" --workflow ci.yml --event push --status success --json databaseId --jq length)"; \
+	test "$$ok" -gt 0 || { echo "make $@: CI has not passed for $$sha on main yet." >&2; exit 1; }
 # On main, with a clean tree, at exactly origin/main (not ahead, behind or diverged). Run before
 # and again after `make check`, which takes minutes.
 deploy-guard = test "$$(git rev-parse --abbrev-ref HEAD)" = main || { echo "make $@: deploy from main only." >&2; exit 1; }; \
 	test -z "$$(git status --porcelain)" || { echo "make $@: the working tree has uncommitted changes." >&2; exit 1; }; \
-	git fetch --quiet origin main; \
+	git fetch --quiet origin main || { echo "make $@: cannot fetch origin/main." >&2; exit 1; }; \
 	test "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" || { echo "make $@: HEAD is not origin/main (ahead, behind or diverged): deploy exactly what is on origin/main." >&2; exit 1; }
 
 logs: ## Tail the production logs on Fly.io
