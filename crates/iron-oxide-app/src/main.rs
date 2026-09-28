@@ -13,11 +13,26 @@ mod pwa;
 mod server;
 mod ui;
 
+#[cfg(not(feature = "server"))]
 fn main() {
-    #[cfg(not(feature = "server"))]
     dioxus::launch(ui::App);
+}
 
-    // `dioxus::serve` binds to the `IP` and `PORT` environment variables (set by `dx serve`).
-    #[cfg(feature = "server")]
-    dioxus::serve(|| async { Ok(server::router()) });
+/// Loads the configuration and runs the server. A bad configuration exits with status 1 and a
+/// message naming each missing or invalid variable, before anything else starts.
+#[cfg(feature = "server")]
+fn main() -> std::process::ExitCode {
+    // A local `.env` in the working directory is optional; real environment variables win.
+    if let Err(error) = server::dotenv::load(std::path::Path::new(".env")) {
+        eprintln!("error: {error}");
+        return std::process::ExitCode::FAILURE;
+    }
+
+    match server::Config::from_env() {
+        Ok(config) => server::serve(config),
+        Err(errors) => {
+            eprintln!("error: {errors}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }

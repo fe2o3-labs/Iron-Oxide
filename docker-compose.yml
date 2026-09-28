@@ -1,0 +1,46 @@
+# Local Postgres for development and integration tests. Not used in production (Neon, #39).
+#
+#   docker compose up -d --wait   # start (dev DB `iron_oxide`, test DB `iron_oxide_test`)
+#   docker compose down           # stop, keeping the data
+#   docker compose down -v        # stop and delete the data
+#
+# Throwaway local credentials, not a secret. Listens on localhost only.
+name: iron-oxide
+
+services:
+  postgres:
+    # Same major version as the Neon project (18 is Neon's default for new projects since June 2026).
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_USER: iron_oxide
+      POSTGRES_PASSWORD: iron_oxide
+      POSTGRES_DB: iron_oxide
+    ports:
+      # 5433 on the host, so it does not clash with a Postgres already running on 5432.
+      # Override with `IRON_OXIDE_PG_PORT=5444 docker compose up -d` (and adjust DATABASE_URL).
+      - "127.0.0.1:${IRON_OXIDE_PG_PORT:-5433}:5432"
+    volumes:
+      # Postgres 18 images keep their data under /var/lib/postgresql/<major>/docker, so the
+      # volume is mounted one level up (the old /var/lib/postgresql/data path no longer works).
+      - pgdata:/var/lib/postgresql
+    configs:
+      - source: create-test-database
+        target: /docker-entrypoint-initdb.d/01-create-test-database.sql
+    healthcheck:
+      # Queries the test database over TCP. During first-run initialisation the server only
+      # listens on its Unix socket, so this passes only once init is done and both databases exist.
+      test: ["CMD-SHELL", "PGPASSWORD=iron_oxide psql -h 127.0.0.1 -U iron_oxide -d iron_oxide_test -tAc 'SELECT 1'"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+configs:
+  # Runs once, when the volume is first initialised. The image creates the dev database from
+  # POSTGRES_DB; this adds the one the integration tests use. Inline, so no bind mount is needed.
+  create-test-database:
+    content: |
+      CREATE DATABASE iron_oxide_test OWNER iron_oxide;
+
+volumes:
+  pgdata:
