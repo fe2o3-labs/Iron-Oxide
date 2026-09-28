@@ -85,3 +85,15 @@ jobs:
       - name: fly deploy
         if: steps.token.outputs.present == 'true'
         run: flyctl deploy --remote-only
+      # Fly's own check only probes /healthz (liveness, no database). /readyz also checks the
+      # database, and is called once here, after each deploy, so Neon can still scale to zero.
+      - name: Smoke test the deployed app
+        if: steps.token.outputs.present == 'true'
+        run: |
+          app=$(sed -n 's/^app = "\(.*\)"$/\1/p' fly.toml)
+          base="https://${app}.fly.dev"
+          set -x
+          test "$(curl -sSf --retry 5 --retry-all-errors "$base/healthz")" = "ok"
+          # Exact body match: an unknown path would get the app's HTML page with a 200.
+          test "$(curl -sSf --retry 5 --retry-all-errors "$base/readyz")" = "ok"
+          curl -sSf "$base/" | grep -q "Iron Oxide"

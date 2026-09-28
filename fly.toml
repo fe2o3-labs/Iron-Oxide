@@ -37,6 +37,10 @@ primary_region = "fra"
     soft_limit = 200
     hard_limit = 250
 
+  # Liveness only: /healthz never touches the database. A check that queried Postgres every 30 s
+  # would keep the Neon compute awake around the clock (about 180 CU-hours a month, above the Free
+  # plan's quota). Database connectivity is /readyz, called once after each deploy by
+  # .github/workflows/deploy.yml and by hand; never point a Fly check at it.
   [[http_service.checks]]
     grace_period = "10s"
     interval = "30s"

@@ -102,7 +102,8 @@ Check it:
 ```sh
 fly status
 fly logs
-curl -sS https://iron-oxide.fly.dev/healthz   # ok
+curl -sS https://iron-oxide.fly.dev/healthz   # ok (liveness)
+curl -sS https://iron-oxide.fly.dev/readyz    # database reachable
 ```
 
 `https://iron-oxide.fly.dev` is served over HTTPS with Fly's certificate, and `force_https`
@@ -189,10 +190,11 @@ Do this once the Route 53 registration of `iron-oxyde.com` is complete. Until th
 ```sh
 curl -sSI http://iron-oxyde.com/ | head -3        # 301 to https://
 curl -sS https://iron-oxyde.com/healthz            # ok
+curl -sS https://iron-oxyde.com/readyz             # database reachable
 curl -sSv https://iron-oxyde.com/ -o /dev/null 2>&1 | grep -E 'subject:|issuer:|expire'
 ```
 
-Then open `https://iron-oxyde.com` in a browser, sign in, and check `/healthz`.
+Then open `https://iron-oxyde.com` in a browser and sign in.
 
 ## Configuration choices
 
@@ -200,17 +202,19 @@ Then open `https://iron-oxyde.com` in a browser, sign in, and check `/healthz`.
   no cold start for the first request, and a second machine resumes in well under a second when
   needed. Cheaper alternative: `min_machines_running = 0` lets the last machine suspend too, for
   near-zero cost when nobody uses the app, at the price of a short resume after a quiet period.
-- **Health check on `/healthz` every 30 s.** If `/healthz` starts querying the database (#4),
-  every check wakes the Neon compute, which then never scales to zero and uses the Free plan's
-  compute hours around the clock. In that case, either point the Fly check at a liveness path
-  that does not touch the database, or accept an always-on Neon compute.
+- **Health checks: `/healthz` for Fly, `/readyz` for humans and deploys.**
+  - `/healthz` is liveness: it answers `ok` without touching the database. Fly checks it every
+    30 s and uses it to route traffic and to gate rolling deploys.
+  - `/readyz` also checks the database connection. The deploy workflow calls it once after each
+    deploy, and you can call it by hand: `curl -sS https://iron-oxide.fly.dev/readyz`.
+  - Never point a Fly check at `/readyz`: a database query every 30 s would keep the Neon compute
+    awake around the clock (about 180 CU-hours a month, above the Free plan's quota).
 - **VM**: `shared-cpu-1x` with 512 MB. Scale with `fly scale memory 1024` or
   `fly scale vm shared-cpu-2x` if needed.
 - **No volume**: all state lives in Neon.
-- **Signals**: the server has no signal handler yet, so as PID 1 in a plain `docker run` it
-  ignores `SIGTERM`/`SIGINT` (hence `--init` above). On Fly the app runs under Fly's own init and
-  is stopped normally, but in-flight requests are not drained; graceful shutdown belongs in
-  `main.rs`.
+- **Signals**: `--init` in the `docker run` examples puts a small init process in front of the
+  server so Ctrl-C and `docker stop` are forwarded promptly. It is harmless once the server
+  handles `SIGTERM` itself (graceful shutdown, #3 / #4). On Fly, the app runs under Fly's own init.
 
 ## Day-to-day
 

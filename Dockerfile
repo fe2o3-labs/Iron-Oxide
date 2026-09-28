@@ -15,13 +15,10 @@
 # Same Rust version as rust-toolchain.toml. Debian trixie, to match the runtime's glibc.
 FROM rust:1.98.1-slim-trixie@sha256:4cd829461bd5c4d511c32e269da9cb8929223b666519d8004e35fc8d1d771ab7 AS builder
 
-# dx must be the same version as the `dioxus` crates pinned in Cargo.toml (and DX_VERSION in
-# .github/workflows/ci.yml), so it is not simply the latest dioxus-cli. On a bump, update both
-# checksums from the release's `.sha256` files: a stale checksum fails the build.
+# dx must be the same version as the `dioxus` crates pinned in Cargo.toml (Renovate bumps both in
+# one PR), so it is not simply the latest dioxus-cli.
 # renovate: datasource=crate depName=dioxus-cli
 ARG DX_VERSION=0.7.10
-ARG DX_SHA256_X86_64=4363e4ed2a3f1eb7f4d38d2d59aed59ce43271c44c16b425e92c89a64761fbe7
-ARG DX_SHA256_AARCH64=8f1a17d3218700ffbe15e6540d936a178b2556fc801121a31082e3ba4ab9ef55
 # Set by BuildKit: amd64 on Fly's builders, arm64 on Apple Silicon.
 ARG TARGETARCH
 # Parallel rustc jobs. Lower it (--build-arg CARGO_BUILD_JOBS=2) on a small Docker VM.
@@ -32,19 +29,29 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Prebuilt dx from the Dioxus GitHub release, checksum-verified.
+# Official prebuilt dx from the Dioxus GitHub release, installed the same way as in CI
+# (.github/workflows/ci.yml). The archive is checked against the `.sha256` file published with the
+# release, so DX_VERSION is the only input and a Renovate bump needs no hand-edited checksum.
+# That catches a corrupt or truncated download; the origin itself is authenticated by TLS to
+# github.com. (`cargo install dioxus-cli --locked` would verify every crate against crates.io, but
+# compiling dx needs more than 2 GiB of RAM and about ten minutes on every cold builder.)
 RUN set -eu; \
     case "${TARGETARCH}" in \
-        amd64) arch=x86_64; sha="${DX_SHA256_X86_64}" ;; \
-        arm64) arch=aarch64; sha="${DX_SHA256_AARCH64}" ;; \
+        amd64) arch=x86_64 ;; \
+        arm64) arch=aarch64 ;; \
         *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
+    base="https://github.com/DioxusLabs/dioxus/releases/download/v${DX_VERSION}"; \
     archive="dx-${arch}-unknown-linux-gnu.tar.gz"; \
-    curl -sSfL -o "/tmp/${archive}" \
-        "https://github.com/DioxusLabs/dioxus/releases/download/v${DX_VERSION}/${archive}"; \
-    echo "${sha}  /tmp/${archive}" | sha256sum --check --strict; \
-    tar -xzf "/tmp/${archive}" -C /usr/local/cargo/bin dx; \
-    rm "/tmp/${archive}"; \
+    checksums="dx-${arch}-unknown-linux-gnu.sha256"; \
+    tmp="$(mktemp -d)"; \
+    cd "${tmp}"; \
+    curl -sSfLO "${base}/${archive}"; \
+    curl -sSfLO "${base}/${checksums}"; \
+    grep " ${archive}\$" "${checksums}" | sha256sum --check --strict; \
+    tar -xzf "${archive}" -C /usr/local/cargo/bin dx; \
+    cd /; \
+    rm -rf "${tmp}"; \
     dx --version
 
 WORKDIR /app
