@@ -75,4 +75,12 @@ pub enum ValueError {
         /// Why it was rejected.
         reason: &'static str,
     },
+    /// A program day ID is not a valid slug.
+    #[error("invalid day id `{value}`: {reason}")]
+    InvalidDayId {
+        /// The rejected input.
+        value: String,
+        /// Why it was rejected.
+        reason: &'static str,
+    },
 }

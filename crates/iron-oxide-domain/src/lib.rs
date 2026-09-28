@@ -6,12 +6,13 @@
 //! # Core types
 //!
 //! - Typed IDs: [`UserId`], [`SessionId`], [`SetId`], [`ProgramId`], [`ProgramVersionId`] (UUIDs) and
-//!   [`ExerciseId`] (a slug).
+//!   [`ExerciseId`] and [`DayId`] (slugs).
 //! - [`Weight`], stored exactly in kilograms, with [`Unit`] conversion at the edges, [`Rounding`] to an
 //!   increment and display helpers.
 //! - [`Reps`], [`Percent`] and [`Seconds`].
 //! - [`ValueError`] for every rejected value.
 
+mod display;
 mod duration;
 mod error;
 mod ids;
@@ -23,7 +24,9 @@ mod weight;
 
 pub use duration::Seconds;
 pub use error::{Quantity, ValueError};
-pub use ids::{ExerciseId, ProgramId, ProgramVersionId, SessionId, SetId, UserId};
+pub use ids::{
+    DayId, ExerciseId, ProgramId, ProgramVersionId, SLUG_MAX_LEN, SessionId, SetId, UserId,
+};
 pub use percent::Percent;
 pub use reps::Reps;
 pub use session::{

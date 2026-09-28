@@ -105,17 +105,18 @@ const fn too_large() -> ValueError {
 }
 
 impl fmt::Display for Percent {
-    /// `72.5%`, `100%`, `33.33%`.
+    /// `72.5%`, `100%`, `33.33%`. Width, fill and alignment are honoured.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let whole = self.0 / BASIS_POINTS_PER_PERCENT;
         let fraction = self.0 % BASIS_POINTS_PER_PERCENT;
-        if fraction == 0 {
-            write!(f, "{whole}%")
+        let text = if fraction == 0 {
+            format!("{whole}%")
         } else if fraction.is_multiple_of(10) {
-            write!(f, "{whole}.{}%", fraction / 10)
+            format!("{whole}.{}%", fraction / 10)
         } else {
-            write!(f, "{whole}.{fraction:02}%")
-        }
+            format!("{whole}.{fraction:02}%")
+        };
+        crate::display::pad(f, &text)
     }
 }
 
@@ -172,6 +173,15 @@ mod tests {
                 value: -10.0
             }
         );
+        for value in [-0.5, -1e-9] {
+            assert_eq!(
+                Percent::new(value).unwrap_err(),
+                ValueError::Negative {
+                    quantity: Quantity::Percent,
+                    value
+                }
+            );
+        }
         assert_eq!(pct(1_000.0), Percent::MAX);
         assert_eq!(
             Percent::new(1_000.01).unwrap_err().to_string(),
@@ -211,6 +221,15 @@ mod tests {
         assert_eq!(pct(33.33).to_string(), "33.33%");
         assert_eq!(pct(2.05).to_string(), "2.05%");
         assert_eq!(pct(0.0).to_string(), "0%");
+    }
+
+    #[test]
+    fn display_honours_width_fill_and_alignment() {
+        assert_eq!(format!("{:>7}|", pct(72.5)), "  72.5%|");
+        assert_eq!(format!("{:<7}|", pct(72.5)), "72.5%  |");
+        assert_eq!(format!("{:^7}|", pct(100.0)), " 100%  |");
+        assert_eq!(format!("{:_>6}", pct(5.0)), "____5%");
+        assert_eq!(format!("{:2}", pct(33.33)), "33.33%");
     }
 
     #[test]
