@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT cls.relname AS \"table!\" FROM pg_trigger trg\n           JOIN pg_class cls ON cls.oid = trg.tgrelid\n           JOIN pg_namespace ns ON ns.oid = cls.relnamespace\n           JOIN pg_proc proc ON proc.oid = trg.tgfoid\n           WHERE ns.nspname = 'public' AND NOT trg.tgisinternal\n             AND proc.proname IN ('forbid_owner_change', 'forbid_update')\n             -- A row-level (bit 0) BEFORE (bit 1) UPDATE (bit 4) trigger.\n             AND trg.tgtype & 1 = 1 AND trg.tgtype & 2 = 2 AND trg.tgtype & 16 = 16",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "table!",
+        "type_info": "Name"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7c5ea4efc93cccefbcc296002656d7d953f904d6e138d80dac25b3b4ab14814e"
+}

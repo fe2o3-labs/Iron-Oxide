@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO programs (source_builtin_id, name) VALUES ($1, $2)\n             ON CONFLICT (source_builtin_id) WHERE user_id IS NULL\n             DO UPDATE SET name = EXCLUDED.name, archived = false\n             RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "705e1565019eb6663e43c74375bb454c0d4acd0f5b585b442b4ea625d2fc76fe"
+}

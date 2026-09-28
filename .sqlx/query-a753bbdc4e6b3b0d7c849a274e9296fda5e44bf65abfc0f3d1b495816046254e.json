@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO training_maxes (user_id, exercise_id, weight_ng, set_at)\n         VALUES ($1, $2, $3, $4)\n         ON CONFLICT (user_id, exercise_id)\n         DO UPDATE SET weight_ng = EXCLUDED.weight_ng, set_at = EXCLUDED.set_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a753bbdc4e6b3b0d7c849a274e9296fda5e44bf65abfc0f3d1b495816046254e"
+}

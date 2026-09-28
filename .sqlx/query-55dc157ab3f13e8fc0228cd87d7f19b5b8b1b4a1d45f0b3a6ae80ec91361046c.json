@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM training_maxes WHERE user_id = $1 AND exercise_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "55dc157ab3f13e8fc0228cd87d7f19b5b8b1b4a1d45f0b3a6ae80ec91361046c"
+}

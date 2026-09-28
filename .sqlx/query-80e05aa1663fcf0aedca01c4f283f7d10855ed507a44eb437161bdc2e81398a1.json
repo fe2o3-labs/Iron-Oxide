@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO programs (user_id, creation_id, source_builtin_id, name)\n         VALUES ($1, $2, $3, $4)\n         ON CONFLICT (user_id, creation_id) DO NOTHING\n         RETURNING id, name, source_builtin_id, archived, created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "source_builtin_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "archived",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "80e05aa1663fcf0aedca01c4f283f7d10855ed507a44eb437161bdc2e81398a1"
+}
