@@ -35,7 +35,7 @@ impl SessionStatus {
         }
     }
 
-    fn parse(value: &str) -> Result<Self, RepoError> {
+    pub(super) fn parse(value: &str) -> Result<Self, RepoError> {
         match value {
             "in_progress" => Ok(Self::InProgress),
             "completed" => Ok(Self::Completed),

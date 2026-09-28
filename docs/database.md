@@ -198,11 +198,12 @@ types mirror them field for field, and switch to them once they are merged.
 
 | Module | Functions |
 |---|---|
-| `settings` | `get` (defaults when never saved), `save` |
+| `settings` | `get` (defaults when never saved), `find` (`None` when never saved), `save` |
 | `training_maxes` | `list`, `set`, `delete` |
 | `programs` | `seed_builtins`, `list_builtins`, `copy_builtin` and `create` (idempotent on a `CreationId`), `get`, `list`, `rename`, `set_archived`, `add_version` (a retried identical upload is a no-op), `list_versions`, `get_version`, `latest_version` |
 | `active_program` | `get`, `set`, `clear` |
 | `sessions` | `start` (idempotent), `finish` (idempotent), `get`, `get_in_progress`, `list` (history pages by `(started_at, id)`, optionally for one program) |
+| `history` | The history screens (#20): `page` (ended sessions, most recently finished first, paged by `(finished_at, id)` with microsecond cursors, served by the partial `workout_sessions_history_idx`), `entry` (one session with its program name, version number and working-set count), `exercise_sets` (weighted sets of one exercise in ended sessions, for the charts), `logged_exercises` |
 | `sets` | `upsert_idempotent`, `list_for_session`, `completed_for_exercise` (sets of one exercise after a time, in completed sessions of any version of a program: the progression input of #57, served by the `(user_id, exercise_id, completed_at)` index) |
 
 Rules that span rows and are checked by the domain (`SessionLog`, #54) before a write, not by the

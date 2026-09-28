@@ -61,6 +61,14 @@ impl UserSettings {
 
 /// The user's settings, or [`UserSettings::defaults`] if they never saved any.
 pub async fn get(pool: &PgPool, user: UserId) -> Result<UserSettings, RepoError> {
+    Ok(find(pool, user)
+        .await?
+        .unwrap_or_else(UserSettings::defaults))
+}
+
+/// The user's saved settings, `None` if they never saved any (so a caller can tell the defaults
+/// apart from saved values that happen to be equal to them).
+pub async fn find(pool: &PgPool, user: UserId) -> Result<Option<UserSettings>, RepoError> {
     let row = sqlx::query!(
         "SELECT unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled
          FROM user_settings WHERE user_id = $1",
@@ -68,16 +76,16 @@ pub async fn get(pool: &PgPool, user: UserId) -> Result<UserSettings, RepoError>
     )
     .fetch_optional(pool)
     .await?;
-    match row {
-        None => Ok(UserSettings::defaults()),
-        Some(row) => Ok(UserSettings {
+    row.map(|row| {
+        Ok(UserSettings {
             unit: Unit::parse(&row.unit)?,
             bar_weight_ng: narrow(row.bar_weight_ng, "user_settings.bar_weight_ng")?,
             plate_inventory: row.plate_inventory,
             default_rest_s: narrow(row.default_rest_s, "user_settings.default_rest_s")?,
             sound_enabled: row.sound_enabled,
-        }),
-    }
+        })
+    })
+    .transpose()
 }
 
 /// Saves the user's settings, replacing the previous ones.
@@ -141,6 +149,12 @@ mod tests {
     async fn a_user_without_settings_gets_the_defaults(pool: PgPool) {
         let user = testing::user(&pool).await;
         assert_eq!(get(&pool, user).await.unwrap(), UserSettings::defaults());
+        assert_eq!(find(&pool, user).await.unwrap(), None);
+        save(&pool, user, &UserSettings::defaults()).await.unwrap();
+        assert_eq!(
+            find(&pool, user).await.unwrap(),
+            Some(UserSettings::defaults())
+        );
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
