@@ -30,6 +30,7 @@ const PRECACHE_URLS = [
   "/icons/icon-512.png",
   "/icons/icon-maskable-512.png",
   "/icons/apple-touch-icon.png",
+  "/icons/icon.svg",
   "/icons/favicon.svg",
   "/favicon.ico",
 ];
@@ -43,15 +44,44 @@ const NETWORK_ONLY_PREFIXES = ["/api/", "/auth/", "/_dioxus"];
 // this worker in debug builds.)
 const HASHED_PREFIXES = ["/assets/"];
 
+// Whether a response may be stored in the cache. Only a complete, direct, same-origin file
+// qualifies:
+//   * status 200 exactly: `ok` also covers 206 Partial Content, which `cache.put` rejects;
+//   * not redirected: an auth middleware may redirect to a login page;
+//   * never HTML: the Dioxus server answers unknown paths, /assets/ included, with the SSR page
+//     (200 text/html). During a deploy, a request for a new asset can reach an old server. Caching
+//     that page under a JS or wasm URL would break the app until the next deploy, and the page may
+//     contain the user's data.
+function isCacheable(response) {
+  const contentType = response.headers.get("Content-Type") || "";
+  return (
+    response.status === 200 &&
+    !response.redirected &&
+    response.type === "basic" &&
+    !contentType.toLowerCase().startsWith("text/html")
+  );
+}
+
+// Fetches `path` and stores it, or throws so that the install fails and is retried on the next
+// page load. Replaces `cache.addAll`, which accepts any `ok` response.
+async function fetchAndCache(cache, path) {
+  const response = await fetch(path, { cache: "no-cache" });
+  if (!isCacheable(response)) {
+    throw new Error(`not caching ${path}: ${response.status} ${response.headers.get("Content-Type")}`);
+  }
+  await cache.put(path, response.clone());
+  return response;
+}
+
 // Fetch the anonymous app shell and precache it together with the hashed
 // wasm/js/css it references, so a first offline launch works.
 async function precache() {
   const cache = await caches.open(CACHE_NAME);
-  await cache.addAll(PRECACHE_URLS);
+  await Promise.all(PRECACHE_URLS.map((path) => fetchAndCache(cache, path)));
 
   // credentials: "omit" makes sure the cached shell never contains a user's data.
   const shellResponse = await fetch(new Request(SHELL_URL, { credentials: "omit", cache: "no-store" }));
-  if (!shellResponse.ok) {
+  if (shellResponse.status !== 200) {
     throw new Error(`app shell fetch failed: ${shellResponse.status}`);
   }
   const html = await shellResponse.clone().text();
@@ -64,13 +94,15 @@ async function precache() {
   const assetUrls = hashedAssetPaths(html, /(?:src|href)="([^"]+)"/g);
 
   // The wasm binary is not referenced by the HTML: the JS glue loads it. Look it up there.
+  const wasmUrls = new Set();
   for (const path of [...assetUrls].filter((p) => p.endsWith(".js"))) {
-    const js = await (await fetch(path)).text();
+    const js = await (await fetchAndCache(cache, path)).text();
     for (const wasm of hashedAssetPaths(js, /["']([^"']+\.wasm)["']/g)) {
-      assetUrls.add(wasm);
+      wasmUrls.add(wasm);
     }
   }
-  await cache.addAll([...assetUrls]);
+  const remaining = [...assetUrls, ...wasmUrls].filter((p) => !p.endsWith(".js"));
+  await Promise.all(remaining.map((path) => fetchAndCache(cache, path)));
 }
 
 // Same-origin paths under HASHED_PREFIXES captured by `pattern` (group 1) in `text`.
@@ -110,10 +142,11 @@ async function cacheFirst(request) {
     return cached;
   }
   const response = await fetch(request);
-  if (response.ok && response.type === "basic") {
+  if (isCacheable(response)) {
     const cache = await caches.open(CACHE_NAME);
     await cache.put(request, response.clone());
   }
+  // Anything else is passed through untouched, never cached.
   return response;
 }
 
@@ -138,6 +171,11 @@ self.addEventListener("fetch", (event) => {
     return;
   }
   if (NETWORK_ONLY_PREFIXES.some((p) => url.pathname.startsWith(p))) {
+    return;
+  }
+  // Range requests (media elements always send them) expect a 206 slice. Leave them to the browser:
+  // a cached full file is not a valid answer, and a 206 cannot be cached anyway.
+  if (request.headers.has("Range")) {
     return;
   }
   if (request.mode === "navigate") {
