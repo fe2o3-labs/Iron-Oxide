@@ -268,6 +268,12 @@ impl AuthUser {
     pub fn user_id(&self) -> UserId {
         self.user_id
     }
+
+    /// The same id as the repository's owner key: pass it to every `server::db` call.
+    #[must_use]
+    pub fn owner(&self) -> super::db::ids::UserId {
+        self.user_id.into()
+    }
 }
 
 impl<S: Send + Sync> FromRequestParts<S> for AuthUser {

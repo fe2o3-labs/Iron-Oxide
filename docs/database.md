@@ -262,9 +262,8 @@ DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
   - every table with user data, `users` included, has a `BEFORE TRUNCATE` guard, and
     `TRUNCATE ... CASCADE` on each of them fails while user deletion still cascades.
 
-Not here yet: a test-only way to sign in as a user, and isolation tests at the server-function
-level (including the GDPR export). They come with `AuthUser` (#5) and the server functions
-(#18–#22), which wrap this repository.
+Isolation at the server-function level (signed in as A or B through the real router) uses the
+endpoint harness in `server/api/testing.rs`; see `docs/api.md`.
 
 CI runs them in the "Integration tests (Postgres)" job. It fails unless every
 `#[ignore = "needs Postgres"]` test in the app's `src/` appears as passed in the log, and unless at

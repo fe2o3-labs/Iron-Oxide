@@ -124,6 +124,8 @@ It listens on port 5433 so it does not clash with a local Postgres on 5432; set
 
 The schema, the repository layer and how users' data is kept apart are described in
 [`docs/database.md`](docs/database.md).
+Server functions (errors, idempotency, the endpoint test harness and the isolation tests every
+endpoint needs) follow [`docs/api.md`](docs/api.md).
 
 ### Migrations
 

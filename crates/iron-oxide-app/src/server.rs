@@ -1,5 +1,6 @@
 //! The axum server: the Dioxus app (SSR, assets, server functions) plus custom routes.
 
+pub mod api;
 pub mod auth;
 pub mod config;
 pub mod db;

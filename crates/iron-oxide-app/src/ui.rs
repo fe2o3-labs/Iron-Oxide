@@ -6,7 +6,7 @@ use dioxus::CapturedError;
 use dioxus::fullstack::RequestError;
 use dioxus::prelude::*;
 
-use crate::api::server_time;
+use crate::api::time::server_time;
 use crate::pwa::PwaHead;
 
 /// Colour tokens shared by every screen (see docs/palette.md).

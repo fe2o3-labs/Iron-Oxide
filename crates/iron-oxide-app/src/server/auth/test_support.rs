@@ -29,6 +29,7 @@ use webauthn_rs_proto::{
 };
 
 use super::AuthState;
+use crate::auth::types::Me;
 use crate::server::{AppState, Config, router};
 
 pub const ORIGIN: &str = "http://localhost:8080";
@@ -97,9 +98,10 @@ impl TestApp {
     }
 }
 
-/// A server-function error as decoded from the response body.
-#[derive(Debug)]
-pub struct ApiError {
+/// A failed server-function call, as decoded from the response: the status and the `error`
+/// message of the body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallError {
     pub status: StatusCode,
     pub message: String,
 }
@@ -148,7 +150,7 @@ impl Browser {
         &mut self,
         path: &str,
         body: Value,
-    ) -> Result<T, ApiError> {
+    ) -> Result<T, CallError> {
         let request = self
             .request("POST", path)
             .header(header::CONTENT_TYPE, "application/json")
@@ -161,11 +163,18 @@ impl Browser {
             Ok(serde_json::from_slice(&bytes)
                 .unwrap_or_else(|e| panic!("{path}: {e}: {}", String::from_utf8_lossy(&bytes))))
         } else {
+            // Extractor rejections (`AuthUser`) send `{"error": message}`; errors returned by a
+            // server function body send the whole `ServerFnError` under `data`.
             let message = serde_json::from_slice::<Value>(&bytes)
                 .ok()
-                .and_then(|v| v["error"].as_str().map(str::to_owned))
+                .and_then(|v| {
+                    v["data"]["ServerError"]["message"]
+                        .as_str()
+                        .or_else(|| v["error"].as_str())
+                        .map(str::to_owned)
+                })
                 .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
-            Err(ApiError { status, message })
+            Err(CallError { status, message })
         }
     }
 
@@ -182,6 +191,28 @@ impl Browser {
             String::from_utf8_lossy(&bytes).into_owned(),
         )
     }
+}
+
+/// Signs up with a new passkey on `browser`, which is then signed in as the new user. Returns the
+/// account and the credential id.
+pub async fn sign_up(browser: &mut Browser, passkey: &mut Passkey, name: &str) -> (Me, Vec<u8>) {
+    let ccr: CreationChallengeResponse = browser
+        .call(
+            "/api/auth/passkey/sign-up/begin",
+            json!({ "display_name": name }),
+        )
+        .await
+        .unwrap();
+    let credential = passkey.register(ccr);
+    let credential_id = credential.raw_id.to_vec();
+    let me: Me = browser
+        .call(
+            "/api/auth/passkey/sign-up/finish",
+            json!({ "credential": credential }),
+        )
+        .await
+        .unwrap();
+    (me, credential_id)
 }
 
 /// A software passkey, adapted to discoverable credentials: `SoftPasskey` supports neither
