@@ -86,7 +86,8 @@ jobs:
           echo "Scanning commits: $range"
           "$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 --log-opts="--remerge-diff $range" .
 
-  # Rust jobs: they always run (no skip gate). A skipped required check counts as passing, so a gate
+  # Rust jobs: they always run (no skip gate). Each one runs a target of the Makefile, so that
+  # `make check` runs the same commands locally. A skipped required check counts as passing, so a gate
   # could let a PR merge without any Rust check.
 
   fmt:
@@ -98,7 +99,7 @@ jobs:
           persist-credentials: false
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: rustup toolchain install
-      - run: cargo fmt --all --check
+      - run: make fmt-check
 
   clippy:
     name: clippy
@@ -110,12 +111,9 @@ jobs:
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: clippy (no features)
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: clippy (app, server)
-        run: cargo clippy -p iron-oxide-app --all-targets --features server --locked -- -D warnings
-      - name: clippy (app, web on wasm32)
-        run: cargo clippy -p iron-oxide-app --target wasm32-unknown-unknown --features web --locked -- -D warnings
+      # No features; the app with `server`; the app with `web` on wasm32.
+      - name: clippy
+        run: make lint
 
   test:
     name: Unit tests
@@ -128,15 +126,13 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Tests that need Postgres are `#[ignore = "needs Postgres"]` and run in the integration job.
-      - name: Test the workspace (no features)
-        run: cargo test --workspace --locked
-      - name: Test the app with the server feature
-        run: cargo test -p iron-oxide-app --features server --locked
-      - name: Domain crate builds and tests with plain cargo
-        run: cargo test -p iron-oxide-domain --locked
-      # The service worker's caching rule, with the Node.js preinstalled on the runner (node:test).
-      - name: Service worker unit tests
-        run: node --test crates/iron-oxide-app/tests/sw/is_cacheable.test.mjs
+      # The workspace (no features), the app with the server feature, the domain crate with plain
+      # cargo, and the service worker's caching rule with the runner's Node.js (node:test).
+      - name: Unit tests
+        run: make test
+      # The Makefile's own guards (deploy, clean, check), in a scratch repository with stub tools.
+      - name: Makefile guard tests
+        run: make test-make
 
   # Builds the whole workspace with SQLX_OFFLINE=true (set globally above), so a query whose
   # `.sqlx/` metadata is missing or stale fails CI without needing a database.
@@ -150,9 +146,8 @@ jobs:
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo check --workspace --all-targets --locked
-      # The sqlx queries live behind the app's `server` feature.
-      - run: cargo check -p iron-oxide-app --all-targets --features server --locked
+      # The workspace, then the app with the `server` feature, where the sqlx queries live.
+      - run: make sqlx-check
 
   integration:
     name: Integration tests (Postgres)
@@ -174,7 +169,8 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide_test
+      # Given from outside, so `make test-db` uses this service instead of starting docker compose.
+      TEST_DATABASE_URL: postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide_test
       # Must match the `sqlx` version in Cargo.toml (held back on 0.8, see there).
       # renovate: datasource=crate depName=sqlx-cli
       SQLX_CLI_VERSION: 0.8.6
@@ -191,39 +187,12 @@ jobs:
             cargo install sqlx-cli --version "$SQLX_CLI_VERSION" --locked \
               --no-default-features --features postgres,rustls
           fi
-      - name: Apply the migrations
-        run: sqlx migrate run --source crates/iron-oxide-app/migrations
-      # Fails if `.sqlx/` is missing a query or holds a stale one: re-run `cargo sqlx prepare`.
-      - name: Check the committed sqlx query data
-        env:
-          SQLX_OFFLINE: "false"
-        run: cargo sqlx prepare --workspace --check -- --all-targets --features iron-oxide-app/server
-      # Each `sqlx::test` gets its own fresh database on this server.
-      - name: Run the tests that need Postgres
-        run: |
-          set -o pipefail
-          cargo test --workspace --locked -- --ignored
-          cargo test -p iron-oxide-app --features server --locked -- --ignored 2>&1 \
-            | tee "$RUNNER_TEMP/server-tests.log"
-          # Guard against Postgres tests silently not running (a renamed module, a filter, a
-          # feature flag). 1) Every `#[ignore = "needs Postgres"]` test in the app's src/ must
-          # appear as passed. 2) Every isolation and schema test must be among them: the schema
-          # tests by module, the repository isolation tests by naming convention.
-          expected=$(grep -rE '^\s*#\[ignore = "needs Postgres"\]' crates/iron-oxide-app/src | wc -l)
-          passed=$(grep -cE '^test server::\S+ \.\.\. ok$' "$RUNNER_TEMP/server-tests.log" || true)
-          echo "Postgres tests in src/: $expected, passed: $passed"
-          if [ "$expected" -lt 1 ] || [ "$passed" -ne "$expected" ]; then
-            echo "::error::$passed of $expected Postgres tests passed"; exit 1
-          fi
-          schema=$(grep -cE '^test server::db::schema_tests::\S+ \.\.\. ok$' "$RUNNER_TEMP/server-tests.log" || true)
-          isolation=$(grep -cE '^test server::db::\w+::tests::\w*(another_users|users_only|nobody_can|two_users|only_the_users)\w* \.\.\. ok$' "$RUNNER_TEMP/server-tests.log" || true)
-          # Server-function isolation tests (docs/api.md): `another_users_*` under server::api.
-          endpoint_isolation=$(grep -cE '^test server::api::\S+::another_users\w* \.\.\. ok$' "$RUNNER_TEMP/server-tests.log" || true)
-          echo "schema tests passed: $schema, isolation tests passed: $isolation, endpoint isolation tests passed: $endpoint_isolation"
-          # Floors: today's counts. Raise them when adding tests; lowering one needs a reason.
-          if [ "$schema" -lt 20 ] || [ "$isolation" -lt 9 ] || [ "$endpoint_isolation" -lt 1 ]; then
-            echo "::error::isolation or schema tests missing (schema $schema < 20, isolation $isolation < 9 or endpoint isolation $endpoint_isolation < 1)"; exit 1
-          fi
+      # Applies the migrations, checks the committed `.sqlx/` query data (fails if it is missing a
+      # query or holds a stale one: re-run `make sqlx-prepare`), then runs the tests that need
+      # Postgres (each `sqlx::test` gets its own fresh database on this server), and fails if any
+      # of them silently did not run (scripts/check-postgres-tests.sh).
+      - name: Postgres tests and sqlx query data
+        run: make test-db
 
   # Builds the release bundle exactly as the Dockerfile (#7) will, then runs the server and checks
   # the page, a server function round-trip, /healthz and /readyz over HTTP, and a graceful
@@ -269,70 +238,14 @@ jobs:
           grep " ${archive}\$" dx-x86_64-unknown-linux-gnu.sha256 | sha256sum --check --strict
           tar -xzf "$archive" -C "$HOME/.cargo/bin" dx
           dx --version
-      - name: dx bundle --web --release
-        run: dx bundle --web --release -p iron-oxide-app
-      - name: Smoke test the bundled server
-        run: |
-          bundle=target/dx/iron-oxide-app/release/web
-          ls -la "$bundle"
-          cd "$bundle"
-          # Sign-in settings as for local development (#5). The session key is random per run,
-          # never committed; the Google client is a placeholder (Google is never called here).
-          SESSION_KEY="$(openssl rand 64 | base64 -w0)"
-          export SESSION_KEY
-          IP=127.0.0.1 PORT=8080 APP_BASE_URL=http://localhost:8080 \
-            DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide \
-            WEBAUTHN_RP_ID=localhost WEBAUTHN_ORIGIN=http://localhost:8080 \
-            GOOGLE_CLIENT_ID=placeholder.apps.googleusercontent.com GOOGLE_CLIENT_SECRET=placeholder \
-            GOOGLE_REDIRECT_URL=http://localhost:8080/auth/google/callback \
-            ./server > "$RUNNER_TEMP/server.log" 2>&1 &
-          server_pid=$!
-          for _ in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
-            sleep 1
-          done
-          set -x
-          test "$(curl -sSf http://127.0.0.1:8080/healthz)" = "ok"
-          test "$(curl -sSf http://127.0.0.1:8080/readyz)" = "ok"
-          curl -sSf http://127.0.0.1:8080/ | grep -q "Iron Oxide"
-          curl -sSf http://127.0.0.1:8080/api/server-time | grep -Eq '^[0-9]+$'
-          # The wasm client that hydrates the page is served: the JS loader referenced by the page
-          # and every .wasm file of the bundle (with the MIME type browsers require).
-          js=$(curl -sSf http://127.0.0.1:8080/ | grep -oE 'src="[^"]*\.js"' | head -1 | cut -d'"' -f2)
-          test -n "$js"
-          curl -sSf -o /dev/null "http://127.0.0.1:8080${js}"
-          wasm_files=$(find public -name '*.wasm')
-          test -n "$wasm_files"
-          for f in $wasm_files; do
-            curl -sSf -o /dev/null -w '%{content_type}\n' "http://127.0.0.1:8080/${f#public/}" | grep -q '^application/wasm'
-          done
-          # PWA: the manifest and head tags are in the SSR page, and the static files are served at the root.
-          curl -sSf http://127.0.0.1:8080/ | grep -q '<link rel="manifest" href="/manifest.webmanifest"'
-          curl -sSf http://127.0.0.1:8080/ | grep -q 'navigator.serviceWorker.register(`/sw.js?build='
-          curl -sSf http://127.0.0.1:8080/manifest.webmanifest | grep -q '"short_name": "Fe2O3"'
-          curl -sSf 'http://127.0.0.1:8080/sw.js?build=ci' | grep -q 'CACHE_VERSION'
-          for icon in icons/icon-192.png icons/icon-512.png icons/icon-maskable-512.png icons/apple-touch-icon.png favicon.ico; do
-            curl -sSf -o /dev/null "http://127.0.0.1:8080/$icon"
-          done
-          # An unknown hashed asset is a 404, not the SSR page (the service worker must never cache HTML as JS/wasm).
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/assets/missing-dxh0.js)" = "404"
-          # The startup migrations ran.
-          test "$(PGPASSWORD=iron_oxide psql -h localhost -U iron_oxide -d iron_oxide -tAc "SELECT to_regclass('users')")" = "users"
-          test "$(PGPASSWORD=iron_oxide psql -h localhost -U iron_oxide -d iron_oxide -tAc "SELECT to_regclass('sessions')")" = "sessions"
-          # Sign-in (#5): signed out is 401; a cross-site POST is refused; a passkey sign-in
-          # starts (sets an HttpOnly, SameSite=Lax session cookie, not Secure on local http).
-          origin='Origin: http://localhost:8080'
-          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "$origin" -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8080/api/auth/me)" = "401"
-          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Origin: https://evil.example' -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8080/api/auth/sign-out)" = "403"
-          curl -sSf -D "$RUNNER_TEMP/headers" -X POST -H "$origin" -H 'Content-Type: application/json' -d '{}' \
-            http://127.0.0.1:8080/api/auth/passkey/sign-in/begin | grep -q '"challenge"'
-          grep -i '^set-cookie: iron_oxide_session=' "$RUNNER_TEMP/headers" | grep -i 'httponly' | grep -qi 'samesite=lax'
-          curl -sS http://127.0.0.1:8080/auth/google/callback | grep -q '"type":"error"'
-          # SIGTERM (Docker's stop signal, and what fly.toml sets) stops it cleanly with status 0.
-          # SIGINT (Fly's default) is handled the same way; the Postgres tests cover it.
-          kill -TERM "$server_pid"
-          wait "$server_pid"
-          grep -q "shut down" "$RUNNER_TEMP/server.log"
+      # `make smoke` builds the bundle (`make build`), then scripts/smoke-test.sh runs the server
+      # against this database, with local sign-in settings (a random session key per run, a
+      # placeholder Google client), and checks it over HTTP.
+      - name: dx bundle --web --release + smoke test
+        env:
+          SMOKE_DATABASE_URL: postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide
+          SMOKE_LOG: ${{ runner.temp }}/server.log
+        run: make smoke
       - name: Server log
         if: always()
         run: cat "$RUNNER_TEMP/server.log" || true

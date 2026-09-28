@@ -27,7 +27,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Build the production image
-        run: docker build --tag iron-oxide:ci .
+        run: make docker-build IMAGE=iron-oxide:ci
       - name: Image size
         run: docker image ls iron-oxide:ci
       - name: Exactly one client bundle in the image
