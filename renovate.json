@@ -1,0 +1,45 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":dependencyDashboard", "schedule:weekly"],
+  "timezone": "Europe/Paris",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true,
+    "schedule": ["* 0-3 * * 1"]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Versions pinned on the line after a `# renovate: datasource=… depName=…` comment (dx CLI, gitleaks) in CI, the README and the Dockerfile",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/",
+        "/(^|/)README\\.md$/",
+        "/(^|/)Dockerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: extractVersion=(?<extractVersion>\\S+))?\\s*\\n[^\\n]*?(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Group minor updates to limit PR noise. They wait for the maintainer.",
+      "matchUpdateTypes": ["minor"],
+      "groupName": "minor updates",
+      "groupSlug": "minor"
+    },
+    {
+      "description": "Group patch updates and automerge them once the required CI checks pass.",
+      "matchUpdateTypes": ["patch"],
+      "groupName": "patch updates",
+      "groupSlug": "patch",
+      "automerge": true
+    },
+    {
+      "description": "The dioxus crates and the dx CLI (dioxus-cli, pinned in CI, README and Dockerfile) must always move together, in one PR.",
+      "matchPackageNames": ["/^dioxus/"],
+      "groupName": "dioxus",
+      "groupSlug": "dioxus"
+    }
+  ]
+}
