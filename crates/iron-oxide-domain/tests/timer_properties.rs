@@ -36,8 +36,12 @@ fn op() -> impl Strategy<Value = Op> {
     ]
 }
 
-fn reload<T: serde::Serialize + serde::de::DeserializeOwned>(timer: &T) -> T {
-    serde_json::from_str(&serde_json::to_string(timer).unwrap()).unwrap()
+/// Serializes `timer` and reads it back, as a page reload would.
+fn reload<T: serde::Serialize + serde::de::DeserializeOwned>(
+    timer: &T,
+) -> Result<T, TestCaseError> {
+    let fail = |error: serde_json::Error| TestCaseError::fail(error.to_string());
+    serde_json::from_str(&serde_json::to_string(timer).map_err(fail)?).map_err(fail)
 }
 
 /// The alert level a rest reaches at `now`: 0 nothing, 1 warning, 2 finished.
@@ -106,7 +110,7 @@ proptest! {
                 }
                 Op::Step(delta) => now += delta,
                 Op::Reload => {
-                    let restored: RestTimer = reload(&timer);
+                    let restored: RestTimer = reload(&timer)?;
                     prop_assert_eq!(restored, timer);
                     timer = restored;
                 }
@@ -196,7 +200,7 @@ proptest! {
         let mut fired: Vec<TimerAlert> = Vec::new();
         for delta in deltas {
             now += delta;
-            hold = reload(&hold);
+            hold = reload(&hold)?;
             if let Some(alert) = hold.observe(at(now)) {
                 prop_assert!(!fired.contains(&alert));
                 prop_assert!(!fired.contains(&TimerAlert::Finished));
@@ -220,7 +224,7 @@ proptest! {
         let mut completed = 0_usize;
         for delta in deltas {
             now += delta;
-            timer = reload(&timer);
+            timer = reload(&timer)?;
             if let Some(event) = timer.observe(at(now)) {
                 let rank = match event {
                     IntervalEvent::WorkStarted { round } => {
@@ -247,7 +251,7 @@ proptest! {
         }
         // Liveness: once an observation reaches the end, the timer has completed, exactly once.
         let end = timer.ends_at();
-        timer = reload(&timer);
+        timer = reload(&timer)?;
         let completed_now = timer.observe(end) == Some(IntervalEvent::Completed);
         prop_assert_eq!(completed + usize::from(completed_now), 1);
     }
