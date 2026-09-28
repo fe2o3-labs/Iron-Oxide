@@ -7,7 +7,7 @@ use dioxus::prelude::ServerFnError;
 use dioxus::server::axum::{
     Json,
     body::{Body, to_bytes},
-    extract::Request,
+    extract::{FromRequestParts, Request},
     http::{StatusCode, header::CONTENT_LENGTH},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -24,6 +24,7 @@ use crate::api::programs::{
     BuiltinProgramView, ProgramDetail, ProgramView, UPLOAD_BODY_LIMIT, UploadOutcome, UploadTarget,
     VersionView,
 };
+use crate::server::auth::AuthUser;
 use crate::server::db::{
     active_program,
     error::Change,
@@ -174,13 +175,20 @@ fn too_large() -> ApiError {
     )))
 }
 
-/// Middleware of `upload_program`: reads the whole body before the server function does, and
-/// refuses it with `413` past [`UPLOAD_BODY_LIMIT`], announced (`Content-Length`) or actually sent.
+/// Middleware of `upload_program`: checks the session first, so a signed-out client gets its
+/// `401` without the server reading (up to [`UPLOAD_BODY_LIMIT`] of) its body. Then reads the whole
+/// body before the server function does, and refuses it with `413` past the limit, announced
+/// (`Content-Length`) or actually sent.
 ///
 /// Dioxus reads a server function's body itself and panics when that fails (axum's 2 MiB default
 /// limit, a broken connection), so the body it gets here is already complete and within the limit.
+/// The server function's own `AuthUser` looks the session up again; that is the price of refusing
+/// early.
 pub async fn limit_upload_body(request: Request, next: Next) -> Response {
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
+    if let Err(rejection) = AuthUser::from_request_parts(&mut parts, &()).await {
+        return rejection;
+    }
     let announced = parts
         .headers
         .get(CONTENT_LENGTH)

@@ -601,6 +601,22 @@ async fn every_function_needs_a_signed_in_user(db: PgPool) {
     ] {
         testing::assert_unauthorized_when_signed_out(&api, path, body).await;
     }
+    // Signed out, an upload is refused before its body is read: 401 even for a body that would
+    // be too large, announced by its Content-Length or not.
+    let big = upload_body(new_program(), &"x".repeat(UPLOAD_BODY_LIMIT)).to_string();
+    let mut browser = api.signed_out();
+    for announced in [true, false] {
+        let mut request = browser
+            .request("POST", UPLOAD)
+            .header(header::CONTENT_TYPE, "application/json");
+        if announced {
+            request = request.header(header::CONTENT_LENGTH, big.len());
+        }
+        let response = browser
+            .send(request.body(Body::from(big.clone())).unwrap())
+            .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{announced}");
+    }
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM programs WHERE user_id IS NOT NULL")
         .fetch_one(&api.db)
         .await
