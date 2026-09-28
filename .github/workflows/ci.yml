@@ -226,6 +226,16 @@ jobs:
           test "$(curl -sSf http://127.0.0.1:8080/healthz)" = "ok"
           curl -sSf http://127.0.0.1:8080/ | grep -q "Iron Oxide"
           curl -sSf http://127.0.0.1:8080/api/server-time | grep -Eq '^[0-9]+$'
+          # The wasm client that hydrates the page is served: the JS loader referenced by the page
+          # and every .wasm file of the bundle (with the MIME type browsers require).
+          js=$(curl -sSf http://127.0.0.1:8080/ | grep -oE 'src="[^"]*\.js"' | head -1 | cut -d'"' -f2)
+          test -n "$js"
+          curl -sSf -o /dev/null "http://127.0.0.1:8080${js}"
+          wasm_files=$(find public -name '*.wasm')
+          test -n "$wasm_files"
+          for f in $wasm_files; do
+            curl -sSf -o /dev/null -w '%{content_type}\n' "http://127.0.0.1:8080/${f#public/}" | grep -q '^application/wasm'
+          done
       - name: Server log
         if: always()
         run: cat "$RUNNER_TEMP/server.log" || true
