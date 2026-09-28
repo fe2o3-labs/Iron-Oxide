@@ -723,3 +723,42 @@ async fn one_ipv6_48_cannot_multiply_its_sign_in_limit() {
         );
     }
 }
+
+/// The second review's neighbour-lockout probe: one `/64` flooding must not spend its `/48`'s
+/// aggregate on requests its own limit refuses. Counts requests; the clock only moves on purpose.
+#[tokio::test(start_paused = true)]
+async fn a_flooding_64_does_not_lock_out_its_48_neighbours() {
+    let app = stub(RateLimiter::new(&config(
+        ClientIpSource::Peer,
+        Limits::default(),
+    )));
+    let attacker = "2001:db8:9:1::1";
+    let mut attacker_allowed = 0;
+    for _ in 0..150 {
+        if begin(&app, attacker, &[]).await == StatusCode::OK {
+            attacker_allowed += 1;
+        }
+    }
+    assert_eq!(attacker_allowed, 30, "its own /64 limit");
+    // The neighbours share the rest of the /48's burst: 120 - 30.
+    let mut neighbours_allowed = 0;
+    for net in 2..200_u16 {
+        let neighbour = format!("2001:db8:9:{net:x}::1");
+        if begin(&app, &neighbour, &[]).await == StatusCode::OK {
+            neighbours_allowed += 1;
+        }
+    }
+    assert_eq!(neighbours_allowed, 90);
+    // The attacker keeps sending 2 a second for 5 minutes; a neighbour tries every 10 s and
+    // always gets through, since the attacker only spends the /48 at its own /64's rate.
+    let neighbour = "2001:db8:9:ffff::1";
+    let mut neighbour_allowed = 0;
+    for step in 0..600_u32 {
+        tokio::time::advance(Duration::from_millis(500)).await;
+        begin(&app, attacker, &[]).await;
+        if step % 20 == 19 && begin(&app, neighbour, &[]).await == StatusCode::OK {
+            neighbour_allowed += 1;
+        }
+    }
+    assert_eq!(neighbour_allowed, 30);
+}

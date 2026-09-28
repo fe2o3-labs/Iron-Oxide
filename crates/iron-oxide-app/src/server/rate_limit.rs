@@ -148,7 +148,8 @@ pub fn classify(method: &Method, path: &str) -> Option<RouteGroup> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupLimits {
     pub per_ip: Option<Quota>,
-    /// An aggregate over each IPv6 `/48`, checked before `per_ip`: one site holds 65,536 `/64`s.
+    /// An aggregate over each IPv6 `/48`, spent together with `per_ip` (both or neither): one
+    /// site holds 65,536 `/64`s.
     pub per_ipv6_48: Option<Quota>,
     pub per_user: Option<Quota>,
     /// What a new key gets when a limiter's table is full of limited keys.
@@ -332,18 +333,16 @@ pub async fn per_ip(State(limiter): State<RateLimiter>, request: Request, next: 
         .map(|ConnectInfo(addr)| addr.ip());
     let key = ClientKey::of(client_ip(limiter.inner.client_ip, peer, request.headers()));
     let now = Instant::now();
-    // The `/48` first: a site over its aggregate adds no `/64` to the per-IP table, so one site
-    // cannot fill that table with limited keys and lock new clients out.
-    let checked = match (&limiters.per_ipv6_48, key.ipv6_site()) {
-        (Some(per_site), Some(site)) => per_site.check(site, now),
-        _ => Ok(()),
-    }
-    .and_then(|()| {
-        limiters
-            .per_ip
-            .as_ref()
-            .map_or(Ok(()), |per_ip| per_ip.check(key, now))
-    });
+    // Both or neither: a `/64` over its own limit spends nothing of its `/48` (so it cannot lock
+    // its neighbours out), and a `/48` over its aggregate adds no `/64` to the per-IP table.
+    let checked = match (&limiters.per_ipv6_48, &limiters.per_ip, key.ipv6_site()) {
+        (Some(per_site), Some(per_ip), Some(site)) => {
+            KeyedLimiter::check_both(per_site, site, per_ip, key, now)
+        }
+        (Some(per_site), None, Some(site)) => per_site.check(site, now),
+        (_, Some(per_ip), _) => per_ip.check(key, now),
+        (_, None, _) => Ok(()),
+    };
     match checked {
         Ok(()) => next.run(request).await,
         Err(limited) => too_many_requests(group, "ip", request.uri().path(), limited),

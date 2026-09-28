@@ -14,7 +14,8 @@
 //!
 //! The sweep scans the table, so it only runs when it can free something: while the table is
 //! full, the limiter remembers the earliest moment any stored key refills and does not sweep
-//! before it. A flood of new keys therefore cannot turn the sweep into a CPU sink.
+//! before it. A flood of new keys costs one hash lookup each; a full table costs at most one scan
+//! each time a stored key refills (which an attacker holding the table controls).
 
 use std::{
     collections::HashMap,
@@ -112,12 +113,26 @@ pub struct KeyedLimiter<K> {
     table: Mutex<Table<K>>,
 }
 
+/// The table-full warning is logged at most this often per limiter.
+const WARN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// What an allowed request does to the table.
+#[derive(Debug, Clone, Copy)]
+enum Decision {
+    /// Store the key's new TAT.
+    Store(Instant),
+    /// Nothing: the table is full and the limiter fails open.
+    Untracked,
+}
+
 #[derive(Debug)]
 struct Table<K> {
     tats: HashMap<K, Instant>,
     /// Set while the table is full of keys that have not refilled: the earliest TAT among them.
     /// Stored TATs only grow and nothing is inserted while full, so no key refills before it.
     full_until: Option<Instant>,
+    /// When the table-full warning was last logged.
+    last_warned: Option<Instant>,
 }
 
 impl<K: Hash + Eq + Copy> KeyedLimiter<K> {
@@ -131,6 +146,7 @@ impl<K: Hash + Eq + Copy> KeyedLimiter<K> {
             table: Mutex::new(Table {
                 tats: HashMap::new(),
                 full_until: None,
+                last_warned: None,
             }),
         }
     }
@@ -151,8 +167,36 @@ impl<K: Hash + Eq + Copy> KeyedLimiter<K> {
 
     /// Counts one request from `key` at `now`.
     pub fn check(&self, key: K, now: Instant) -> Result<(), Limited> {
-        let quota = self.quota;
         let mut table = self.lock();
+        let decision = self.decide(&mut table, key, now)?;
+        Self::commit(&mut table, key, decision);
+        Ok(())
+    }
+
+    /// Counts one request against two limiters (a coarse key in `outer`, a fine one in `inner`),
+    /// only if both allow it: a request one of them refuses spends nothing in the other. Locks
+    /// `outer` then `inner`; callers always pass the same limiter as `outer` for a given `inner`.
+    pub fn check_both(
+        outer: &Self,
+        outer_key: K,
+        inner: &Self,
+        inner_key: K,
+        now: Instant,
+    ) -> Result<(), Limited> {
+        let mut outer_table = outer.lock();
+        let mut inner_table = inner.lock();
+        // The fine key first: a client over its own limit must not spend the shared one.
+        let inner_decision = inner.decide(&mut inner_table, inner_key, now)?;
+        let outer_decision = outer.decide(&mut outer_table, outer_key, now)?;
+        Self::commit(&mut outer_table, outer_key, outer_decision);
+        Self::commit(&mut inner_table, inner_key, inner_decision);
+        Ok(())
+    }
+
+    /// Whether `key` may make a request at `now`, without counting it. It may drop refilled keys
+    /// (which changes nothing).
+    fn decide(&self, table: &mut Table<K>, key: K, now: Instant) -> Result<Decision, Limited> {
+        let quota = self.quota;
         let stored = table.tats.get(&key).copied();
         let tat = stored.unwrap_or(now).max(now);
         let next = tat + quota.period;
@@ -164,40 +208,63 @@ impl<K: Hash + Eq + Copy> KeyedLimiter<K> {
         }
         if stored.is_none()
             && table.tats.len() >= self.capacity
-            && let Some(full_until) = self.make_room(&mut table, now)
+            && let Some(full_until) = self.make_room(table, now)
         {
             return match self.when_full {
                 WhenFull::Refuse => Err(Limited {
                     retry_after: full_until.saturating_duration_since(now),
                 }),
-                WhenFull::Allow => Ok(()),
+                WhenFull::Allow => Ok(Decision::Untracked),
             };
         }
-        table.tats.insert(key, next);
-        Ok(())
+        Ok(Decision::Store(next))
+    }
+
+    fn commit(table: &mut Table<K>, key: K, decision: Decision) {
+        if let Decision::Store(next) = decision {
+            table.tats.insert(key, next);
+        }
     }
 
     /// Drops the keys whose bucket has refilled. Returns `None` if there is room now, else the
-    /// earliest moment a stored key refills.
+    /// earliest moment a stored key refills. One scan of the table at most, and none before
+    /// `full_until`.
     fn make_room(&self, table: &mut Table<K>, now: Instant) -> Option<Instant> {
         if let Some(full_until) = table.full_until
             && now < full_until
         {
             return Some(full_until);
         }
-        // Full buckets carry no state.
-        table.tats.retain(|_, tat| *tat > now);
+        // Full buckets carry no state. The earliest TAT kept is found in the same pass.
+        let mut earliest: Option<Instant> = None;
+        table.tats.retain(|_, tat| {
+            let keep = *tat > now;
+            if keep && earliest.is_none_or(|e| *tat < e) {
+                earliest = Some(*tat);
+            }
+            keep
+        });
+        let earliest = earliest.unwrap_or(now);
         if table.tats.len() < self.capacity {
-            table.full_until = None;
+            // Full again once the caller inserts its key (TAT `now + period`): no key refills
+            // before then, so the next new key need not scan. Only read while the table is full.
+            let next_refill = earliest.min(now + self.quota.period);
+            table.full_until = (table.tats.len() + 1 >= self.capacity).then_some(next_refill);
             return None;
         }
-        let earliest = table.tats.values().min().copied().unwrap_or(now);
         table.full_until = Some(earliest);
-        dioxus::logger::tracing::warn!(
-            capacity = self.capacity,
-            policy = ?self.when_full,
-            "rate limiter table full of limited keys: new keys are refused or let through untracked"
-        );
+        if table
+            .last_warned
+            .is_none_or(|at| now.saturating_duration_since(at) >= WARN_INTERVAL)
+        {
+            table.last_warned = Some(now);
+            dioxus::logger::tracing::warn!(
+                capacity = self.capacity,
+                policy = ?self.when_full,
+                "rate limiter table full of limited keys: new keys are refused or let through \
+                 untracked"
+            );
+        }
         Some(earliest)
     }
 
@@ -388,6 +455,24 @@ mod tests {
         for key in 0..4_u32 {
             assert!(limiter.check(key, now).is_err(), "key {key} stays limited");
         }
+    }
+
+    #[test]
+    fn check_both_spends_in_both_or_neither() {
+        let outer = KeyedLimiter::new(quota(3, 60 * SEC), 10, WhenFull::Refuse);
+        let inner = KeyedLimiter::new(quota(1, 60 * SEC), 10, WhenFull::Refuse);
+        let now = Instant::now();
+        assert_eq!(KeyedLimiter::check_both(&outer, 0, &inner, 1, now), Ok(()));
+        // Inner key 1 is limited: refused, and the outer key keeps its 2 remaining requests.
+        for _ in 0..10 {
+            assert!(KeyedLimiter::check_both(&outer, 0, &inner, 1, now).is_err());
+        }
+        assert_eq!(KeyedLimiter::check_both(&outer, 0, &inner, 2, now), Ok(()));
+        assert_eq!(KeyedLimiter::check_both(&outer, 0, &inner, 3, now), Ok(()));
+        // The outer key is limited now: refused, and inner key 4 is not stored.
+        assert!(KeyedLimiter::check_both(&outer, 0, &inner, 4, now).is_err());
+        assert_eq!(inner.len(), 3);
+        assert_eq!(inner.check(4, now), Ok(()), "key 4's burst is intact");
     }
 
     #[test]
