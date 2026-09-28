@@ -243,6 +243,43 @@ cargo test -p iron-oxide-app --features server -- --ignored
 `clippy::unwrap_used`, `clippy::expect_used` and `clippy::panic` are denied workspace-wide, but
 allowed in tests (`clippy.toml`).
 
+## PWA
+
+The app is an installable Progressive Web App.
+
+| Path (in `crates/iron-oxide-app`) | What |
+|---|---|
+| `public/manifest.webmanifest` | Web app manifest, served at `/manifest.webmanifest` |
+| `public/sw.js` | Service worker, served at `/sw.js` so that its scope is the whole app |
+| `public/icons/`, `public/favicon.ico` | Generated icons (192, 512, maskable 512, apple-touch 180, favicon) |
+| `icons/` | SVG sources for the icons, plus `render.sh` to regenerate them (needs `rsvg-convert` and ImageMagick) |
+| `assets/tokens.css` | Colour tokens (`--io-*`), documented in [docs/palette.md](docs/palette.md) |
+| `src/pwa.rs` | Manifest link, icons and iOS meta tags in `<head>`, plus service worker registration |
+
+`dx` copies `public/` unchanged to the root of the site. The service worker is only registered in
+release builds, because `dx serve` rebuilds constantly and serves an unhashed `/wasm/` folder. To test
+the PWA locally, run the release bundle (see below) and open http://127.0.0.1:8080. Chrome and
+Safari treat `localhost`/`127.0.0.1` as a secure context, so no HTTPS is needed.
+
+The page registers the worker as `/sw.js?build=<id>`, where the id is derived from the hashed asset
+URLs. Every deploy that changes the wasm, JS or CSS therefore installs a fresh worker with its own
+cache, and the old cache is deleted. Bump `CACHE_VERSION` in `sw.js` when only `sw.js` or an
+unhashed file in `public/` (icons, manifest) changes. What the service worker caches:
+
+- Hashed files under `/assets/` (wasm, JS, CSS): cache-first. They never change for a given URL.
+- The icons and the manifest are precached at install, and so is an anonymous render of `/`,
+  fetched without cookies.
+- Page navigations: network-first. When offline, the cached shell is served instead. Navigation
+  responses are never cached.
+- Anything that is not a same-origin `GET`, and everything under `/api/` or `/auth/`: network-only,
+  never cached.
+- Only complete, direct responses with a non-HTML `Content-Type` are cached (status 200, not
+  redirected; a missing `Content-Type` is not cached). `Range` requests go straight to the network.
+  Unit tests: `node --test crates/iron-oxide-app/tests/sw/is_cacheable.test.mjs`.
+
+The server answers `404` (with `Cache-Control: no-store`) for unknown `/assets/…` paths
+(`src/pwa/missing_assets.rs`) instead of the SSR page that Dioxus serves for every other unknown path.
+
 To try the app on the iOS Simulator, the Android Emulator or a real phone, see [docs/dev/mobile-testing.md](docs/dev/mobile-testing.md).
 
 ## Release build
