@@ -74,11 +74,11 @@ impl TryFrom<SetRow> for LoggedSet {
 ///
 /// Returns [`Change::Applied`] when the set was saved and [`Change::Unchanged`] when the user
 /// already has this exact set (even if the session has ended since, so a queued retry succeeds).
-/// Another user's row is never read back, compared or modified.
+/// Ids are unique per user: another user's set with the same id is a different row, never read,
+/// compared or modified.
 ///
 /// # Errors
-/// - [`RepoError::Conflict`] when the id is already used by a different set, or by a set the user
-///   cannot see.
+/// - [`RepoError::Conflict`] when the user already has a different set with this id.
 /// - [`RepoError::NotFound`] when the session is not one of the user's.
 /// - [`RepoError::SessionEnded`] when the set is new and the session has ended.
 /// - [`RepoError::Invalid`] for an exercise id that is not a slug or a weight above 2000 kg.
@@ -97,8 +97,8 @@ pub async fn upsert_idempotent(
         .transpose()?;
     let duration_s = set.duration_s.map(i64::from);
 
-    // Inserts only into a session of this user that is still in progress. A taken id (whoever
-    // owns it) inserts nothing.
+    // Inserts only into a session of this user that is still in progress. Ids are unique per user
+    // (primary key `(user_id, id)`), so only this user's own set with this id inserts nothing.
     let inserted = sqlx::query!(
         "INSERT INTO workout_sets
              (id, session_id, user_id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,
@@ -106,7 +106,7 @@ pub async fn upsert_idempotent(
          SELECT $1, s.id, s.user_id, $4, $5, $6, $7, $8, $9, $10
          FROM workout_sessions s
          WHERE s.id = $2 AND s.user_id = $3 AND s.status = 'in_progress'
-         ON CONFLICT (id) DO NOTHING",
+         ON CONFLICT (user_id, id) DO NOTHING",
         set.id.as_uuid(),
         set.session_id.as_uuid(),
         user.as_uuid(),
@@ -125,7 +125,8 @@ pub async fn upsert_idempotent(
         return Ok(Change::Applied);
     }
 
-    // Nothing inserted: the id is taken, or the session is not an in-progress one of this user.
+    // Nothing inserted: this user already has a set with this id, or the session is not an
+    // in-progress one of this user.
     // Only this user's own set is compared.
     let same = sqlx::query_scalar!(
         r#"SELECT (session_id = $3 AND exercise_id = $4 AND set_index = $5 AND reps = $6
@@ -151,7 +152,7 @@ pub async fn upsert_idempotent(
         None => {}
     }
 
-    // Not this user's set. Why the insert did nothing depends only on this user's session.
+    // The user has no set with this id, so the session is why nothing was inserted.
     let status = sqlx::query_scalar!(
         "SELECT status FROM workout_sessions WHERE id = $1 AND user_id = $2",
         set.session_id.as_uuid(),
@@ -161,7 +162,7 @@ pub async fn upsert_idempotent(
     .await?;
     match status.as_deref() {
         None => Err(RepoError::NotFound),
-        // The session accepts sets, so the id must belong to a set this user cannot see.
+        // Only reachable if the session changed between the two statements: ask for a retry.
         Some("in_progress") => Err(RepoError::Conflict),
         Some(_) => Err(RepoError::SessionEnded),
     }
@@ -475,21 +476,28 @@ mod tests {
             );
         }
         assert_err(upsert_idempotent(&pool, b, &set_a).await, "not found");
-        // Reusing A's set id in B's own session: rejected, and A's set is not returned or compared
-        // (identical or not, the answer is the same).
+        // A's set id in B's own session: B's own, independent set. Retries and conflicts are
+        // judged against B's row only.
         let reused = LoggedSet {
             session_id: session_b,
             ..set_a.clone()
         };
-        assert_err(upsert_idempotent(&pool, b, &reused).await, "conflict");
-        let reused = LoggedSet { reps: 1, ..reused };
-        assert_err(upsert_idempotent(&pool, b, &reused).await, "conflict");
-
-        assert!(
-            list_for_session(&pool, b, session_b)
-                .await
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            upsert_idempotent(&pool, b, &reused).await.unwrap(),
+            Change::Applied
+        );
+        assert_eq!(
+            upsert_idempotent(&pool, b, &reused).await.unwrap(),
+            Change::Unchanged
+        );
+        let changed = LoggedSet {
+            reps: 1,
+            ..reused.clone()
+        };
+        assert_err(upsert_idempotent(&pool, b, &changed).await, "conflict");
+        assert_eq!(
+            list_for_session(&pool, b, session_b).await.unwrap(),
+            vec![reused]
         );
         assert_eq!(
             list_for_session(&pool, a, session_a).await.unwrap(),
@@ -576,6 +584,135 @@ mod tests {
                     .await
                     .unwrap()
                     .is_empty()
+            );
+        }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn two_users_can_use_the_same_ids_independently(pool: PgPool) {
+        let (a, b) = testing::users_a_and_b(&pool).await;
+        let (_, version_a) = testing::program(&pool, a).await;
+        let (_, version_b) = testing::program(&pool, b).await;
+        let session_id = SessionId::from_uuid(random_uuid());
+        let set_id = SetId::from_uuid(random_uuid());
+        let mut logged = Vec::new();
+        for (user, version, reps) in [(a, version_a, 5), (b, version_b, 8)] {
+            let session = sessions::NewSession {
+                id: session_id,
+                ..new_session(version)
+            };
+            assert_eq!(
+                sessions::start(&pool, user, &session).await.unwrap(),
+                Change::Applied
+            );
+            let set = LoggedSet {
+                id: set_id,
+                reps,
+                ..new_set(session_id)
+            };
+            assert_eq!(
+                upsert_idempotent(&pool, user, &set).await.unwrap(),
+                Change::Applied
+            );
+            logged.push(set);
+        }
+        // Each user sees exactly their own rows, and ending one session leaves the other open.
+        sessions::finish(&pool, a, session_id, SessionOutcome::Completed, at(120))
+            .await
+            .unwrap();
+        for (user, set, status) in [
+            (a, &logged[0], sessions::SessionStatus::Completed),
+            (b, &logged[1], sessions::SessionStatus::InProgress),
+        ] {
+            assert_eq!(
+                list_for_session(&pool, user, session_id).await.unwrap(),
+                vec![set.clone()]
+            );
+            assert_eq!(
+                sessions::get(&pool, user, session_id).await.unwrap().status,
+                status
+            );
+        }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn errors_never_contain_ids(pool: PgPool) {
+        let (a, b) = testing::users_a_and_b(&pool).await;
+        let (program_a, version_a) = testing::program(&pool, a).await;
+        let session_a = testing::session(&pool, a).await;
+        let set_a = testing::set(&pool, a, session_a).await;
+        let session_b = testing::session(&pool, b).await;
+        let set_b = testing::set(&pool, b, session_b).await;
+        sessions::finish(&pool, b, session_b, SessionOutcome::Completed, at(120))
+            .await
+            .unwrap();
+
+        let errors: Vec<RepoError> = vec![
+            // Not found: A's ids used by B.
+            upsert_idempotent(&pool, b, &set_a).await.unwrap_err(),
+            list_for_session(&pool, b, session_a).await.unwrap_err(),
+            sessions::get(&pool, b, session_a).await.unwrap_err(),
+            sessions::start(&pool, b, &new_session(version_a))
+                .await
+                .unwrap_err(),
+            programs::get(&pool, b, program_a).await.unwrap_err(),
+            // Conflict, session ended and invalid value: B's own rows.
+            upsert_idempotent(
+                &pool,
+                b,
+                &LoggedSet {
+                    reps: 1,
+                    ..set_b.clone()
+                },
+            )
+            .await
+            .unwrap_err(),
+            upsert_idempotent(&pool, b, &new_set(session_b))
+                .await
+                .unwrap_err(),
+            sessions::start(
+                &pool,
+                b,
+                &sessions::NewSession {
+                    day_id: "Bad Day".to_owned(),
+                    ..new_session(testing::program(&pool, b).await.1)
+                },
+            )
+            .await
+            .unwrap_err(),
+        ];
+        let ids = [
+            a.as_uuid(),
+            b.as_uuid(),
+            program_a.as_uuid(),
+            version_a.as_uuid(),
+            session_a.as_uuid(),
+            session_b.as_uuid(),
+            set_a.id.as_uuid(),
+            set_b.id.as_uuid(),
+        ];
+        for error in &errors {
+            let text = format!("{error} {error:?}");
+            for id in ids {
+                for form in [id.to_string(), id.simple().to_string()] {
+                    assert!(!text.contains(&form), "{text} contains {form}");
+                }
+            }
+        }
+        for expected in ["not found", "conflict", "ended", "invalid"] {
+            assert!(
+                errors.iter().any(|error| {
+                    matches!(
+                        (error, expected),
+                        (RepoError::NotFound, "not found")
+                            | (RepoError::Conflict, "conflict")
+                            | (RepoError::SessionEnded, "ended")
+                            | (RepoError::Invalid { .. }, "invalid")
+                    )
+                }),
+                "{expected}: {errors:?}"
             );
         }
     }

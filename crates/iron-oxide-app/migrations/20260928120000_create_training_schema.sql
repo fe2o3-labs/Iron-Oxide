@@ -160,10 +160,12 @@ CREATE TRIGGER active_program_owner BEFORE UPDATE OF user_id ON active_program
     FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
 
 -- ---------------------------------------------------------------------------------------------
--- Workout sessions and sets. Ids are generated on the client (idempotent retries, #54).
+-- Workout sessions and sets. Ids are generated on the client (idempotent retries, #54), so they
+-- are only unique per user: the primary key is (user_id, id). Another user's id is then exactly
+-- like a free one (no "taken" signal), and two users may use the same UUID independently.
 
 CREATE TABLE workout_sessions (
-    id                 uuid        PRIMARY KEY,
+    id                 uuid        NOT NULL,
     user_id            uuid        NOT NULL REFERENCES users ON DELETE CASCADE,
     program_version_id uuid        NOT NULL,
     day_id             text        NOT NULL CHECK (is_slug(day_id)),
@@ -174,7 +176,7 @@ CREATE TABLE workout_sessions (
     CONSTRAINT workout_sessions_finished_iff_ended
         CHECK ((status = 'in_progress') = (finished_at IS NULL)),
     CONSTRAINT workout_sessions_finished_after_start CHECK (finished_at >= started_at),
-    CONSTRAINT workout_sessions_id_user_id_key UNIQUE (id, user_id),
+    CONSTRAINT workout_sessions_pkey PRIMARY KEY (user_id, id),
     -- Only one of the user's own program versions (never a built-in's, never another user's).
     -- NO ACTION (checked at the end of the statement), not RESTRICT, so deleting a user can
     -- cascade to both this table and program_versions in one statement.
@@ -189,7 +191,7 @@ CREATE TRIGGER workout_sessions_owner BEFORE UPDATE OF user_id ON workout_sessio
     FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
 
 CREATE TABLE workout_sets (
-    id           uuid        PRIMARY KEY,
+    id           uuid        NOT NULL,
     session_id   uuid        NOT NULL,
     user_id      uuid        NOT NULL REFERENCES users ON DELETE CASCADE,
     exercise_id  text        NOT NULL CHECK (is_slug(exercise_id)),
@@ -199,15 +201,16 @@ CREATE TABLE workout_sets (
     duration_s   bigint      CHECK (duration_s BETWEEN 0 AND 4294967295),
     warmup       boolean     NOT NULL,
     completed_at timestamptz NOT NULL,
+    CONSTRAINT workout_sets_pkey PRIMARY KEY (user_id, id),
     -- A set belongs to one of its owner's sessions, never another user's.
-    CONSTRAINT workout_sets_session_owner_fkey FOREIGN KEY (session_id, user_id)
-        REFERENCES workout_sessions (id, user_id) ON DELETE CASCADE
+    CONSTRAINT workout_sets_session_owner_fkey FOREIGN KEY (user_id, session_id)
+        REFERENCES workout_sessions (user_id, id) ON DELETE CASCADE
 );
 
 -- Serves the per-exercise history: progression input after a training max's `set_at` (#57) and
 -- the exercise charts (#20).
 CREATE INDEX workout_sets_user_id_idx ON workout_sets (user_id, exercise_id, completed_at);
-CREATE INDEX workout_sets_session_id_idx ON workout_sets (session_id, completed_at);
+CREATE INDEX workout_sets_session_id_idx ON workout_sets (user_id, session_id, completed_at);
 
 CREATE TRIGGER workout_sets_owner BEFORE UPDATE OF user_id ON workout_sets
     FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();

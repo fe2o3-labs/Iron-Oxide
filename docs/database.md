@@ -22,7 +22,7 @@ erDiagram
     users ||--o{ workout_sessions : "logs"
     program_versions ||--o{ workout_sessions : "(program_version_id, user_id)"
     users ||--o{ workout_sets : "logs"
-    workout_sessions ||--o{ workout_sets : "(session_id, user_id)"
+    workout_sessions ||--o{ workout_sets : "(user_id, session_id)"
 
     users {
         uuid id PK
@@ -67,8 +67,8 @@ erDiagram
         timestamptz updated_at
     }
     workout_sessions {
-        uuid id PK "client-generated"
-        uuid user_id FK
+        uuid user_id PK "FK users"
+        uuid id PK "client-generated, unique per user"
         uuid program_version_id "FK (program_version_id, user_id)"
         text day_id "slug"
         text status "in_progress | completed | skipped | abandoned"
@@ -76,9 +76,9 @@ erDiagram
         timestamptz finished_at "set iff ended"
     }
     workout_sets {
-        uuid id PK "client-generated"
-        uuid session_id "FK (session_id, user_id)"
-        uuid user_id FK
+        uuid user_id PK "FK users"
+        uuid id PK "client-generated, unique per user"
+        uuid session_id "FK (user_id, session_id)"
         text exercise_id "slug"
         integer set_index "0-65535"
         integer reps "0-65535"
@@ -102,8 +102,8 @@ with the sign-in `sessions` table.
 | `programs` | A program's header | `user_id` is NULL only for built-ins (`CHECK (user_id IS NOT NULL OR source_builtin_id IS NOT NULL)`); one row per built-in id (partial unique index). A copy of a built-in keeps its `source_builtin_id`. Programs are archived, not deleted, so old sessions stay linked. |
 | `program_versions` | Immutable program documents | `version` is 1, 2, ... per program. A trigger rejects every `UPDATE`; there is no update path in the repository. Rows are only deleted by cascade (program or user deleted). |
 | `active_program` | The program a user trains with | Composite FK to `programs (id, user_id)`: only one of the user's own programs (never a built-in; copy it first). |
-| `workout_sessions` | A training session | Client-generated id. `finished_at` is set exactly when the status is not `in_progress`, and not before `started_at`. |
-| `workout_sets` | A logged set | Client-generated id, the idempotency key. |
+| `workout_sessions` | A training session | Client-generated id, primary key `(user_id, id)`. `finished_at` is set exactly when the status is not `in_progress`, and not before `started_at`. |
+| `workout_sets` | A logged set | Client-generated id, the idempotency key; primary key `(user_id, id)`. |
 
 ### Mapping to the domain types
 
@@ -130,9 +130,15 @@ types mirror them field for field, and switch to them once they are merged.
 1. **Every user-owned table has `user_id uuid NOT NULL REFERENCES users ON DELETE CASCADE`** and an
    index that starts with `user_id`. (`programs` and `program_versions` allow NULL, for built-ins
    only.) Deleting a user deletes all their rows in one statement.
-2. **Composite foreign keys that include `user_id`**: a row that points at another user-owned row
+2. **Client-generated ids are unique per user**: `workout_sessions` and `workout_sets` have the
+   primary key `(user_id, id)`. Another user's id is exactly like a free one: no error, no
+   "taken" signal, and two users may use the same UUID independently. Every unique key of a
+   user-owned table includes `user_id`, except a short allowlist of keys over server-generated
+   values (`programs`/`program_versions` ids from `gen_random_uuid()`, built-in ids, version
+   numbers).
+3. **Composite foreign keys that include `user_id`**: a row that points at another user-owned row
    must have the same owner.
-   - `workout_sets (session_id, user_id)` → `workout_sessions (id, user_id)`
+   - `workout_sets (user_id, session_id)` → `workout_sessions (user_id, id)`
    - `workout_sessions (program_version_id, user_id)` → `program_versions (id, user_id)`
    - `active_program (program_id, user_id)` → `programs (id, user_id)`
    - `program_versions (program_id, user_id)` → `programs (id, user_id)`
@@ -140,12 +146,12 @@ types mirror them field for field, and switch to them once they are merged.
    So a set cannot be attached to another user's session, a session cannot be run from another
    user's (or a built-in's) program version, and another user's program cannot be made active,
    whatever the application sends.
-3. **Owners never change**: a trigger rejects any update of `user_id` in every user-owned table.
-4. **Program versions take their owner from their program**: a trigger sets
+4. **Owners never change**: a trigger rejects any update of `user_id` in every user-owned table.
+5. **Program versions take their owner from their program**: a trigger sets
    `program_versions.user_id` from `programs.user_id`, ignoring what the caller wrote. This also
    covers built-ins, where the composite key alone would not be checked (a NULL column skips a
    `MATCH SIMPLE` foreign key).
-5. **Domain invariants as `CHECK`s**: weight, reps, duration and index ranges, slugs, session
+6. **Domain invariants as `CHECK`s**: weight, reps, duration and index ranges, slugs, session
    status, `finished_at` iff ended and not before the start, JSON shapes.
 
 `sessions → program_versions` is `NO ACTION` (checked at the end of the statement), not
@@ -163,14 +169,12 @@ types mirror them field for field, and switch to them once they are merged.
   "not one of yours") also map to `NotFound`. Error messages never include ids, values or
   database error text.
 - **Idempotent writes on client ids** (`sessions::start`, `sets::upsert_idempotent`):
-  `INSERT ... ON CONFLICT DO NOTHING` (no conflict target for sessions, whose id is in two unique
-  indexes, so a concurrent duplicate is skipped rather than raised), then, if nothing was inserted, compare with the
-  caller's own row only (`WHERE id = $id AND user_id = $user`):
+  `INSERT ... ON CONFLICT (user_id, id) DO NOTHING`, then, if nothing was inserted, compare with
+  the caller's own row (`WHERE id = $id AND user_id = $user`):
   - same id and same content: `Change::Unchanged` (one row, safe under concurrent retries);
   - same id and different content: `RepoError::Conflict`;
-  - an id taken by another user: `RepoError::Conflict` as well. The other row is never read back,
-    compared or modified. A client id is a random v4 UUID, so only someone who already has the id
-    can learn that it is taken, and they learn nothing else.
+  - an id another user also uses: irrelevant, the write is the caller's own and succeeds. The
+    other row is never read, compared or modified.
 - **Typed ids** (`UserId`, `ProgramId`, `ProgramVersionId`, `SessionId`, `SetId`) so ids of
   different kinds cannot be swapped. They will be replaced by the domain ids of #48.
 - Queries use the compile-time checked `sqlx::query!` / `query_as!` macros; the metadata is in
@@ -216,9 +220,10 @@ DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
 - **Isolation, per repository function**: B cannot read, update or delete A's rows, and using A's
   real id gives the same error as a random id (`another_users_*_are_invisible_and_untouchable`,
   `users_only_see_and_change_their_own_*`, `nobody_can_change_a_builtin_through_the_repository`).
-- **Idempotency**: same id and content is one row, different content is a conflict, another user's
-  id is rejected without revealing its content, and concurrent duplicates (sets, sessions,
-  version uploads) produce one row or consecutive version numbers.
+- **Idempotency**: same id and content is one row, different content is a conflict, two users
+  using the same session and set ids both succeed independently, errors never contain ids, and
+  concurrent duplicates (sets, sessions, version uploads) produce one row or consecutive version
+  numbers.
 - **Schema, with raw SQL that bypasses the repository** (`schema_tests.rs`): the composite keys,
   the owner and immutability triggers, every `CHECK`, and:
   - every `user_id` column in `public` has a cascading foreign key to `users` and an index that
@@ -230,7 +235,9 @@ DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
     `_sqlx_migrations`);
   - deleting a user empties every table listed by `information_schema` that has a `user_id`
     column, and keeps the other user's rows. `populate` must write to each such table first, so a
-    new table fails this test until it is covered.
+    new table fails this test until it is covered;
+  - every unique key (primary keys included) of a table with a `user_id` column includes
+    `user_id`, or is on the `UNIQUE_KEYS_WITHOUT_OWNER` allowlist with a reason.
 
 Not here yet: a test-only way to sign in as a user, and isolation tests at the server-function
 level (including the GDPR export). They come with `AuthUser` (#5) and the server functions
@@ -243,8 +250,10 @@ appear as passed in its log.
 
 1. `user_id uuid NOT NULL REFERENCES users ON DELETE CASCADE`, an index starting with `user_id`, and
    the `forbid_owner_change` trigger.
-2. References to other user-owned rows as composite foreign keys including `user_id` (add a
+2. Client-generated ids in a `(user_id, id)` primary key; every other unique key including
+   `user_id` too (or allowlisted in `schema_tests.rs` with a reason).
+3. References to other user-owned rows as composite foreign keys including `user_id` (add a
    `UNIQUE (id, user_id)` on the target if needed).
-3. Repository functions that take a `UserId` and filter every statement by it, returning
+4. Repository functions that take a `UserId` and filter every statement by it, returning
    `NotFound` for rows that are not the caller's.
-4. Add a row to it in `testing::populate`, and isolation tests for each new function.
+5. Add a row to it in `testing::populate`, and isolation tests for each new function.

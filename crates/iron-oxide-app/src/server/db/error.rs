@@ -13,8 +13,8 @@ pub enum RepoError {
     /// No such row among the caller's own rows (it may not exist, or belong to someone else).
     #[error("not found")]
     NotFound,
-    /// The id is already used with different content (a retried write that is not a retry), or,
-    /// for client-generated ids, by a row the caller cannot see.
+    /// The caller already has a row with this id and different content (a "retry" that is not
+    /// one).
     #[error("conflicts with data that is already saved")]
     Conflict,
     /// The session has ended: no new set can be added to it.

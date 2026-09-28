@@ -139,18 +139,17 @@ impl WorkoutSession {
 /// already has this session with the same version, day and start time (whatever its status).
 ///
 /// # Errors
-/// - [`RepoError::Conflict`] when the id is already used with other values, or by a session the
-///   user cannot see.
+/// - [`RepoError::Conflict`] when the user already has a session with this id and other values.
+///   Another user's sessions play no part: ids are only unique per user.
 /// - [`RepoError::NotFound`] when the program version is not one of the user's.
 /// - [`RepoError::Invalid`] for a day id that is not a slug.
 pub async fn start(pool: &PgPool, user: UserId, session: &NewSession) -> Result<Change, RepoError> {
-    // No conflict target: the table has two unique indexes on the id (`id` and `(id, user_id)`),
-    // and with `ON CONFLICT (id)` a concurrent duplicate can surface as a unique violation on the
-    // other one instead of being skipped.
+    // Ids are unique per user (primary key `(user_id, id)`): another user's session with the same
+    // id is a different row and never gets in the way.
     let inserted = sqlx::query!(
         "INSERT INTO workout_sessions (id, user_id, program_version_id, day_id, status, started_at)
          VALUES ($1, $2, $3, $4, 'in_progress', $5)
-         ON CONFLICT DO NOTHING",
+         ON CONFLICT (user_id, id) DO NOTHING",
         session.id.as_uuid(),
         user.as_uuid(),
         session.program_version_id.as_uuid(),
@@ -163,7 +162,7 @@ pub async fn start(pool: &PgPool, user: UserId, session: &NewSession) -> Result<
     if inserted == 1 {
         return Ok(Change::Applied);
     }
-    // The id exists. Only a session of this user is ever compared or reported on.
+    // This user already has a session with this id: compare with it.
     let same = sqlx::query_scalar!(
         r#"SELECT (program_version_id = $3 AND day_id = $4 AND started_at = $5) AS "same!"
            FROM workout_sessions WHERE id = $1 AND user_id = $2"#,
@@ -578,15 +577,23 @@ mod tests {
             let result = start(&pool, b, &new_session(version)).await;
             assert!(matches!(result, Err(RepoError::NotFound)), "{result:?}");
         }
-        // Reusing A's session id: rejected, and nothing of A's session is returned or changed.
+        // A's exact session (A's version): B cannot use A's version, whatever the id.
+        let result = start(&pool, b, &session_a).await;
+        assert!(matches!(result, Err(RepoError::NotFound)), "{result:?}");
+        // A's session id with B's own version: B's own, independent session.
         let reuse = NewSession {
             program_version_id: version_b,
             ..session_a.clone()
         };
-        let result = start(&pool, b, &reuse).await;
-        assert!(matches!(result, Err(RepoError::Conflict)), "{result:?}");
-        let result = start(&pool, b, &session_a).await;
-        assert!(matches!(result, Err(RepoError::Conflict)), "{result:?}");
+        assert_eq!(start(&pool, b, &reuse).await.unwrap(), Change::Applied);
+        assert_eq!(start(&pool, b, &reuse).await.unwrap(), Change::Unchanged);
+        assert_eq!(
+            get(&pool, b, reuse.id).await.unwrap().program_version_id,
+            version_b
+        );
+        finish(&pool, b, reuse.id, SessionOutcome::Abandoned, at(5))
+            .await
+            .unwrap();
         assert_eq!(get(&pool, a, session_a.id).await.unwrap(), before);
     }
 }

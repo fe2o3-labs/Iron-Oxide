@@ -132,6 +132,62 @@ async fn every_user_id_cascades_from_users_and_is_indexed(pool: PgPool) {
     assert!(bad.is_empty(), "{bad:?}");
 }
 
+/// Unique keys of user-owned tables that may leave out `user_id`. Only keys over values the
+/// server generates or controls belong here: a key over a client-chosen value without `user_id`
+/// would tell one user that another already uses that value.
+const UNIQUE_KEYS_WITHOUT_OWNER: &[&str] = &[
+    // Program and version ids come from gen_random_uuid(), never from a client.
+    "programs_pkey",
+    "program_versions_pkey",
+    // One row per built-in id, among built-ins only (user_id IS NULL).
+    "programs_builtin_key",
+    // Version numbers are assigned by the server, within one program (checked as the caller's).
+    "program_versions_program_id_version_key",
+];
+
+#[sqlx::test(migrator = "MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn every_unique_key_of_a_user_owned_table_includes_user_id(pool: PgPool) {
+    let keys = sqlx::query!(
+        r#"SELECT idx_cls.relname AS "index!", tbl.relname AS "table!",
+                  EXISTS (
+                      SELECT 1 FROM pg_attribute att
+                      WHERE att.attrelid = tbl.oid AND att.attname = 'user_id'
+                        AND att.attnum = ANY (idx.indkey::smallint[])
+                  ) AS "has_user_id!"
+           FROM pg_index idx
+           JOIN pg_class idx_cls ON idx_cls.oid = idx.indexrelid
+           JOIN pg_class tbl ON tbl.oid = idx.indrelid
+           JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
+           WHERE ns.nspname = 'public' AND idx.indisunique
+             AND EXISTS (
+                 SELECT 1 FROM pg_attribute att
+                 WHERE att.attrelid = tbl.oid AND att.attname = 'user_id' AND NOT att.attisdropped
+             )
+           ORDER BY 2, 1"#
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    // Guards the query: the client-id tables' primary keys are among the keys it sees.
+    for expected in ["workout_sessions_pkey", "workout_sets_pkey"] {
+        assert!(
+            keys.iter()
+                .any(|key| key.index == expected && key.has_user_id),
+            "{expected}"
+        );
+    }
+    let bad: Vec<String> = keys
+        .iter()
+        .filter(|key| !key.has_user_id && !UNIQUE_KEYS_WITHOUT_OWNER.contains(&key.index.as_str()))
+        .map(|key| format!("{}.{}", key.table, key.index))
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "unique keys without user_id: {bad:?}; add user_id or allowlist them with a reason"
+    );
+}
+
 #[sqlx::test(migrator = "MIGRATOR")]
 #[ignore = "needs Postgres"]
 async fn deleting_a_user_removes_their_rows_in_every_table_and_keeps_others(pool: PgPool) {
