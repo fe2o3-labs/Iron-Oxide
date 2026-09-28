@@ -23,7 +23,8 @@ env:
 
 jobs:
   # The repo is public and built in the open: a leaked secret must fail CI.
-  # Runs on every push and PR and scans the branch's full git history, not only the diff.
+  # Scans only the new commits: the PR's commits on a pull request, the pushed range on a push to
+  # main. The weekly full-history scan of main is in secret-scan.yml.
   # The gitleaks binary is used directly because `gitleaks/gitleaks-action`
   # requires a paid license for organisation-owned repositories.
   gitleaks:
