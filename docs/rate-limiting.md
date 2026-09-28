@@ -29,6 +29,11 @@ Route paths are under `/api/auth/` unless shown in full. Requests with a safe me
 The per-user limits only apply to requests whose session holds a user. A signed-out request only
 counts against its IP.
 
+The three sign-in groups (`auth_begin`, `auth_finish`, `google_callback`) also limit each **IPv6
+`/48`** as a whole: 120 at once, then 2 a second. That is four `/64`s' worth (see
+[Client IP](#client-ip)). This check runs before the per-`/64` one, so a site over its aggregate
+adds nothing to the per-IP table.
+
 ### Where the checks run
 
 The layers, from the outside in:
@@ -44,10 +49,16 @@ The layers, from the outside in:
 - **After the CSRF check.** Otherwise a cross-site page, opened by anyone behind a shared IP, could
   fire no-cors `POST`s at the begin functions. The CSRF check refuses them anyway, but they would
   use up the whole IP's sign-in limits and lock everyone behind it out.
-- **The Google callback.** It is a cross-site `GET` by design, so such a page can still hit it
-  (with an `<img>`, say). That is why the callback has its own bucket: the worst such a page can
-  do is slow down Google callbacks for that IP, never passkey sign-ins. This is tested by
-  `cross_site_requests_cannot_use_up_a_shared_ips_limits`.
+- **The Google callback.** It is a cross-site `GET` by design, so the CSRF check lets it
+  through, and such a page could still hit it (with an `<img>` or a `fetch`, say). Two defences:
+  - When the browser sends `Sec-Fetch-Dest` and it is not `document`, the request is refused with
+    `403` before it counts. Every browser that sends the header marks Google's redirect back
+    (a top-level navigation, in the window or the popup) as `document`.
+  - The callback has its own bucket, so an older browser that sends no `Sec-Fetch-Dest` can at
+    worst slow down Google callbacks for its IP, never passkey sign-ins.
+
+  This is tested by `cross_site_requests_cannot_use_up_a_shared_ips_limits` and
+  `the_callback_only_counts_navigations`.
 
 ### Why these numbers
 
@@ -58,9 +69,9 @@ The layers, from the outside in:
 - **The known exposure (#59's reviews).** Each cookie-less begin creates one `sessions` row and one
   `auth_ceremonies` row, and the cleanup runs only every 6 hours. Without limits, 1,000 requests a
   second meant about 21.6 M rows of each between two cleanups. Now each IP can create at most 30
-  rows at once, then 1 every 2 s: about 10,800 per IP between two cleanups. An IPv6 "IP" here is a
-`/64` (see below); a client that holds a bigger block, such as a `/48`, has one set of limits per
-`/64` in it. The per-IP check runs
+  rows at once, then 1 every 2 s: about 10,800 per IP between two cleanups. For IPv6 that is per
+`/64`, and each `/48` gets at most four times that however many `/64`s it uses. The per-IP check
+runs
   before the session is loaded, so a refused request writes nothing and sets no cookie (tested by
   `a_limited_begin_creates_no_session_and_no_ceremony`).
 - **Google polling.** While a Google sign-in is open, the UI calls `me` every 2 s. That is 0.5 a
@@ -88,8 +99,9 @@ row).
 - **`fly`** (set in `fly.toml`): behind Fly.io, every connection comes from Fly's proxy, from a
   private `172.16.x.x` address. With `peer`, every user would share one set of limits. In this mode
   the server reads `Fly-Client-IP`, which [Fly's proxy always
-  sets](https://fly.io/docs/networking/request-headers/) to the address it saw, overwriting what the
-  client sent. It only trusts the header when all of these hold:
+  sets](https://fly.io/docs/networking/request-headers/) to the address it saw. Fly's page does not
+  state explicitly that a client-sent value is replaced. The one-off post-deploy check in
+  [deploy.md](operations/deploy.md) confirms it. It only trusts the header when all of these hold:
   - the TCP peer is a private address: loopback, `10/8`, `172.16/12`, `192.168/16`,
     `100.64/10`, link-local, or IPv6 unique-local (`fc00::/7`, Fly's private network) or link-local.
     A connection from the internet cannot set its own bucket;
@@ -106,22 +118,52 @@ address and all users behind it share one set of limits. The client IP would the
 from that proxy's own header, which needs a new mode.
 
 **IPv6** clients are keyed by their `/64` prefix: one host usually holds a whole `/64` and could
-otherwise rotate addresses to get fresh limits. IPv4-mapped IPv6 addresses are keyed as IPv4.
+otherwise rotate addresses to get fresh limits. A `/48` holds 65,536 `/64`s and is easy to get (a
+tunnel broker, a hosting provider). The sign-in groups therefore also limit each `/48` as a whole
+(see [What is limited](#what-is-limited)). IPv4-mapped IPv6 addresses are keyed as IPv4.
 
 ## Memory
 
-Each limiter is a token bucket (GCRA) that keeps one timestamp per key (IP or user) in a hash map.
-A key whose bucket has refilled carries no state, so dropping it changes nothing. The number of
-keys is capped (50,000 per limiter, a few megabytes in total), by count and not by time:
+Each limiter is a token bucket (GCRA) that keeps one timestamp per key (IP, `/48` or user) in a
+hash map. A key whose bucket has refilled carries no state, so dropping it changes nothing.
 
-- when a new key arrives and the table is full, the refilled keys are dropped first;
-- if that frees too little, the keys closest to a full bucket are dropped. Keys that are being
-  limited are kept.
+The number of keys is capped by count, not by time: 50,000 per limiter. There are 13 limiters:
 
-Each such sweep frees at least an eighth of the table, so its cost is spread over many requests. A
-flood of new addresses cannot grow the memory, and the most it can do is reset the limits of the
-least-limited clients (tested by `memory_stays_bounded_under_many_client_ips`). A refused request
-does not move its bucket further out, so hammering a limit does not lengthen it.
+- 6 per IP;
+- 3 per IPv6 `/48`;
+- 4 per user.
+
+An entry takes 32 bytes, and a full table takes about 2.1 MiB. So the worst case is about
+**27 MiB** in all, on a 512 MB machine.
+
+When a new key arrives and its table is full:
+
+- **The refilled keys are dropped**, and only those. A key that has not refilled is never evicted.
+  Evicting it would hand it a fresh burst, and a client cycling through more keys than the table
+  holds (easy with the `/64`s of one IPv6 `/48`) would then have no limit at all.
+- **If none has refilled, the new key gets the group's policy:**
+  - `auth_begin`, `auth_finish` and `google_callback` **fail closed**. The new client gets a
+    `429` until the earliest stored key refills. These groups create `sessions` and
+    `auth_ceremonies` rows, so refusing some new clients for a while is safer than letting
+    everyone through untracked.
+  - Filling such a table takes 50,000 keys, each kept limited at once, from 50,000 distinct IPv4
+    addresses or `/64`s. The `/48` aggregate caps what one IPv6 site can put in it at a few
+    `/64`s, so it takes that many distinct IPv4 addresses or IPv6 sites.
+  - `session`, `account` and `write` **fail open**. The request goes through without its key
+    being tracked, and a warning is logged. These only do something for a signed-in user, whose
+    sign-in was itself limited. The per-user limits still apply, and locking every new client out
+    of them would hurt more than it protects.
+
+The sweep scans the whole table, so it only runs when it can free something. While a table is full,
+the limiter remembers the earliest moment a stored key refills and does not sweep before then. A
+flood of new keys therefore costs one hash lookup each, not a scan.
+
+This is tested by `cycling_through_more_keys_than_the_table_holds_gains_nothing` (limiter),
+`cycling_through_more_clients_than_the_table_holds_gains_nothing`,
+`one_ipv6_48_cannot_multiply_its_sign_in_limit` and `memory_stays_bounded_under_many_client_ips`.
+All three count requests on a frozen clock.
+
+A refused request does not move its bucket further out, so hammering a limit does not lengthen it.
 
 ## Several machines
 
@@ -186,7 +228,11 @@ endpoint cannot silently drop its limit.
   - limits are per IP and per group;
   - cross-site requests cannot use up a shared IP's limits;
   - a spoofed `Fly-Client-IP` is ignored in `peer` mode, and in `fly` mode from a public peer;
-  - memory stays bounded under thousands of IPv4 and IPv6 clients;
+  - cycling through more clients (IPv4 addresses, or the `/64`s of one `/48`) than the table
+    holds gains nothing;
+  - the callback only counts navigations (`Sec-Fetch-Dest`);
+  - memory stays bounded under thousands of IPv4 and IPv6 clients, and no limited client is
+    evicted;
   - the health checks are never limited;
   - every path in `ROUTES` exists;
   - with Postgres: a refused begin creates no rows, per-user limits are independent behind one IP,
