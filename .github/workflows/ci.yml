@@ -255,6 +255,8 @@ jobs:
           for icon in icons/icon-192.png icons/icon-512.png icons/icon-maskable-512.png icons/apple-touch-icon.png favicon.ico; do
             curl -sSf -o /dev/null "http://127.0.0.1:8080/$icon"
           done
+          # An unknown hashed asset is a 404, not the SSR page (the service worker must never cache HTML as JS/wasm).
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/assets/missing-dxh0.js)" = "404"
       - name: Server log
         if: always()
         run: cat "$RUNNER_TEMP/server.log" || true

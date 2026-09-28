@@ -6,9 +6,18 @@
 
 use dioxus::prelude::*;
 
+#[cfg(feature = "server")]
+pub mod missing_assets;
+
 /// Colour of the browser UI around the app. Keep in sync with `--io-bg` in `assets/tokens.css`
 /// and with `theme_color` / `background_color` in `public/manifest.webmanifest`.
 pub const THEME_COLOR: &str = "#141619";
+
+/// Files in `public/` linked from `<head>`. The service worker must precache every one of them.
+const MANIFEST_URL: &str = "/manifest.webmanifest";
+const FAVICON_ICO_URL: &str = "/favicon.ico";
+const FAVICON_SVG_URL: &str = "/icons/favicon.svg";
+const APPLE_TOUCH_ICON_URL: &str = "/icons/apple-touch-icon.png";
 
 /// Registers the service worker once the page has loaded. It runs as a plain inline script, so it
 /// does not wait for the wasm bundle.
@@ -44,15 +53,15 @@ const REGISTER_IN_THIS_BUILD: bool = !cfg!(debug_assertions);
 #[component]
 pub fn PwaHead() -> Element {
     rsx! {
-        document::Link { rel: "manifest", href: "/manifest.webmanifest" }
+        document::Link { rel: "manifest", href: MANIFEST_URL }
         document::Meta { name: "theme-color", content: THEME_COLOR }
-        document::Link { rel: "icon", href: "/favicon.ico", sizes: "48x48" }
+        document::Link { rel: "icon", href: FAVICON_ICO_URL, sizes: "48x48" }
         document::Link {
             rel: "icon",
-            href: "/icons/favicon.svg",
+            href: FAVICON_SVG_URL,
             r#type: "image/svg+xml",
         }
-        document::Link { rel: "apple-touch-icon", href: "/icons/apple-touch-icon.png" }
+        document::Link { rel: "apple-touch-icon", href: APPLE_TOUCH_ICON_URL }
         // iOS ignores most of the manifest: these tags give the standalone launch and the title.
         document::Meta { name: "mobile-web-app-capable", content: "yes" }
         document::Meta { name: "apple-mobile-web-app-capable", content: "yes" }
@@ -158,30 +167,76 @@ mod tests {
         assert_eq!((width, height, apple), (180, 180, PNG_RGB));
     }
 
+    /// Files linked from `<head>`.
+    const HEAD_FILES: [&str; 4] = [
+        MANIFEST_URL,
+        FAVICON_ICO_URL,
+        FAVICON_SVG_URL,
+        APPLE_TOUCH_ICON_URL,
+    ];
+
+    /// The `PRECACHE_URLS` array of `public/sw.js`.
+    fn precache_urls() -> Vec<String> {
+        let sw = std::fs::read_to_string(crate_file("public/sw.js")).unwrap();
+        let start = sw.find("const PRECACHE_URLS = [").unwrap();
+        let end = start + sw[start..].find("];").unwrap();
+        sw[start..end]
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
     #[test]
     fn head_links_point_to_existing_files() {
-        for url in [
-            "/manifest.webmanifest",
-            "/favicon.ico",
-            "/icons/favicon.svg",
-            "/icons/apple-touch-icon.png",
-            "/sw.js",
-        ] {
+        for url in HEAD_FILES.iter().chain(&["/sw.js"]) {
             assert!(public_file(url).is_file(), "missing {url}");
         }
     }
 
     #[test]
     fn every_service_worker_precache_url_exists() {
-        // One missing file makes `cache.addAll` reject, and the worker never installs.
-        let sw = std::fs::read_to_string(crate_file("public/sw.js")).unwrap();
-        let start = sw.find("const PRECACHE_URLS = [").unwrap();
-        let end = start + sw[start..].find("];").unwrap();
-        let urls: Vec<&str> = sw[start..end].split('"').skip(1).step_by(2).collect();
+        // One missing file makes the precache fail, and the worker never installs.
+        let urls = precache_urls();
         assert!(!urls.is_empty());
         for url in urls {
-            assert!(public_file(url).is_file(), "precached {url} is missing");
+            assert!(public_file(&url).is_file(), "precached {url} is missing");
         }
+    }
+
+    #[test]
+    fn head_files_are_precached() {
+        let urls = precache_urls();
+        for url in HEAD_FILES {
+            assert!(urls.iter().any(|u| u == url), "{url} is not precached");
+        }
+    }
+
+    #[test]
+    fn manifest_icons_are_precached() {
+        let urls = precache_urls();
+        for icon in manifest()["icons"].as_array().unwrap() {
+            let src = icon["src"].as_str().unwrap();
+            assert!(urls.iter().any(|u| u == src), "{src} is not precached");
+        }
+    }
+
+    #[test]
+    fn every_file_in_public_icons_is_precached() {
+        let urls = precache_urls();
+        for entry in std::fs::read_dir(crate_file("public/icons")).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            let url = format!("/icons/{name}");
+            assert!(urls.contains(&url), "{url} is not precached");
+        }
+    }
+
+    #[test]
+    fn precache_urls_have_no_duplicates() {
+        let urls = precache_urls();
+        let unique: std::collections::BTreeSet<&String> = urls.iter().collect();
+        assert_eq!(unique.len(), urls.len());
     }
 
     #[test]
