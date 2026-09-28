@@ -2,6 +2,8 @@
 
 use dioxus::prelude::*;
 
+pub mod billing;
+
 /// Returns the server's current time, in whole seconds since the Unix epoch.
 #[get("/api/server-time")]
 pub async fn server_time() -> Result<u64, ServerFnError> {

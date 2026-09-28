@@ -95,6 +95,7 @@ pub mod vars {
     pub const GOOGLE_CLIENT_SECRET: &str = "GOOGLE_CLIENT_SECRET";
     pub const GOOGLE_REDIRECT_URL: &str = "GOOGLE_REDIRECT_URL";
     pub const SESSION_KEY: &str = "SESSION_KEY";
+    pub const STRIPE_WEBHOOK_SECRET: &str = "STRIPE_WEBHOOK_SECRET";
 
     /// The sign-in variables (#5), all required.
     #[cfg(test)]
@@ -124,6 +125,17 @@ pub struct Config {
     pub shutdown_grace: Duration,
     /// Sign-in settings.
     pub auth: AuthConfig,
+    /// Billing settings (#21, see docs/billing.md).
+    pub billing: BillingConfig,
+}
+
+/// Billing settings (#21). All optional while billing is not implemented.
+#[derive(Debug, Clone, Default)]
+pub struct BillingConfig {
+    /// The Stripe webhook endpoint's signing secret (`STRIPE_WEBHOOK_SECRET`), used to verify
+    /// `Stripe-Signature`. Optional: the webhook is a stub that does not use it yet. Once it is
+    /// implemented, the webhook refuses every event while it is unset.
+    pub stripe_webhook_secret: Option<SecretString>,
 }
 
 /// The path of the Google OAuth callback route. `GOOGLE_REDIRECT_URL` must be `APP_BASE_URL`'s
@@ -362,6 +374,11 @@ impl Config {
         let log_filter = env.optional(vars::RUST_LOG, parse_log_filter);
         let shutdown_grace = env.optional(vars::SHUTDOWN_GRACE_SECS, parse_grace);
         let auth = load_auth(&mut env);
+        let billing = BillingConfig {
+            stripe_webhook_secret: env.optional(vars::STRIPE_WEBHOOK_SECRET, |raw| {
+                Ok(SecretString::from(raw))
+            }),
+        };
         let auth = match (&app_base_url, auth) {
             (Some(app_base_url), Some(auth)) => {
                 check_auth_against_base_url(&mut env, app_base_url, auth)
@@ -377,6 +394,7 @@ impl Config {
                 log_filter,
                 shutdown_grace: shutdown_grace.unwrap_or(DEFAULT_SHUTDOWN_GRACE),
                 auth,
+                billing,
             }),
             _ => Err(ConfigErrors(env.errors)),
         }
@@ -1398,6 +1416,29 @@ mod tests {
             debug.contains("client-id.apps.googleusercontent.com"),
             "{debug}"
         );
+    }
+
+    #[test]
+    fn stripe_webhook_secret_is_optional() {
+        let config = load(&minimal()).unwrap();
+        assert!(config.billing.stripe_webhook_secret.is_none());
+        // Blank counts as unset, like every variable.
+        let blank = load(&set(minimal(), vars::STRIPE_WEBHOOK_SECRET, "  ")).unwrap();
+        assert!(blank.billing.stripe_webhook_secret.is_none());
+    }
+
+    #[test]
+    fn stripe_webhook_secret_is_loaded_and_redacted() {
+        let vars = set(
+            minimal(),
+            vars::STRIPE_WEBHOOK_SECRET,
+            " test-placeholder-signing-secret ",
+        );
+        let config = load(&vars).unwrap();
+        let secret = config.billing.stripe_webhook_secret.as_ref().unwrap();
+        assert_eq!(secret.expose_secret(), "test-placeholder-signing-secret");
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("placeholder-signing"), "{debug}");
     }
 
     #[test]
