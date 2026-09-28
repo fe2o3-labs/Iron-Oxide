@@ -86,24 +86,11 @@ jobs:
           echo "Scanning commits: $range"
           "$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 --log-opts="--remerge-diff $range" .
 
-  # The Rust jobs below are skipped until a root `Cargo.toml` exists (it lands with #2).
-  detect:
-    name: Detect Rust workspace
-    runs-on: ubuntu-latest
-    outputs:
-      rust: ${{ steps.check.outputs.rust }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - id: check
-        run: |
-          if [ -f Cargo.toml ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi
+  # Rust jobs: they always run (no skip gate). A skipped required check counts as passing, so a gate
+  # could let a PR merge without any Rust check.
 
   fmt:
     name: rustfmt
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -115,8 +102,6 @@ jobs:
 
   clippy:
     name: clippy
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -134,8 +119,6 @@ jobs:
 
   test:
     name: Unit tests
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -156,8 +139,6 @@ jobs:
   # `.sqlx/` metadata is missing or stale fails CI without needing a database.
   sqlx-offline:
     name: sqlx offline build
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -170,8 +151,6 @@ jobs:
 
   integration:
     name: Integration tests (Postgres)
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -206,8 +185,6 @@ jobs:
   # the page, a server function round-trip and /healthz over HTTP.
   dx-bundle:
     name: dx bundle + smoke test
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     env:
       # Must match the `dioxus` crate version in Cargo.toml (Renovate bumps both in one PR).
