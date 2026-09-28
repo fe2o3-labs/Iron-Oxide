@@ -439,6 +439,7 @@ async fn concurrent_google_finishes_of_one_ceremony_cannot_both_succeed(db: PgPo
                 code_challenge: query_param(&url, "code_challenge"),
                 claims: app.google.claims(&url, subject),
                 sign_with_unpublished_key: false,
+                sign_hs256_with_client_secret: false,
             },
         );
     }
@@ -642,6 +643,7 @@ async fn google_sign_in_or_link(
             code_challenge: query_param(&url, "code_challenge"),
             claims,
             sign_with_unpublished_key: false,
+            sign_hs256_with_client_secret: false,
         },
     );
     let (status, _, body) = browser
@@ -721,6 +723,7 @@ async fn a_popup_without_the_session_hands_the_code_to_the_opener(db: PgPool) {
             code_challenge: query_param(&url, "code_challenge"),
             claims: app.google.claims(&url, "sub-popup"),
             sign_with_unpublished_key: false,
+            sign_hs256_with_client_secret: false,
         },
     );
 
@@ -754,11 +757,10 @@ async fn google_finish_with(
     let mut browser = app.browser();
     let url = google_begin(&mut browser, "SignIn").await;
     let mut state = query_param(&url, "state");
-    let mut grant = Grant {
-        code_challenge: query_param(&url, "code_challenge"),
-        claims: app.google.claims(&url, "sub-tamper"),
-        sign_with_unpublished_key: false,
-    };
+    let mut grant = Grant::new(
+        query_param(&url, "code_challenge"),
+        app.google.claims(&url, "sub-tamper"),
+    );
     tamper(&mut grant, &mut state);
     app.google.grant("code-t", grant);
     let result = browser
@@ -865,6 +867,15 @@ async fn google_rejects_a_token_signed_with_an_unknown_key(db: PgPool) {
 
 #[sqlx::test]
 #[ignore = "needs Postgres"]
+async fn google_rejects_an_hs256_token_keyed_with_the_client_secret(db: PgPool) {
+    let app = TestApp::new(db).await;
+    let status =
+        google_finish_with(&app, |grant, _| grant.sign_hs256_with_client_secret = true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
 async fn google_rejects_a_code_bound_to_another_pkce_challenge(db: PgPool) {
     let app = TestApp::new(db).await;
     let status = google_finish_with(&app, |grant, _| {
@@ -888,6 +899,7 @@ async fn a_google_ceremony_is_single_use(db: PgPool) {
                 code_challenge: query_param(&url, "code_challenge"),
                 claims: app.google.claims(&url, "sub-once"),
                 sign_with_unpublished_key: false,
+                sign_hs256_with_client_secret: false,
             },
         );
     }
@@ -918,6 +930,7 @@ async fn a_forged_callback_cannot_log_the_victim_into_the_attackers_account(db: 
             code_challenge: query_param(&url, "code_challenge"),
             claims: app.google.claims(&url, "attacker-sub"),
             sign_with_unpublished_key: false,
+            sign_hs256_with_client_secret: false,
         },
     );
     let mut victim = app.browser();
@@ -1029,6 +1042,7 @@ async fn a_link_ceremony_cannot_be_finished_by_another_user(db: PgPool) {
             code_challenge: query_param(&url, "code_challenge"),
             claims: app.google.claims(&url, "sub-l"),
             sign_with_unpublished_key: false,
+            sign_hs256_with_client_secret: false,
         },
     );
     // Alice signs out and Bob signs in on the same browser before the callback.

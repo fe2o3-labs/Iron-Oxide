@@ -281,6 +281,20 @@ pub struct Grant {
     pub claims: Value,
     /// Sign with a key missing from the JWKS.
     pub sign_with_unpublished_key: bool,
+    /// Sign with HS256 keyed by the client secret (an algorithm confusion attempt).
+    pub sign_hs256_with_client_secret: bool,
+}
+
+impl Grant {
+    /// A normal grant: RS256 with the published key.
+    pub fn new(code_challenge: String, claims: Value) -> Self {
+        Self {
+            code_challenge,
+            claims,
+            sign_with_unpublished_key: false,
+            sign_hs256_with_client_secret: false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -365,7 +379,16 @@ async fn jwks() -> Response {
 }
 
 fn sign_jwt(claims: &Value, key: &PKey<openssl::pkey::Private>, kid: &str) -> String {
-    let header = json!({ "alg": "RS256", "typ": "JWT", "kid": kid });
+    sign_jwt_with(claims, key, kid, "RS256")
+}
+
+fn sign_jwt_with(
+    claims: &Value,
+    key: &PKey<openssl::pkey::Private>,
+    kid: &str,
+    alg: &str,
+) -> String {
+    let header = json!({ "alg": alg, "typ": "JWT", "kid": kid });
     let input = format!(
         "{}.{}",
         B64URL.encode(header.to_string()),
@@ -416,16 +439,19 @@ async fn token(State(mock): State<MockGoogle>, headers: HeaderMap, body: String)
     if B64URL.encode(Sha256::digest(verifier.as_bytes())) != grant.code_challenge {
         return bad("invalid_grant");
     }
-    let (key, kid) = if grant.sign_with_unpublished_key {
-        (&keys().unpublished, "unpublished")
+    let id_token = if grant.sign_hs256_with_client_secret {
+        let key = PKey::hmac(CLIENT_SECRET.as_bytes()).unwrap();
+        sign_jwt_with(&grant.claims, &key, "published", "HS256")
+    } else if grant.sign_with_unpublished_key {
+        sign_jwt(&grant.claims, &keys().unpublished, "unpublished")
     } else {
-        (&keys().published, "published")
+        sign_jwt(&grant.claims, &keys().published, "published")
     };
     axum::Json(json!({
         "access_token": "mock-access-token",
         "token_type": "Bearer",
         "expires_in": 3600,
-        "id_token": sign_jwt(&grant.claims, key, kid),
+        "id_token": id_token,
     }))
     .into_response()
 }
