@@ -989,16 +989,10 @@ mod tests {
             }
         }
 
-        let vars = set(
-            set(
-                set(production(), vars::APP_BASE_URL, "http://iron-oxyde.com"),
-                vars::WEBAUTHN_ORIGIN,
-                "http://iron-oxyde.com",
-            ),
-            vars::GOOGLE_REDIRECT_URL,
-            "http://iron-oxyde.com/auth/google/callback",
-        );
-        assert_single_invalid(&vars, vars::APP_BASE_URL);
+        // Only APP_BASE_URL on plain http (the sign-in URLs have their own https rule).
+        let vars = set(production(), vars::APP_BASE_URL, "http://iron-oxyde.com");
+        let found: Vec<&str> = errors(&vars).iter().map(ConfigError::var).collect();
+        assert!(found.contains(&vars::APP_BASE_URL), "{found:?}");
     }
 
     #[test]
@@ -1158,6 +1152,18 @@ mod tests {
 
     #[test]
     fn plain_http_is_only_allowed_for_localhost() {
+        // The sign-in URLs must share APP_BASE_URL's origin (#5), so all three move together.
+        fn served_at(
+            origin: &'static str,
+            rp_id: &'static str,
+        ) -> Vec<(&'static str, &'static str)> {
+            let redirect: &'static str =
+                Box::leak(format!("{origin}/auth/google/callback").into_boxed_str());
+            let vars = set(minimal(), vars::APP_BASE_URL, origin);
+            let vars = set(vars, vars::WEBAUTHN_ORIGIN, origin);
+            let vars = set(vars, vars::GOOGLE_REDIRECT_URL, redirect);
+            set(vars, vars::WEBAUTHN_RP_ID, rp_id)
+        }
         for origin in [
             "http://localhost:8080",
             "http://127.0.0.1:8080",
@@ -1169,40 +1175,34 @@ mod tests {
             } else {
                 "example.com"
             };
-            let vars = set(with_auth(), vars::WEBAUTHN_ORIGIN, origin);
-            let vars = set(vars, vars::WEBAUTHN_RP_ID, rp_id);
-            let found = errors_or_ok(&vars);
+            let found = errors_or_ok(&served_at(origin, rp_id));
             assert!(
-                found.iter().all(|e| e.var() != vars::WEBAUTHN_ORIGIN),
+                found
+                    .iter()
+                    .all(|e| e.var() != vars::WEBAUTHN_ORIGIN
+                        && e.var() != vars::GOOGLE_REDIRECT_URL),
                 "{origin}: {found:?}"
             );
         }
-        let vars = set(
-            set(
-                with_auth(),
-                vars::WEBAUTHN_ORIGIN,
-                "http://iron-oxide.example",
-            ),
-            vars::WEBAUTHN_RP_ID,
+        let found: Vec<&str> = errors_or_ok(&served_at(
+            "http://iron-oxide.example",
             "iron-oxide.example",
-        );
-        assert_single_invalid(&vars, vars::WEBAUTHN_ORIGIN);
+        ))
+        .iter()
+        .map(ConfigError::var)
+        .collect();
+        assert_eq!(found, [vars::WEBAUTHN_ORIGIN, vars::GOOGLE_REDIRECT_URL]);
         let vars = set(
-            with_auth(),
+            minimal(),
             vars::GOOGLE_REDIRECT_URL,
             "http://iron-oxide.example/auth/google/callback",
         );
         assert_single_invalid(&vars, vars::GOOGLE_REDIRECT_URL);
-        let vars = set(
-            set(
-                with_auth(),
-                vars::WEBAUTHN_ORIGIN,
-                "https://iron-oxide.example",
-            ),
-            vars::WEBAUTHN_RP_ID,
+        load(&served_at(
+            "https://iron-oxide.example",
             "iron-oxide.example",
-        );
-        load(&vars).unwrap();
+        ))
+        .unwrap();
     }
 
     fn errors_or_ok(vars: &[(&str, &str)]) -> Vec<ConfigError> {
