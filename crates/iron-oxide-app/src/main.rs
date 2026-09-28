@@ -17,17 +17,17 @@ fn main() {
     dioxus::launch(ui::App);
 }
 
-/// Loads the configuration and starts the server. A bad configuration exits with status 1 and a
+/// Loads the configuration and runs the server. A bad configuration exits with status 1 and a
 /// message naming each missing or invalid variable, before anything else starts.
 #[cfg(feature = "server")]
-fn main() {
+fn main() -> std::process::ExitCode {
     // A local `.env` is optional (production sets real environment variables, which win).
     match dotenvy::dotenv() {
         Ok(_) => {}
         Err(error) if error.not_found() => {}
         Err(error) => {
             eprintln!("error: cannot read the .env file: {error}");
-            std::process::exit(1);
+            return std::process::ExitCode::FAILURE;
         }
     }
 
@@ -35,7 +35,7 @@ fn main() {
         Ok(config) => server::serve(config),
         Err(errors) => {
             eprintln!("error: {errors}");
-            std::process::exit(1);
+            std::process::ExitCode::FAILURE
         }
     }
 }

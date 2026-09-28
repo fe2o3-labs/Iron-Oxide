@@ -8,7 +8,7 @@ A strength-training PWA written in Rust with [Dioxus](https://dioxuslabs.com) fu
 | Path | What |
 |---|---|
 | `crates/iron-oxide-domain` | Pure domain logic. No Dioxus, web-sys or sqlx dependencies; tests run with plain `cargo test -p iron-oxide-domain`. |
-| `crates/iron-oxide-app` | The Dioxus fullstack app. The `web` feature builds the browser client (wasm32); the `server` feature builds the axum server (SSR, server functions, `/healthz`). |
+| `crates/iron-oxide-app` | The Dioxus fullstack app. The `web` feature builds the browser client (wasm32); the `server` feature builds the axum server (SSR, server functions, `/healthz`, `/readyz`). |
 | `crates/iron-oxide-app/migrations` | SQL migrations, embedded in the server and applied at startup. |
 | `.sqlx/` | Offline query metadata for the sqlx macros (see "Database"). |
 | `docker-compose.yml` | Local Postgres for development and tests. |
@@ -149,8 +149,9 @@ DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
 - Pool settings follow Neon's advice: at most 5 connections, none kept while idle, idle
   connections closed after 2 minutes, every connection recycled after 5 minutes, and the first
   connection retried with backoff (up to 6 attempts) while a suspended compute wakes up.
-- `/healthz` runs `SELECT 1`. Anything that polls it keeps the Neon compute awake, so point a
-  frequent platform probe at it only if you accept that cost.
+- Point the platform's frequent health check at `/healthz`, which never queries the database.
+  `/readyz` runs `SELECT 1`, so polling it keeps the Neon compute awake and uses up the Free
+  plan's compute hours.
 
 ## Develop
 
@@ -162,7 +163,15 @@ dx serve --web -p iron-oxide-app
 
 This builds the client and the server, and serves the app with hot reload on http://127.0.0.1:8080.
 The page has a button that calls the `server_time` server function (`GET /api/server-time`).
-The health check is at `GET /healthz`: `200 ok` when Postgres answers, `503` otherwise.
+Probes:
+
+- `GET /healthz`: liveness, always `200 ok` while the process serves HTTP. It never touches the
+  database, so the platform can poll it often without keeping a scale-to-zero Neon compute awake.
+- `GET /readyz`: readiness, `200 ok` when Postgres answers `SELECT 1` within 2 seconds, `503`
+  otherwise (the cause is logged, not returned).
+
+On SIGTERM or Ctrl-C the server stops accepting connections, lets in-flight requests finish,
+closes the database pool and exits with status 0.
 
 ### Shared server state in server functions
 

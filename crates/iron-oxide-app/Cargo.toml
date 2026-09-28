@@ -18,7 +18,7 @@ dotenvy = { workspace = true, optional = true }
 secrecy = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true, features = ["sync", "time"] }
+tokio = { workspace = true, optional = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 tracing-subscriber = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 

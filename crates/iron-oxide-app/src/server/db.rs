@@ -26,8 +26,8 @@ const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_LIFETIME: Duration = Duration::from_secs(5 * 60);
 /// Idle connections are closed after this long (Neon: under 5 minutes).
 const IDLE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-/// How long `/healthz` waits for `SELECT 1`.
-pub const PING_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long `/readyz` waits for `SELECT 1`.
+pub const PING_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How the first connection is retried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

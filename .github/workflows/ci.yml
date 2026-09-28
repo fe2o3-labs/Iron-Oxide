@@ -211,7 +211,8 @@ jobs:
           cargo test -p iron-oxide-app --features server --locked -- --ignored
 
   # Builds the release bundle exactly as the Dockerfile (#7) will, then runs the server and checks
-  # the page, a server function round-trip and /healthz over HTTP.
+  # the page, a server function round-trip, /healthz and /readyz over HTTP, and a graceful
+  # shutdown on SIGTERM.
   dx-bundle:
     name: dx bundle + smoke test
     needs: detect
@@ -265,16 +266,22 @@ jobs:
           IP=127.0.0.1 PORT=8080 APP_BASE_URL=http://127.0.0.1:8080 \
             DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide \
             ./server > "$RUNNER_TEMP/server.log" 2>&1 &
+          server_pid=$!
           for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
             sleep 1
           done
           set -x
           test "$(curl -sSf http://127.0.0.1:8080/healthz)" = "ok"
+          test "$(curl -sSf http://127.0.0.1:8080/readyz)" = "ok"
           curl -sSf http://127.0.0.1:8080/ | grep -q "Iron Oxide"
           curl -sSf http://127.0.0.1:8080/api/server-time | grep -Eq '^[0-9]+$'
           # The startup migrations ran.
           test "$(PGPASSWORD=iron_oxide psql -h localhost -U iron_oxide -d iron_oxide -tAc "SELECT to_regclass('users')")" = "users"
+          # SIGTERM (what Fly sends on deploy) stops it cleanly with status 0.
+          kill -TERM "$server_pid"
+          wait "$server_pid"
+          grep -q "shut down" "$RUNNER_TEMP/server.log"
       - name: Server log
         if: always()
         run: cat "$RUNNER_TEMP/server.log" || true
