@@ -94,6 +94,12 @@ APP_PORT ?= 8080
 # and `test-db` (its `prepare --check` step) compile against the live database.
 export SQLX_OFFLINE ?= true
 
+# The CI-like targets build without incremental compilation, as CI does: incremental caches take
+# many GB and only help the edit-compile loop (`compile`, `dev`), which keeps them. Sub-makes of
+# `check` inherit it (including its `sqlx-check`, which `compile` also runs, incrementally). Set
+# CARGO_INCREMENTAL yourself to override.
+check fmt-check lint test test-db smoke build deploy: export CARGO_INCREMENTAL ?= 0
+
 # --- Local Postgres (docker compose) ------------------------------------------------------------
 # Use another project name and port to run a second, independent database:
 # `make test-db COMPOSE_PROJECT=my-branch PG_PORT=5444`.
@@ -156,7 +162,7 @@ need-compose = $(need-docker)
 	compile test test-make test-db test-all fmt fmt-check lint sqlx-check smoke secrets check \
 	build docker-build docker-run deploy logs \
 	adb-reverse android-open ios-open tailscale-serve tailscale-reset \
-	clean clean-all
+	clean clean-all prune
 
 ##@ Setup
 
@@ -429,6 +435,15 @@ clean: ## Delete the build output: cargo's target dir (the one in use) and dx's 
 	$(Q)$(call step,cargo clean ($(TARGET_DIR)))
 	$(Q)$(CARGO) clean
 	$(Q)rm -rf dist
+
+# See scripts/prune.sh: it resolves the target dir cargo really uses, refuses anything that is not
+# a cargo target dir (or is /, $$HOME, this checkout or a parent), and never touches sources.
+prune: ## Delete build artefacts older than PRUNE_DAYS (14) or of removed toolchains (PRUNE_MAXSIZE=10GB caps)
+	$(Q)CARGO='$(CARGO)' PRUNE_DAYS='$(PRUNE_DAYS)' PRUNE_MAXSIZE='$(PRUNE_MAXSIZE)' DRY_RUN='$(DRY_RUN)' \
+		scripts/prune.sh
+PRUNE_DAYS ?= 14
+# Optional size cap, e.g. PRUNE_MAXSIZE=10GB: then the oldest artefacts go until the dir fits.
+PRUNE_MAXSIZE ?=
 
 clean-all: ## clean, and delete the local Postgres data (CONFIRM=1)
 	$(Q)$(call need-confirm,deletes the build output and every database of compose project '$(COMPOSE_PROJECT)')

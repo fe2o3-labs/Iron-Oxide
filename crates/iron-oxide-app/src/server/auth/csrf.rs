@@ -13,6 +13,9 @@
 //!
 //! `GET` endpoints must therefore never change state. The Google callback is a cross-site `GET`
 //! by design and is protected by its one-time `state` instead.
+//!
+//! Routes merged after `auth::install` are outside this layer. The only one is the Stripe webhook
+//! (`server::billing`), which Stripe calls cross-site and which is authenticated by its signature.
 
 use std::sync::Arc;
 

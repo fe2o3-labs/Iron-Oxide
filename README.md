@@ -79,6 +79,7 @@ Mobile
 
 Misc
   clean            Delete the build output: cargo's target dir (the one in use) and dx's output
+  prune            Delete build artefacts older than PRUNE_DAYS (14) or of removed toolchains (PRUNE_MAXSIZE=10GB caps)
   clean-all        clean, and delete the local Postgres data (CONFIRM=1)
 ```
 
@@ -179,6 +180,7 @@ host), stops the server with "unsupported parameter".
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | yes | Sign in with Google: the OAuth client (secret) |
 | `GOOGLE_REDIRECT_URL` | yes | `APP_BASE_URL`'s origin + `/auth/google/callback` (must be equal) |
 | `SESSION_KEY` | yes | Session cookie signing key (secret), ≥ 64 random bytes in base64: `openssl rand 64 \| openssl base64 -A` |
+| `STRIPE_WEBHOOK_SECRET` | no | Stripe webhook signing secret (secret). Unused until billing is implemented, see [docs/billing.md](docs/billing.md) |
 
 Sign-in (passkeys, Google, sessions) is described in [docs/auth.md](docs/auth.md), including how to
 create the Google OAuth client. Every value is validated at startup. If anything is missing or invalid, the
@@ -329,6 +331,16 @@ pub async fn save_set(set: NewSet) -> Result<(), ServerFnError> {
 
 On the client, `crate::auth::api::is_unauthorized(&error)` tells a 401 apart from other errors.
 
+### Plan gating in server functions
+
+Gate a feature with `server::entitlements::require(&state.db, user, Feature::…)`: it reads the
+user's plan from `users.plan` and fails with `403` when the plan does not include it. A write that
+takes a quota slot (creating, copying or unarchiving a program) calls
+`server::entitlements::reserve_quota(&mut tx, user, Quota::…)` first, in the transaction that
+writes: it locks the user's row, counts and checks under that lock. The policy itself is
+`iron_oxide_domain::entitlements`, the only code that decides what a plan may do; never compare a
+plan anywhere else. See [docs/billing.md](docs/billing.md).
+
 ### Checks
 
 `make check` runs what CI runs, in the same order. Each CI job calls one target:
@@ -437,6 +449,24 @@ make tailscale-serve                   # ...then publish it over HTTPS to the ta
 
 Step-by-step setups (simulators, real phones over Tailscale or mkcert, passkeys, debugging) are in
 docs/dev/mobile-testing.md, added by #63.
+
+## Disk usage
+
+Rust build output grows fast, so the defaults keep it lean:
+
+- Dev builds (including dx's `server-dev` and `wasm-dev`) keep only line tables for our crates
+  (backtraces still show file:line) and no debug info for dependencies (`[profile.dev]` in
+  `Cargo.toml`).
+- CI and the CI-like make targets (`check`, `lint`, `test`, `build`, ...) build with
+  `CARGO_INCREMENTAL=0`; `compile` and `dev` keep incremental compilation for fast rebuilds.
+- `make prune` works on the target dir cargo actually uses (`CARGO_TARGET_DIR`,
+  `CARGO_BUILD_TARGET_DIR`, else `./target`) and refuses anything that is not a cargo target dir,
+  or is `/`, `$HOME`, the checkout or one of its parents. It deletes incremental caches and build
+  artefacts older than 14 days (`PRUNE_DAYS`) and artefacts of toolchains that are no longer
+  installed (`cargo sweep`, installed by `make setup`). `PRUNE_MAXSIZE=10GB` also caps the size:
+  every incremental cache goes first, then the oldest artefacts. The cap counts the whole dir,
+  including `dx/` and `doc/`, which it never deletes. `DRY_RUN=1` only lists. It never touches
+  sources or `.sqlx/`; `make clean` deletes everything.
 
 ## Security
 

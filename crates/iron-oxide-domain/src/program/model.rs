@@ -33,8 +33,8 @@ pub struct Program {
     /// The training days. Each needs a unique id.
     #[cfg_attr(test, schemars(schema_with = "super::schema::days"))]
     pub days: Vec<Day>,
-    /// The suggested order of the days, repeated forever: `["a", "b", "c"]`. A day may appear
-    /// several times (`["a", "b", "a", "b", "c"]`), and every day must appear at least once.
+    /// The suggested order of the days, repeated forever: `["a", "b", "c"]`. Every day appears
+    /// exactly once.
     #[cfg_attr(test, schemars(schema_with = "super::schema::rotation"))]
     pub rotation: Vec<DayId>,
 }

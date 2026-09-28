@@ -2,9 +2,11 @@
 
 pub mod api;
 pub mod auth;
+pub mod billing;
 pub mod config;
 pub mod db;
 pub mod dotenv;
+pub mod entitlements;
 pub mod logging;
 pub mod state;
 
@@ -91,6 +93,7 @@ async fn run(config: Arc<Config>) -> Result<(), ServeError> {
         log_filter = config.log_filter.as_deref().unwrap_or("(default)"),
         shutdown_grace_secs = config.shutdown_grace.as_secs(),
         cookie_secure = config.auth.cookie_secure,
+        stripe_webhook_secret_set = config.billing.stripe_webhook_secret.is_some(),
         "configuration loaded"
     );
 
@@ -210,6 +213,9 @@ pub fn router(state: AppState, auth: auth::AuthState) -> Router {
     auth::install(app, auth, state.db.clone())
         // One error body for every `/api/` failure, CSRF and sign-in rejections included (#68).
         .layer(from_fn(api::errors_layer::normalize))
+        // Merged after `auth::install`, so outside its session and CSRF layers: Stripe's webhook
+        // deliveries are cross-site POSTs, authenticated by their signature (billing.rs).
+        .merge(billing::routes())
         .layer(Extension(state))
 }
 
