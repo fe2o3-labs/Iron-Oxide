@@ -2,13 +2,20 @@
 //! for the UI and the retry queue (#30).
 //!
 //! The server maps every failure to a status and a short message that is safe to show
-//! (`crate::server::api::ApiError`). Depending on the client path, a non-2xx response arrives as
-//! `ServerFnError::ServerError { code, message, .. }` or as a bare
-//! `ServerFnError::Request(RequestError::Status(_, code))`; [`ApiFailure::classify`] handles both,
-//! plus network failures, which never reached the server.
+//! (`crate::server::api::ApiError`), in one body shape for every `/api/` route
+//! (`crate::server::api::errors_layer`). The Dioxus client decodes it as
+//! `ServerFnError::ServerError { code, message, details }`, with our message in
+//! `details.ServerError.message`. A response from anything else (a proxy, a gateway) can also
+//! arrive as a bare `ServerFnError::Request(RequestError::Status(_, code))`.
+//!
+//! [`ApiFailure::classify`] handles all of them, plus network failures, which never reached the
+//! server. It only shows our structured message, never the `message` or `Display` text of the
+//! `ServerFnError`, which can be Dioxus's own text (`error running server function: …`) or a
+//! proxy's page.
 
 use dioxus::fullstack::RequestError;
 use dioxus::prelude::ServerFnError;
+use serde_json::Value;
 
 /// What kind of failure it was, from the user's point of view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,7 +28,8 @@ pub enum FailureKind {
     NotFound,
     /// `409`: contradicts saved data. Retrying the same request cannot succeed.
     Conflict,
-    /// `400`/`422`: the request was rejected as invalid. Retrying cannot succeed.
+    /// `400`/`413`/`422`: the request was rejected as invalid (or too large). Retrying cannot
+    /// succeed.
     Invalid,
     /// `503`, `502`, `504`: the server could not do it right now; nothing was saved. Retry.
     Transient,
@@ -47,7 +55,7 @@ impl FailureKind {
             403 => Self::Forbidden,
             404 => Self::NotFound,
             409 => Self::Conflict,
-            400 | 422 => Self::Invalid,
+            400 | 413 | 422 => Self::Invalid,
             429 => Self::RateLimited,
             502..=504 => Self::Transient,
             _ => Self::Other,
@@ -63,11 +71,14 @@ pub const NETWORK_MESSAGE: &str = "Cannot reach the server. Check your connectio
 pub const TRANSIENT_MESSAGE: &str = "The server is busy. Please try again.";
 
 /// A failed server function call, classified for the UI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ApiFailure {
     pub kind: FailureKind,
     /// The message to show the user.
     pub message: String,
+    /// Structured details some errors carry for the UI (e.g. the list of problems in a program
+    /// document), from `details.ServerError.details`.
+    pub details: Option<Value>,
 }
 
 impl ApiFailure {
@@ -76,35 +87,43 @@ impl ApiFailure {
     #[must_use]
     pub fn classify(error: &ServerFnError) -> Self {
         match error {
-            ServerFnError::ServerError { code, message, .. } => {
+            ServerFnError::ServerError { code, details, .. } => {
                 let kind = FailureKind::from_status(*code);
-                let message = match kind {
-                    FailureKind::Other => GENERIC_MESSAGE.to_owned(),
-                    _ if message.trim().is_empty() => default_message(kind).to_owned(),
-                    _ => message.clone(),
+                let ours = details
+                    .as_ref()
+                    .and_then(|details| details.get("ServerError"));
+                let message = match (kind, ours.and_then(|inner| inner.get("message"))) {
+                    // A 500's message is generic on our server; anything else's is unknown.
+                    (FailureKind::Other, _) => GENERIC_MESSAGE.to_owned(),
+                    (_, Some(Value::String(message))) if !message.trim().is_empty() => {
+                        message.clone()
+                    }
+                    _ => default_message(kind).to_owned(),
                 };
-                Self { kind, message }
-            }
-            ServerFnError::Request(RequestError::Status(_, code)) => {
-                let kind = FailureKind::from_status(*code);
                 Self {
                     kind,
-                    message: default_message(kind).to_owned(),
+                    message,
+                    details: ours.and_then(|inner| inner.get("details")).cloned(),
                 }
+            }
+            ServerFnError::Request(RequestError::Status(_, code)) => {
+                Self::without_details(FailureKind::from_status(*code))
             }
             ServerFnError::Request(
                 RequestError::Timeout(_)
                 | RequestError::Request(_)
                 | RequestError::Connect(_)
                 | RequestError::Body(_),
-            ) => Self {
-                kind: FailureKind::Network,
-                message: NETWORK_MESSAGE.to_owned(),
-            },
-            _ => Self {
-                kind: FailureKind::Other,
-                message: GENERIC_MESSAGE.to_owned(),
-            },
+            ) => Self::without_details(FailureKind::Network),
+            _ => Self::without_details(FailureKind::Other),
+        }
+    }
+
+    fn without_details(kind: FailureKind) -> Self {
+        Self {
+            kind,
+            message: default_message(kind).to_owned(),
+            details: None,
         }
     }
 
@@ -140,11 +159,15 @@ const fn default_message(kind: FailureKind) -> &'static str {
 mod tests {
     use super::*;
 
+    /// A failure as the Dioxus client decodes our server's body: Dioxus's own text in
+    /// `message`, ours in `details.ServerError.message`.
     fn server(code: u16, message: &str) -> ServerFnError {
         ServerFnError::ServerError {
-            message: message.to_owned(),
+            message: format!("error running server function: {message} (details: None)"),
             code,
-            details: None,
+            details: Some(
+                serde_json::json!({ "ServerError": { "message": message, "code": code } }),
+            ),
         }
     }
 
@@ -160,6 +183,7 @@ mod tests {
             (404, FailureKind::NotFound, false),
             (409, FailureKind::Conflict, false),
             (400, FailureKind::Invalid, false),
+            (413, FailureKind::Invalid, false),
             (422, FailureKind::Invalid, false),
             (429, FailureKind::RateLimited, true),
             (500, FailureKind::Other, false),
@@ -178,14 +202,14 @@ mod tests {
     }
 
     #[test]
-    fn the_servers_message_is_shown_except_for_other_failures() {
+    fn only_the_servers_structured_message_is_shown() {
         assert_eq!(
             ApiFailure::classify(&server(409, "This session has already ended.")).message,
             "This session has already ended."
         );
         assert_eq!(
-            ApiFailure::classify(&server(503, "The server is busy. Please try again.")).message,
-            TRANSIENT_MESSAGE
+            ApiFailure::classify(&server(422, "Invalid request.")).message,
+            "Invalid request."
         );
         // A 500 message is generic on our server, but a proxy's could be anything.
         assert_eq!(
@@ -199,6 +223,40 @@ mod tests {
         assert_eq!(
             ApiFailure::classify(&status(401)).message,
             "Please sign in."
+        );
+        // Without our structured message, the raw text is never shown.
+        let raw = ServerFnError::ServerError {
+            message: "HTTP 502: <html>Bad gateway</html>".to_owned(),
+            code: 502,
+            details: None,
+        };
+        assert_eq!(ApiFailure::classify(&raw).message, TRANSIENT_MESSAGE);
+        let raw = ServerFnError::ServerError {
+            message: "error running server function: Taken. (details: None)".to_owned(),
+            code: 409,
+            details: Some(serde_json::json!({ "other": 1 })),
+        };
+        assert_eq!(
+            ApiFailure::classify(&raw).message,
+            "This conflicts with data that is already saved."
+        );
+    }
+
+    #[test]
+    fn structured_details_are_passed_on() {
+        let error = ServerFnError::ServerError {
+            message: "x".to_owned(),
+            code: 422,
+            details: Some(serde_json::json!({
+                "ServerError": { "message": "Invalid program.", "code": 422, "details": ["a"] }
+            })),
+        };
+        let failure = ApiFailure::classify(&error);
+        assert_eq!(failure.message, "Invalid program.");
+        assert_eq!(failure.details, Some(serde_json::json!(["a"])));
+        assert_eq!(
+            ApiFailure::classify(&server(404, "Not found.")).details,
+            None
         );
     }
 

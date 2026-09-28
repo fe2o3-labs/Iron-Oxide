@@ -874,6 +874,31 @@ mod tests {
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
     #[ignore = "needs Postgres"]
+    async fn arguments_that_do_not_decode_are_422(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let mut a = api.user("A").await;
+        for (path, body) in [
+            (GET, json!({ "session_id": "not-a-uuid" })),
+            (GET, json!({ "session_id": 5 })),
+            (GET, json!({})),
+            (START, json!({ "session_id": SessionId::new_v7(), "started_at": "noon" })),
+            (FINISH, json!({ "session_id": SessionId::new_v7(), "outcome": "won", "finished_at": 1 })),
+            (SAVE_SET, json!({ "session_id": SessionId::new_v7(), "set": { "id": "x" } })),
+        ] {
+            let error = a.call_err(path, body).await;
+            assert_eq!(
+                error,
+                CallError {
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    message: "Invalid request.".to_owned(),
+                },
+                "{path}"
+            );
+        }
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
     async fn every_endpoint_needs_a_signed_in_user(db: PgPool) {
         let api = TestApi::new(db).await;
         let a = api.user("A").await;

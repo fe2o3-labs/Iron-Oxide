@@ -163,8 +163,8 @@ impl Browser {
             Ok(serde_json::from_slice(&bytes)
                 .unwrap_or_else(|e| panic!("{path}: {e}: {}", String::from_utf8_lossy(&bytes))))
         } else {
-            // Extractor rejections (`AuthUser`) send `{"error": message}`; errors returned by a
-            // server function body send the whole `ServerFnError` under `data`.
+            // `/api/` errors carry our message in `data.ServerError.message` (see
+            // `server::api::errors_layer`); other routes send `{"error": message}`.
             let message = serde_json::from_slice::<Value>(&bytes)
                 .ok()
                 .and_then(|v| {
