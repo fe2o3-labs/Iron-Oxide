@@ -9,11 +9,20 @@ dist/
 .env.*
 !.env.example
 
-# Private keys and certificates
+# Private keys, certificates and credential files
 *.pem
 *.key
 *.p12
 *.pfx
+*.p8
+*.jks
+id_rsa*
+id_ecdsa*
+id_ed25519*
+.netrc
+credentials.json
+# direnv: holds exported environment variables, often secrets
+.envrc
 
 # Local tooling
 .remember/
