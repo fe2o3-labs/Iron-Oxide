@@ -297,6 +297,8 @@ cd target/dx/iron-oxide-app/release/web
 IP=0.0.0.0 PORT=8080 DATABASE_URL=... APP_BASE_URL=... ./server
 ```
 
+Docker image and Fly.io deployment: see [docs/operations/deploy.md](docs/operations/deploy.md).
+
 ## Security
 
 See [SECURITY.md](SECURITY.md) for how to report a vulnerability and for the secrets policy.

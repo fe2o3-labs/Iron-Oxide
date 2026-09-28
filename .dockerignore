@@ -1,0 +1,41 @@
+# Keep the build context small and free of secrets: the context is uploaded to Fly's remote
+# builder. The build needs Cargo.toml, Cargo.lock, rust-toolchain.toml, .cargo/, crates/ (with
+# their assets and migrations), .sqlx/ and any data directories the crates include.
+# `**/` patterns match at any depth; plain patterns only at the context root.
+
+# Build output
+**/target/
+**/dist/
+
+# Environment files and keys, at any depth. `.env.example` (placeholders only) is excluded too:
+# the build never needs it.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+
+# VCS, CI and docs (root only: a crate may include its own README)
+.git/
+.github/
+docs/
+*.md
+
+# Local tooling, editors and OS files
+**/.remember/
+**/.idea/
+**/.vscode/
+**/*.iml
+**/*.swp
+**/*.swo
+**/*~
+**/.DS_Store
+**/node_modules/
+
+# Container and host config
+Dockerfile
+.dockerignore
+fly.toml
+docker-compose*.yml
+compose*.yml
