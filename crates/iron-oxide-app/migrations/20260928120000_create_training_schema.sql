@@ -38,7 +38,8 @@ BEGIN
 END;
 $$;
 
--- Rejects a direct DELETE; only deletes cascading from a foreign key (a deleted user) pass.
+-- Rejects a direct DELETE (row trigger) or a TRUNCATE (statement trigger); only deletes cascading
+-- from a foreign key (a deleted user) pass.
 -- pg_trigger_depth() is 1 for a trigger fired by a statement and at least 2 for one fired from
 -- the referential action of a cascading foreign key.
 CREATE FUNCTION forbid_direct_delete() RETURNS trigger
@@ -242,3 +243,23 @@ CREATE INDEX workout_sets_session_id_idx ON workout_sets (user_id, session_id, c
 
 CREATE TRIGGER workout_sets_owner BEFORE UPDATE OF user_id ON workout_sets
     FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
+
+-- ---------------------------------------------------------------------------------------------
+-- No TRUNCATE: it skips row-level DELETE triggers, and `TRUNCATE ... CASCADE` on one table would
+-- empty every user's data at once. The app never truncates; accounts are deleted one by one.
+CREATE TRIGGER users_no_truncate BEFORE TRUNCATE ON users
+    FOR EACH STATEMENT EXECUTE FUNCTION forbid_direct_delete();
+CREATE TRIGGER user_settings_no_truncate BEFORE TRUNCATE ON user_settings
+    FOR EACH STATEMENT EXECUTE FUNCTION forbid_direct_delete();
+CREATE TRIGGER training_maxes_no_truncate BEFORE TRUNCATE ON training_maxes
+    FOR EACH STATEMENT EXECUTE FUNCTION forbid_direct_delete();
+CREATE TRIGGER programs_no_truncate BEFORE TRUNCATE ON programs
+    FOR EACH STATEMENT EXECUTE FUNCTION forbid_direct_delete();
+CREATE TRIGGER program_versions_no_truncate BEFORE TRUNCATE ON program_versions
+    FOR EACH STATEMENT EXECUTE FUNCTION forbid_direct_delete();
+CREATE TRIGGER active_program_no_truncate BEFORE TRUNCATE ON active_program
+    FOR EACH STATEMENT EXECUTE FUNCTION forbid_direct_delete();
+CREATE TRIGGER workout_sessions_no_truncate BEFORE TRUNCATE ON workout_sessions
+    FOR EACH STATEMENT EXECUTE FUNCTION forbid_direct_delete();
+CREATE TRIGGER workout_sets_no_truncate BEFORE TRUNCATE ON workout_sets
+    FOR EACH STATEMENT EXECUTE FUNCTION forbid_direct_delete();

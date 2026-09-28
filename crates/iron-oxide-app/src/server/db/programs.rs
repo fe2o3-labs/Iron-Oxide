@@ -216,11 +216,11 @@ pub async fn copy_builtin(
     creation: CreationId,
     builtin_id: &str,
 ) -> Result<(Change, Program, ProgramVersion), RepoError> {
-    let same = |program: &Program, _: &ProgramVersion| {
+    let same = |program: &Program, _same_document: bool| {
         program.source_builtin_id.as_deref() == Some(builtin_id)
     };
     let mut tx = pool.begin().await?;
-    if let Some(existing) = find_creation(&mut tx, user, creation).await? {
+    if let Some(existing) = find_creation(&mut tx, user, creation, None).await? {
         return replayed(existing, same);
     }
     let source = sqlx::query!(
@@ -233,16 +233,13 @@ pub async fn copy_builtin(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(RepoError::NotFound)?;
-    let result = insert_program(
-        &mut tx,
-        user,
-        creation,
-        &source.name,
-        Some(builtin_id),
-        &source.document,
-        same,
-    )
-    .await?;
+    let new = NewProgram {
+        name: &source.name,
+        source_builtin_id: Some(builtin_id),
+        document: &source.document,
+        compare_document: false,
+    };
+    let result = insert_program(&mut tx, user, creation, &new, same).await?;
     tx.commit().await?;
     Ok(result)
 }
@@ -264,24 +261,40 @@ pub async fn create(
     name: &str,
     document: &JsonValue,
 ) -> Result<(Change, Program, ProgramVersion), RepoError> {
-    let same = |program: &Program, first: &ProgramVersion| {
-        program.source_builtin_id.is_none() && &first.document == document
+    let same = |program: &Program, same_document: bool| {
+        program.source_builtin_id.is_none() && same_document
     };
     let mut tx = pool.begin().await?;
-    if let Some(existing) = find_creation(&mut tx, user, creation).await? {
+    if let Some(existing) = find_creation(&mut tx, user, creation, Some(document)).await? {
         return replayed(existing, same);
     }
-    let result = insert_program(&mut tx, user, creation, name, None, document, same).await?;
+    let new = NewProgram {
+        name,
+        source_builtin_id: None,
+        document,
+        compare_document: true,
+    };
+    let result = insert_program(&mut tx, user, creation, &new, same).await?;
     tx.commit().await?;
     Ok(result)
 }
 
-/// The user's program created with `creation`, and its first version.
+/// A program found by its creation id, with its first version.
+struct Existing {
+    program: Program,
+    first: ProgramVersion,
+    /// Whether the first version's document equals the one compared with, as jsonb (so that
+    /// `1e16` and `10000000000000000` are equal, as Postgres stores them). `false` when none was.
+    same_document: bool,
+}
+
+/// The user's program created with `creation`, and its first version, compared with `compare`.
 async fn find_creation(
     tx: &mut Transaction<'_, Postgres>,
     user: UserId,
     creation: CreationId,
-) -> Result<Option<(Program, ProgramVersion)>, RepoError> {
+    compare: Option<&JsonValue>,
+) -> Result<Option<Existing>, RepoError> {
     let program = sqlx::query_as!(
         ProgramRow,
         "SELECT id, name, source_builtin_id, archived, created_at FROM programs
@@ -294,40 +307,62 @@ async fn find_creation(
     let Some(program) = program.map(Program::from) else {
         return Ok(None);
     };
-    let first = sqlx::query_as!(
-        VersionRow,
-        "SELECT id, program_id, version, document, created_at FROM program_versions
-         WHERE program_id = $1 AND user_id = $2 AND version = 1",
+    let first = sqlx::query!(
+        r#"SELECT id, program_id, version, document, created_at,
+                  COALESCE(document = $3::jsonb, false) AS "same_document!"
+           FROM program_versions
+           WHERE program_id = $1 AND user_id = $2 AND version = 1"#,
         program.id.as_uuid(),
         user.as_uuid(),
+        compare,
     )
     .fetch_optional(&mut **tx)
     .await?
     // Created together with the program in one transaction, and never deleted on its own.
     .ok_or(RepoError::Corrupt("program_versions: first version missing"))?;
-    Ok(Some((program, ProgramVersion::try_from(first)?)))
+    let same_document = first.same_document;
+    let first = ProgramVersion::try_from(VersionRow {
+        id: first.id,
+        program_id: first.program_id,
+        version: first.version,
+        document: first.document,
+        created_at: first.created_at,
+    })?;
+    Ok(Some(Existing {
+        program,
+        first,
+        same_document,
+    }))
 }
 
 /// The answer to a retried create: the same request gets its program back, another one conflicts.
 fn replayed(
-    (program, first): (Program, ProgramVersion),
-    same: impl Fn(&Program, &ProgramVersion) -> bool,
+    existing: Existing,
+    same: impl Fn(&Program, bool) -> bool,
 ) -> Result<(Change, Program, ProgramVersion), RepoError> {
-    if same(&program, &first) {
-        Ok((Change::Unchanged, program, first))
+    if same(&existing.program, existing.same_document) {
+        Ok((Change::Unchanged, existing.program, existing.first))
     } else {
         Err(RepoError::Conflict)
     }
+}
+
+/// What [`insert_program`] creates.
+struct NewProgram<'a> {
+    name: &'a str,
+    source_builtin_id: Option<&'a str>,
+    /// Version 1.
+    document: &'a JsonValue,
+    /// Whether a retry must have the same document (a create) or not (a copy).
+    compare_document: bool,
 }
 
 async fn insert_program(
     tx: &mut Transaction<'_, Postgres>,
     user: UserId,
     creation: CreationId,
-    name: &str,
-    source_builtin_id: Option<&str>,
-    document: &JsonValue,
-    same: impl Fn(&Program, &ProgramVersion) -> bool,
+    new: &NewProgram<'_>,
+    same: impl Fn(&Program, bool) -> bool,
 ) -> Result<(Change, Program, ProgramVersion), RepoError> {
     let row = sqlx::query_as!(
         ProgramRow,
@@ -337,20 +372,21 @@ async fn insert_program(
          RETURNING id, name, source_builtin_id, archived, created_at",
         user.as_uuid(),
         creation.as_uuid(),
-        source_builtin_id,
-        name,
+        new.source_builtin_id,
+        new.name,
     )
     .fetch_optional(&mut **tx)
     .await?;
     let Some(row) = row else {
         // A concurrent request with the same creation id committed first: answer as a retry.
-        return match find_creation(tx, user, creation).await? {
+        let compare = new.compare_document.then_some(new.document);
+        return match find_creation(tx, user, creation, compare).await? {
             Some(existing) => replayed(existing, same),
             None => Err(RepoError::Transient),
         };
     };
     let program = Program::from(row);
-    let version = insert_next_version(tx, program.id, document).await?;
+    let version = insert_next_version(tx, program.id, new.document).await?;
     Ok((Change::Applied, program, version))
 }
 
@@ -479,9 +515,18 @@ pub async fn add_version(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(RepoError::NotFound)?;
-    let latest = latest_in(&mut *tx, user, program).await?;
-    if let Some(latest) = latest.filter(|latest| &latest.document == document) {
-        return Ok((Change::Unchanged, latest));
+    if let Some(latest) = latest_in(&mut *tx, user, program).await? {
+        // Compared as jsonb, like the stored document (see `Existing::same_document`).
+        let same = sqlx::query_scalar!(
+            r#"SELECT document = $2::jsonb AS "same!" FROM program_versions WHERE id = $1"#,
+            latest.id.as_uuid(),
+            document,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if same {
+            return Ok((Change::Unchanged, latest));
+        }
     }
     let version = insert_next_version(&mut tx, program, document).await?;
     tx.commit().await?;
@@ -927,5 +972,33 @@ mod tests {
         let result = copy_builtin(&pool, user, key, "starter").await;
         assert!(matches!(result, Err(RepoError::Conflict)), "{result:?}");
         assert_eq!(list(&pool, user, true).await.unwrap().len(), 1);
+    }
+
+    /// jsonb normalises numbers (`1e16` is stored as `10000000000000000`), so a retried request
+    /// must be compared as jsonb, not as the `serde_json` value read back.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn retries_compare_documents_as_jsonb(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let big: JsonValue =
+            serde_json::from_str(r#"{"schema_version": 1, "big": 1e16, "small": 1.50}"#).unwrap();
+        let key = creation();
+        let (change, program, first) = create(&pool, user, key, "P", &big).await.unwrap();
+        assert_eq!(change, Change::Applied);
+        // What comes back differs from what was sent, as serde_json values.
+        assert_ne!(first.document, big);
+        let (change, again, _) = create(&pool, user, key, "P", &big).await.unwrap();
+        assert_eq!((change, again.id), (Change::Unchanged, program.id));
+
+        let (change, v2) = add_version(&pool, user, program.id, &big).await.unwrap();
+        assert_eq!((change, v2.version), (Change::Unchanged, 1));
+        let other: JsonValue =
+            serde_json::from_str(r#"{"schema_version": 1, "big": 2e16}"#).unwrap();
+        let (change, v2) = add_version(&pool, user, program.id, &other).await.unwrap();
+        assert_eq!((change, v2.version), (Change::Applied, 2));
+        let (change, again) = add_version(&pool, user, program.id, &other).await.unwrap();
+        assert_eq!((change, again.id), (Change::Unchanged, v2.id));
+        let result = create(&pool, user, key, "P", &other).await;
+        assert!(matches!(result, Err(RepoError::Conflict)), "{result:?}");
     }
 }

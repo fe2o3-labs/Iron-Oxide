@@ -656,3 +656,64 @@ async fn no_tables_outside_public(pool: PgPool) {
     .unwrap();
     assert!(elsewhere.is_empty(), "{elsewhere:?}");
 }
+
+#[sqlx::test(migrator = "MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn no_table_with_user_data_can_be_truncated(pool: PgPool) {
+    let (a, b) = testing::users_a_and_b(&pool).await;
+    testing::populate(&pool, a).await;
+    testing::populate(&pool, b).await;
+    let mut tables = user_owned_tables(&pool).await;
+    tables.push("users".to_owned());
+    for table in &tables {
+        // Without CASCADE, a table referenced by a foreign key is refused by Postgres itself
+        // (0A000) before the trigger runs; either way nothing is truncated.
+        let sql = format!("TRUNCATE \"{table}\"");
+        let error = sqlx::query(&sql).execute(&pool).await.unwrap_err();
+        let code = error.as_database_error().unwrap().code();
+        assert!(
+            matches!(code.as_deref(), Some("23000" | "0A000")),
+            "{sql}: {error}"
+        );
+        // With CASCADE, only the guard stands in the way.
+        let sql = format!("TRUNCATE \"{table}\" CASCADE");
+        let error = sqlx::query(&sql).execute(&pool).await.unwrap_err();
+        let db_error = error.as_database_error().unwrap();
+        assert_eq!(db_error.code().as_deref(), Some("23000"), "{sql}: {error}");
+    }
+    for table in &tables[..tables.len() - 1] {
+        assert!(count_owned_by(&pool, table, a).await > 0, "{table}");
+        assert!(count_owned_by(&pool, table, b).await > 0, "{table}");
+    }
+    // Deleting a user still cascades everywhere.
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(a.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+    for table in &tables[..tables.len() - 1] {
+        assert_eq!(count_owned_by(&pool, table, a).await, 0, "{table}");
+    }
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn every_table_with_user_data_has_a_truncate_guard(pool: PgPool) {
+    let guarded = sqlx::query_scalar!(
+        r#"SELECT DISTINCT cls.relname AS "table!" FROM pg_trigger trg
+           JOIN pg_class cls ON cls.oid = trg.tgrelid
+           JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+           JOIN pg_proc proc ON proc.oid = trg.tgfoid
+           WHERE ns.nspname = 'public' AND NOT trg.tgisinternal
+             AND proc.proname = 'forbid_direct_delete'
+             -- A statement-level (bit 0 unset) BEFORE (bit 1) TRUNCATE (bit 5) trigger.
+             AND trg.tgtype & 1 = 0 AND trg.tgtype & 2 = 2 AND trg.tgtype & 32 = 32"#
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut tables = user_owned_tables(&pool).await;
+    tables.push("users".to_owned());
+    let missing: Vec<&String> = tables.iter().filter(|t| !guarded.contains(t)).collect();
+    assert!(missing.is_empty(), "no TRUNCATE guard on {missing:?}");
+}
