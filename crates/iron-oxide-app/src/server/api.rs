@@ -8,6 +8,7 @@
 pub mod error;
 pub mod errors_layer;
 pub mod history;
+pub mod programs;
 pub mod sessions;
 pub mod settings;
 #[cfg(test)]

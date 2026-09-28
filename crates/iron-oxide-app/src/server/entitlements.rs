@@ -51,8 +51,8 @@ pub enum EntitlementError {
 impl EntitlementError {
     /// The HTTP status and the message shown to the user.
     ///
-    // TODO(#68): map to `ApiError::Forbidden(message)` (403) / `Unauthorized` / `Transient` /
-    // `Internal` once #68's API conventions (PR #71) land, and drop this local mapping.
+    // The program server functions go through `From<EntitlementError> for ApiError` (which uses
+    // this message). TODO(#68): move `my_entitlements` to `ApiError` too and drop this mapping.
     #[must_use]
     pub fn public(&self) -> (u16, String) {
         match self {
@@ -163,7 +163,7 @@ pub async fn require(
 /// is reached. Returns the plan.
 ///
 /// Call it inside the transaction that then adds the row, **before** writing: it locks the user's
-/// row (`SELECT … FROM users … FOR UPDATE`, held until the transaction ends), reads the plan, and
+/// row (`SELECT … FROM users … FOR NO KEY UPDATE`, held until the transaction ends), reads the plan, and
 /// counts what the quota counts, all under that lock. Two concurrent requests for the same user
 /// are therefore serialised: the second one counts the first one's row and is refused at the cap.
 /// Counting on a pool outside such a transaction is always racy, so there is no pool variant.
@@ -176,7 +176,6 @@ pub async fn require(
 ///
 /// A user over the cap (a downgrade from pro) keeps every program and can use and archive them,
 /// but cannot add or unarchive one until they are under the cap.
-#[allow(dead_code, reason = "called by the program server functions of #19")]
 pub async fn reserve_quota(
     tx: &mut PgConnection,
     user: AuthUser,

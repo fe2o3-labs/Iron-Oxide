@@ -198,10 +198,10 @@ types mirror them field for field, and switch to them once they are merged.
 
 | Module | Functions |
 |---|---|
-| `users` | `plan` (the subscription plan, read on every gated call), `lock_plan` (the same with `FOR UPDATE`: the serialisation point of quota checks), `unarchived_programs` (what the custom program quota counts); see docs/billing.md |
+| `users` | `plan` (the subscription plan, read on every gated call), `lock_plan` (the same with `FOR NO KEY UPDATE`: the serialisation point of quota checks), `unarchived_programs` (what the custom program quota counts); see docs/billing.md |
 | `settings` | `find` (`None` when never saved: the API then shows its own defaults, #20), `save` |
 | `training_maxes` | `list`, `set`, `delete` |
-| `programs` | `seed_builtins`, `list_builtins`, `copy_builtin` and `create` (idempotent on a `CreationId`), `get`, `list`, `rename`, `set_archived`, `add_version` (a retried identical upload is a no-op), `list_versions`, `get_version`, `latest_version` |
+| `programs` | `seed_builtins`, `list_builtins`, `copy_builtin` and `create` (idempotent on a `CreationId`), `get`, `list`, `rename`, `archive`, `unarchive`, `add_version` (a retried identical upload is a no-op), `list_versions`, `get_version`, `latest_version` |
 | `active_program` | `get`, `set`, `clear` |
 | `sessions` | `start` (idempotent), `finish` (idempotent), `get`, `get_in_progress`, `list` (history pages by `(started_at, id)`, optionally for one program) |
 | `history` | The history screens (#20): `page` (ended sessions, most recently finished first, paged by `(finished_at, id)` with microsecond cursors, served by the partial `workout_sessions_history_idx`), `entry` (one session with its program name, version number and working-set count), `exercise_sets` (weighted sets of one exercise in ended sessions, for the charts), `logged_exercises` |

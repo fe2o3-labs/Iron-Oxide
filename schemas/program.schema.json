@@ -29,14 +29,14 @@
       ],
       "maxLength": 2000,
       "minLength": 1,
-      "pattern": "[^\\s\\u0085]"
+      "pattern": "^[^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f]*[^\\s\\u0085\\u0000-\\u001f][^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f]*$"
     },
     "name": {
       "description": "The program's name.",
       "type": "string",
       "maxLength": 100,
       "minLength": 1,
-      "pattern": "[^\\s\\u0085]"
+      "pattern": "^[^\\u0000-\\u001f]*[^\\s\\u0085\\u0000-\\u001f][^\\u0000-\\u001f]*$"
     },
     "rotation": {
       "description": "The suggested order of the days, repeated forever: `[\"a\", \"b\", \"c\"]`. Every day appears\nexactly once.",
@@ -90,7 +90,7 @@
           "type": "string",
           "maxLength": 100,
           "minLength": 1,
-          "pattern": "[^\\s\\u0085]"
+          "pattern": "^[^\\u0000-\\u001f]*[^\\s\\u0085\\u0000-\\u001f][^\\u0000-\\u001f]*$"
         }
       },
       "additionalProperties": false,
@@ -167,7 +167,7 @@
           "type": "string",
           "maxLength": 100,
           "minLength": 1,
-          "pattern": "[^\\s\\u0085]"
+          "pattern": "^[^\\u0000-\\u001f]*[^\\s\\u0085\\u0000-\\u001f][^\\u0000-\\u001f]*$"
         },
         "notes": {
           "description": "Optional coaching notes.",
@@ -177,7 +177,7 @@
           ],
           "maxLength": 2000,
           "minLength": 1,
-          "pattern": "[^\\s\\u0085]"
+          "pattern": "^[^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f]*[^\\s\\u0085\\u0000-\\u001f][^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f]*$"
         },
         "progression": {
           "description": "How the target moves from one session to the next. Defaults to `\"none\"`.",
