@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT exercise_id, weight_ng FROM training_maxes\n         WHERE user_id = $1 ORDER BY exercise_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exercise_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "weight_ng",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b6ba08b6a74f062345ee91d8bd63ffe9d423a78d11211dc8dbea1ba28548f0f2"
+}
