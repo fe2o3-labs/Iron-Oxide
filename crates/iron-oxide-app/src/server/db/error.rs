@@ -20,6 +20,12 @@ pub enum RepoError {
     /// The session has ended: no new set can be added to it.
     #[error("the session has already ended")]
     SessionEnded,
+    /// The program is archived, so it cannot be made the active program.
+    #[error("the program is archived")]
+    ProgramArchived,
+    /// The program is the active program, so it cannot be archived.
+    #[error("the program is the active program")]
+    ProgramActive,
     /// A concurrent write got in the way and nothing was saved: retrying the same request is safe
     /// and expected to succeed (a client retry queue treats it as transient, like a timeout).
     #[error("please try again")]
@@ -38,6 +44,11 @@ pub enum RepoError {
     Database(#[source] sqlx::Error),
 }
 
+/// The "constraint" named by the trigger refusing an archived program as the active one.
+const ACTIVE_NOT_ARCHIVED: &str = "active_program_not_archived";
+/// The "constraint" named by the trigger refusing to archive the active program.
+const ARCHIVED_NOT_ACTIVE: &str = "programs_active_not_archived";
+
 impl From<sqlx::Error> for RepoError {
     /// Maps constraint violations to the variants above. A foreign key violation means a referenced
     /// row is not among the caller's (the composite keys include `user_id`), hence `NotFound`.
@@ -49,6 +60,13 @@ impl From<sqlx::Error> for RepoError {
         match db_error.kind() {
             ErrorKind::ForeignKeyViolation => Self::NotFound,
             ErrorKind::UniqueViolation => Self::Conflict,
+            // Raised by the triggers that keep the active program unarchived.
+            ErrorKind::CheckViolation if constraint.as_deref() == Some(ACTIVE_NOT_ARCHIVED) => {
+                Self::ProgramArchived
+            }
+            ErrorKind::CheckViolation if constraint.as_deref() == Some(ARCHIVED_NOT_ACTIVE) => {
+                Self::ProgramActive
+            }
             ErrorKind::CheckViolation | ErrorKind::NotNullViolation => Self::Invalid { constraint },
             // 23000 integrity_constraint_violation: raised by the immutability triggers.
             _ if db_error.code().as_deref() == Some("23000") => Self::Invalid { constraint },

@@ -144,6 +144,7 @@ impl Browser {
         response
     }
 
+    /// A request from this browser: its cookie and same-origin headers, no body yet.
     pub fn request(
         &self,
         method: &str,

@@ -24,7 +24,10 @@
 //! }
 //! ```
 
-use dioxus::server::axum::http::StatusCode;
+use dioxus::server::axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode, header, request},
+};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sqlx::{PgPool, types::Uuid};
@@ -106,6 +109,26 @@ impl TestUser {
     /// The raw status and body of a call, to compare two answers byte for byte.
     pub async fn call_raw(&mut self, path: &str, body: Value) -> (StatusCode, Vec<u8>) {
         self.browser.post_json(path, body).await
+    }
+
+    /// A `POST` to `path` from this user's browser (cookie, same-origin headers, JSON content
+    /// type), for a test that needs to control the body or headers. Send it with
+    /// [`TestUser::send`].
+    pub fn post(&self, path: &str) -> request::Builder {
+        self.browser
+            .request("POST", path)
+            .header(header::CONTENT_TYPE, "application/json")
+    }
+
+    /// Sends `request` and returns the status and the body, as JSON when it is JSON (as a JSON
+    /// string otherwise).
+    pub async fn send(&mut self, request: Request<Body>) -> (StatusCode, Value) {
+        let response = self.browser.send(request).await;
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1 << 22).await.unwrap();
+        let body = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+        (status, body)
     }
 
     /// Like [`TestUser::call`], for a call that must fail. Panics with the result if it succeeds.

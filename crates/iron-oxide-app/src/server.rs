@@ -225,8 +225,9 @@ pub fn router(state: AppState, auth: auth::AuthState) -> Router {
     auth::install(app, auth, state.db.clone(), limiter)
         // One error body for every `/api/` failure, CSRF and sign-in rejections included (#68).
         .layer(from_fn(api::errors_layer::normalize))
-        // Merged after `auth::install`, so outside its session and CSRF layers: Stripe's webhook
-        // deliveries are cross-site POSTs, authenticated by their signature (billing.rs).
+        // Merged after `auth::install` and the error layer, so outside its session and CSRF layers:
+        // Stripe's webhook deliveries are cross-site POSTs, authenticated by their signature
+        // (billing.rs).
         .merge(billing::routes())
         .layer(Extension(state))
 }

@@ -28,14 +28,19 @@ pub async fn plan<'e>(
     plan.map(|name| parse_plan(&name)).transpose()
 }
 
-/// Locks the user's row until the end of the transaction (`SELECT … FOR UPDATE`) and returns the
-/// plan, or `None` if the user does not exist.
+/// Locks the user's row until the end of the transaction (`SELECT … FOR NO KEY UPDATE`) and
+/// returns the plan, or `None` if the user does not exist.
 ///
 /// This is the serialisation point of every quota check: two transactions that both lock the
 /// same user run one after the other, so the second one counts what the first one added.
+///
+/// `NO KEY UPDATE`, not `UPDATE`: it does not block the `KEY SHARE` lock that a foreign key check
+/// takes on the user's row, so a transaction that holds a program's row and then inserts a row
+/// referencing the user (setting the active program, adding a version, starting a session) never
+/// waits for a quota check that waits for that program's row (a deadlock with `unarchive`).
 pub async fn lock_plan(tx: &mut PgConnection, user: UserId) -> Result<Option<Plan>, RepoError> {
     let plan = sqlx::query_scalar!(
-        r#"SELECT plan::text AS "plan!" FROM users WHERE id = $1 FOR UPDATE"#,
+        r#"SELECT plan::text AS "plan!" FROM users WHERE id = $1 FOR NO KEY UPDATE"#,
         user.as_uuid()
     )
     .fetch_optional(tx)
@@ -157,7 +162,7 @@ mod tests {
     async fn unarchived_programs_counts_only_the_users_own_unarchived_ones(pool: PgPool) {
         let (a, b) = testing::users_a_and_b(&pool).await;
         let (archived, _) = testing::program(&pool, a).await;
-        super::super::programs::set_archived(&pool, a, archived, true)
+        super::super::programs::archive(&pool, a, archived)
             .await
             .unwrap();
         testing::program(&pool, a).await;

@@ -53,7 +53,8 @@ mod weight;
 pub use duration::Seconds;
 pub use error::{Quantity, ValueError};
 pub use ids::{
-    DayId, ExerciseId, ProgramId, ProgramVersionId, SLUG_MAX_LEN, SessionId, SetId, UserId,
+    CreationId, DayId, ExerciseId, ProgramId, ProgramVersionId, SLUG_MAX_LEN, SessionId, SetId,
+    UserId,
 };
 pub use percent::Percent;
 pub use plates::{

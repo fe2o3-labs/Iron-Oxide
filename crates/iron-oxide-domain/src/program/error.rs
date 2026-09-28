@@ -128,6 +128,13 @@ pub enum ValidationErrorKind {
     /// A text is empty or only whitespace.
     #[error("must not be blank")]
     Blank,
+    /// A text contains a control character (U+0000 to U+001F). Descriptions and notes may contain
+    /// tabs and line breaks; names may not.
+    #[error("must not contain control characters{}", if *.multiline { " other than tabs and line breaks" } else { "" })]
+    ControlCharacter {
+        /// Whether tabs and line breaks are allowed (descriptions and notes).
+        multiline: bool,
+    },
     /// A text is too long.
     #[error("must be at most {max} characters (got {len})")]
     TooLong {

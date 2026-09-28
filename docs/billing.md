@@ -9,7 +9,7 @@ Stripe will flip `users.plan`. Today only the gating is live. The Stripe side is
 |---|---|
 | `crates/iron-oxide-domain/src/entitlements.rs` | **The policy**: `Plan`, `Feature`, `Quota`, `allows`, `limit`, `can_add`, `Entitlements` |
 | `crates/iron-oxide-app/src/server/entitlements.rs` | `require` (feature, 403 on refusal), `reserve_quota` (takes a quota slot under the user's row lock, 403 at the cap), `check` / `check_quota` (pure) |
-| `crates/iron-oxide-app/src/server/db/users.rs` | `plan(executor, user)`, `lock_plan(tx, user)` (`FOR UPDATE`), `unarchived_programs(executor, user)` |
+| `crates/iron-oxide-app/src/server/db/users.rs` | `plan(executor, user)`, `lock_plan(tx, user)` (`FOR NO KEY UPDATE`), `unarchived_programs(executor, user)` |
 | `crates/iron-oxide-app/src/api/billing.rs` | `my_entitlements()` server function for the UI (`POST /api/billing/entitlements`) |
 | `crates/iron-oxide-app/src/server/billing.rs` | `POST /webhooks/stripe` stub (answers `501`) |
 
@@ -80,15 +80,20 @@ pub async fn upload_program(/* ... */) -> Result<(), ServerFnError> {
   part of Iron Oxide Pro."). A user deleted meanwhile gets `401`, and a database failure `500`
   (`503` when transient). Details are only logged.
 - **Quotas: `reserve_quota(&mut tx, user, quota)`, in the transaction that writes, before the
-  write.** It locks the user's row (`SELECT … FROM users WHERE id = $1 FOR UPDATE`, held until the
-  transaction ends), reads the plan, counts the quota (`unarchived_programs`) and checks it, all
-  under that lock, and answers `403` at the cap ("Your plan keeps up to 10 programs. Archive one, or
-  upgrade to Pro."). Two concurrent requests of one user are thereby serialised: the second counts
-  the first one's row. Counting on the pool outside such a transaction is always racy, so there is
-  no pool variant. `two_concurrent_reservations_cannot_both_take_the_last_slot` is the reference
-  test of this recipe.
+  write.** It locks the user's row (`SELECT … FROM users WHERE id = $1 FOR NO KEY UPDATE`, held
+  until the transaction ends), reads the plan, counts the quota (`unarchived_programs`) and checks
+  it, all under that lock, and answers `403` at the cap ("Your plan keeps up to 10 programs.
+  Archive one, or upgrade to Pro."). Two concurrent requests of one user are thereby serialised:
+  the second counts the first one's row. Counting on the pool outside such a transaction is always
+  racy, so there is no pool variant. `two_concurrent_reservations_cannot_both_take_the_last_slot`
+  is the reference test of this recipe. `NO KEY UPDATE` rather than `UPDATE` so that foreign key
+  checks on the user's row (which take `KEY SHARE`) never wait for it: a transaction holding a
+  program's row and inserting a row that references the user cannot deadlock with a quota check.
 - **Every write that raises the `CustomPrograms` count must call `reserve_quota`** (#19 implements
-  them):
+  them). The repository functions `programs::create`, `copy_builtin` and `unarchive` take it as a
+  `reserve` step (`server::api::programs::program_slot`), which they run in their transaction after
+  locking the user's row (always first, before any program row) and checking for a replay or a
+  no-op, and before writing:
 
   | Program write (#19) | Takes a slot? |
   |---|---|
@@ -98,10 +103,11 @@ pub async fn upload_program(/* ... */) -> Result<(), ServerFnError> {
   | Idempotent replay (same creation id: answered from the existing row) | no: check for the replay **before** reserving, so a retry is never refused |
   | Archive, rename, upload a new version of an existing program, set the active program | no |
 
-  The repository functions that do these writes must therefore run in the caller's transaction
-  (or take it), so the reservation and the insert or update commit together.
-- The error mapping is local to `server/entitlements.rs` for now. It moves to `ApiError::Forbidden`
-  once #68 lands (TODO in the code).
+  | Unarchive a program that is not archived (a no-op) | no |
+
+  The reservation and the insert or update commit together, in one transaction.
+- Server functions map a refusal to `ApiError::Forbidden` (403, the message above) through
+  `From<EntitlementError> for ApiError`; `my_entitlements` still uses the local mapping.
 - The UI calls `my_entitlements()` (a `POST`, `401` when signed out) to show locks, remaining slots
   and upgrade prompts. That copy is for display only: the server checks every gate itself.
 
