@@ -268,6 +268,12 @@ impl AuthUser {
     pub fn user_id(&self) -> UserId {
         self.user_id
     }
+
+    /// An authenticated user without a request, for tests of code that takes an `AuthUser`.
+    #[cfg(test)]
+    pub(crate) fn for_tests(user_id: UserId) -> Self {
+        Self { user_id }
+    }
 }
 
 impl<S: Send + Sync> FromRequestParts<S> for AuthUser {

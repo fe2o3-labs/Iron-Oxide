@@ -1,9 +1,11 @@
 //! The axum server: the Dioxus app (SSR, assets, server functions) plus custom routes.
 
 pub mod auth;
+pub mod billing;
 pub mod config;
 pub mod db;
 pub mod dotenv;
+pub mod entitlements;
 pub mod logging;
 pub mod state;
 
@@ -90,6 +92,7 @@ async fn run(config: Arc<Config>) -> Result<(), ServeError> {
         log_filter = config.log_filter.as_deref().unwrap_or("(default)"),
         shutdown_grace_secs = config.shutdown_grace.as_secs(),
         cookie_secure = config.auth.cookie_secure,
+        stripe_webhook_secret_set = config.billing.stripe_webhook_secret.is_some(),
         "configuration loaded"
     );
 
@@ -206,7 +209,11 @@ pub fn router(state: AppState, auth: auth::AuthState) -> Router {
         .merge(custom_routes())
         .layer(from_fn(missing_assets_are_not_found));
     // Sign-in (#5): sessions, the CSRF check and the Google callback around the app.
-    auth::install(app, auth, state.db.clone()).layer(Extension(state))
+    auth::install(app, auth, state.db.clone())
+        // Merged after `auth::install`, so outside its session and CSRF layers: Stripe's webhook
+        // deliveries are cross-site POSTs, authenticated by their signature (billing.rs).
+        .merge(billing::routes())
+        .layer(Extension(state))
 }
 
 /// Routes served by axum directly, outside of Dioxus. They read [`AppState`] from the
