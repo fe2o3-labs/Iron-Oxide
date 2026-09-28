@@ -1,0 +1,57 @@
+# Fly.io config for the production app. Setup and secrets: docs/operations/deploy.md.
+# No secrets here: this file is public. Secrets are set with `fly secrets set`.
+
+# Placeholder name: the maintainer creates the app with `fly apps create iron-oxide`.
+# If that name is taken, change it here and in docs/operations/deploy.md.
+app = "iron-oxide"
+# Frankfurt, next to the Neon database (AWS eu-central-1).
+primary_region = "fra"
+# The server shuts down gracefully on SIGTERM (#50): it stops accepting connections and drains
+# in-flight requests. Fly's default is SIGINT with 5 s; give it 30 s before the hard kill.
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # Non-secret settings only. IP and PORT are also the image defaults.
+  IP = "0.0.0.0"
+  PORT = "8080"
+
+[deploy]
+  # Replace machines one at a time and wait for their health checks.
+  strategy = "rolling"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # One machine always runs, so nobody waits for a cold start and the app answers in the same
+  # time on every request. Extra machines (the first deploy creates two for redundancy) are
+  # suspended when idle and resumed by the proxy in well under a second when traffic needs them.
+  # A suspended machine is only billed for its root filesystem.
+  # Cheaper alternative: min_machines_running = 0, so the last machine also suspends when idle
+  # (near-zero cost, a sub-second resume on the first request after a quiet period).
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+  # Liveness only: /healthz never touches the database. A check that queried Postgres every 30 s
+  # would keep the Neon compute awake around the clock (about 180 CU-hours a month, above the Free
+  # plan's quota). Database connectivity is /readyz, called once after each deploy by
+  # .github/workflows/deploy.yml and by hand; never point a Fly check at it.
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
