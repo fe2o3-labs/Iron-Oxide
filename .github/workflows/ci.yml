@@ -274,8 +274,15 @@ jobs:
           bundle=target/dx/iron-oxide-app/release/web
           ls -la "$bundle"
           cd "$bundle"
-          IP=127.0.0.1 PORT=8080 APP_BASE_URL=http://127.0.0.1:8080 \
+          # Sign-in settings as for local development (#5). The session key is random per run,
+          # never committed; the Google client is a placeholder (Google is never called here).
+          SESSION_KEY="$(openssl rand 64 | base64 -w0)"
+          export SESSION_KEY
+          IP=127.0.0.1 PORT=8080 APP_BASE_URL=http://localhost:8080 \
             DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide \
+            WEBAUTHN_RP_ID=localhost WEBAUTHN_ORIGIN=http://localhost:8080 \
+            GOOGLE_CLIENT_ID=placeholder.apps.googleusercontent.com GOOGLE_CLIENT_SECRET=placeholder \
+            GOOGLE_REDIRECT_URL=http://localhost:8080/auth/google/callback \
             ./server > "$RUNNER_TEMP/server.log" 2>&1 &
           server_pid=$!
           for _ in $(seq 1 30); do
@@ -309,6 +316,16 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/assets/missing-dxh0.js)" = "404"
           # The startup migrations ran.
           test "$(PGPASSWORD=iron_oxide psql -h localhost -U iron_oxide -d iron_oxide -tAc "SELECT to_regclass('users')")" = "users"
+          test "$(PGPASSWORD=iron_oxide psql -h localhost -U iron_oxide -d iron_oxide -tAc "SELECT to_regclass('sessions')")" = "sessions"
+          # Sign-in (#5): signed out is 401; a cross-site POST is refused; a passkey sign-in
+          # starts (sets an HttpOnly, SameSite=Lax session cookie, not Secure on local http).
+          origin='Origin: http://localhost:8080'
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "$origin" -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8080/api/auth/me)" = "401"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Origin: https://evil.example' -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8080/api/auth/sign-out)" = "403"
+          curl -sSf -D "$RUNNER_TEMP/headers" -X POST -H "$origin" -H 'Content-Type: application/json' -d '{}' \
+            http://127.0.0.1:8080/api/auth/passkey/sign-in/begin | grep -q '"challenge"'
+          grep -i '^set-cookie: iron_oxide_session=' "$RUNNER_TEMP/headers" | grep -i 'httponly' | grep -qi 'samesite=lax'
+          curl -sS http://127.0.0.1:8080/auth/google/callback | grep -q '"type":"error"'
           # SIGTERM (Docker's stop signal, and what fly.toml sets) stops it cleanly with status 0.
           # SIGINT (Fly's default) is handled the same way; the Postgres tests cover it.
           kill -TERM "$server_pid"

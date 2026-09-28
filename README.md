@@ -94,16 +94,18 @@ host), stops the server with "unsupported parameter".
 | Variable | Required | What |
 |---|---|---|
 | `DATABASE_URL` | yes | Postgres connection URL (secret: it embeds the password) |
-| `APP_BASE_URL` | yes | Public URL of the app, e.g. `http://localhost:8080` |
+| `APP_BASE_URL` | yes | Public URL of the app, e.g. `http://localhost:8080`. `https://` required, except on `localhost`/`127.0.0.1` |
 | `IP`, `PORT` | no | Bind address, default `127.0.0.1:8080`. `dx serve` sets them itself |
 | `RUST_LOG` | no | Log filter, e.g. `info,sqlx=warn` |
 | `SHUTDOWN_GRACE_SECS` | no | Time in-flight requests get after a shutdown signal, 1 to 300, default 20. Keep it below the platform's kill timeout |
-| `WEBAUTHN_RP_ID`, `WEBAUTHN_ORIGIN` | with sign-in | Passkeys: our domain and exact origin |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URL` | with sign-in | Sign in with Google |
-| `SESSION_KEY` | with sign-in | Session cookie key, ≥ 64 random bytes in base64: `openssl rand 64 \| openssl base64 -A` |
+| `WEBAUTHN_RP_ID` | yes | Passkeys: our domain, e.g. `iron-oxyde.com` (`localhost` locally) |
+| `WEBAUTHN_ORIGIN` | yes | Passkeys: the origin of `APP_BASE_URL` (must be equal) |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | yes | Sign in with Google: the OAuth client (secret) |
+| `GOOGLE_REDIRECT_URL` | yes | `APP_BASE_URL`'s origin + `/auth/google/callback` (must be equal) |
+| `SESSION_KEY` | yes | Session cookie signing key (secret), ≥ 64 random bytes in base64: `openssl rand 64 \| openssl base64 -A` |
 
-The six sign-in variables are optional until sign-in lands (#5), but all-or-nothing: setting some
-of them is an error. Every value is validated at startup. If anything is missing or invalid, the
+Sign-in (passkeys, Google, sessions) is described in [docs/auth.md](docs/auth.md), including how to
+create the Google OAuth client. Every value is validated at startup. If anything is missing or invalid, the
 server prints one line per problem, naming the variable (never its value), and exits with status 1.
 Secrets are redacted from `Debug` output and logs.
 
@@ -230,6 +232,25 @@ pub async fn me() -> Result<Profile, ServerFnError> {
 ```
 
 `State<AppState>` does not work there, because Dioxus uses the axum router state for itself.
+
+### The signed-in user in server functions
+
+Take the server-only `AuthUser` argument: it reads the user from the server-side session and
+rejects the call with `401` when signed out, before the body runs. Never accept a user id from the
+client. Functions that change state must be `#[post]` (the CSRF check covers every non-`GET`).
+
+```rust
+#[cfg(feature = "server")]
+use {crate::server::{AppState, auth::AuthUser}, dioxus::server::axum::Extension};
+
+#[post("/api/sets", state: Extension<AppState>, user: AuthUser)]
+pub async fn save_set(set: NewSet) -> Result<(), ServerFnError> {
+    let user_id = user.user_id(); // scope every query by it
+    // ...
+}
+```
+
+On the client, `crate::auth::api::is_unauthorized(&error)` tells a 401 apart from other errors.
 
 Checks run by CI:
 

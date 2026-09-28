@@ -1,8 +1,10 @@
 //! The axum server: the Dioxus app (SSR, assets, server functions) plus custom routes.
 
+pub mod auth;
 pub mod config;
 pub mod db;
 pub mod dotenv;
+pub mod logging;
 pub mod state;
 
 use std::{future::IntoFuture, process::ExitCode, sync::Arc, time::Duration};
@@ -24,6 +26,8 @@ enum ServeError {
     Runtime(#[source] std::io::Error),
     #[error(transparent)]
     Database(#[from] db::DbError),
+    #[error("cannot set up sign-in: {0}")]
+    Auth(#[source] auth::AuthError),
     #[error("cannot listen on {addr}: {source}")]
     Bind {
         addr: std::net::SocketAddr,
@@ -77,21 +81,24 @@ pub fn serve(config: Config) -> ExitCode {
 }
 
 async fn run(config: Arc<Config>) -> Result<(), ServeError> {
-    // The same logger `dioxus::serve` sets up (honours RUST_LOG).
-    dioxus::logger::initialize_default();
+    // The same output as the Dioxus logger (honours RUST_LOG), with sign-in material capped.
+    logging::init(config.log_filter.as_deref());
     tracing::info!(
         bind_addr = %config.bind_addr,
         app_base_url = %config.app_base_url,
         database = config.database_url.redacted(),
         log_filter = config.log_filter.as_deref().unwrap_or("(default)"),
         shutdown_grace_secs = config.shutdown_grace.as_secs(),
-        auth_configured = config.auth.is_some(),
+        cookie_secure = config.auth.cookie_secure,
         "configuration loaded"
     );
 
     let addr = config.bind_addr;
     let grace = config.shutdown_grace;
+    // Sign-in (#5): built before touching the database, so a bad setting fails fast.
+    let auth = auth::AuthState::new(&config).map_err(ServeError::Auth)?;
     let state = AppState::init(config).await?;
+    let cleanup = auth::spawn_cleanup(state.db.clone());
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|source| ServeError::Bind { addr, source })?;
@@ -99,7 +106,7 @@ async fn run(config: Arc<Config>) -> Result<(), ServeError> {
     tracing::info!(%addr, "listening");
 
     let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = axum::serve(listener, router(state.clone()))
+    let server = axum::serve(listener, router(state.clone(), auth))
         .with_graceful_shutdown(async {
             // Resolves when told to drain (or if the sender is dropped).
             let _ = drain_rx.await;
@@ -133,6 +140,7 @@ async fn run(config: Arc<Config>) -> Result<(), ServeError> {
         }
     };
 
+    cleanup.abort();
     if tokio::time::timeout(POOL_CLOSE_TIMEOUT, state.db.close())
         .await
         .is_err()
@@ -193,11 +201,12 @@ impl ShutdownSignals {
 
 /// Full server router: the Dioxus application merged with the custom routes, with the shared
 /// state attached to every request (server functions included).
-pub fn router(state: AppState) -> Router {
-    dioxus::server::router(App)
+pub fn router(state: AppState, auth: auth::AuthState) -> Router {
+    let app = dioxus::server::router(App)
         .merge(custom_routes())
-        .layer(from_fn(missing_assets_are_not_found))
-        .layer(Extension(state))
+        .layer(from_fn(missing_assets_are_not_found));
+    // Sign-in (#5): sessions, the CSRF check and the Google callback around the app.
+    auth::install(app, auth, state.db.clone()).layer(Extension(state))
 }
 
 /// Routes served by axum directly, outside of Dioxus. They read [`AppState`] from the
@@ -238,14 +247,8 @@ mod tests {
     use tower::ServiceExt;
 
     fn state(db: PgPool) -> AppState {
-        let config = Config::from_lookup(|name| match name {
-            "DATABASE_URL" => Ok("postgres://u:p@127.0.0.1:1/db".to_owned()),
-            "APP_BASE_URL" => Ok("http://localhost:8080".to_owned()),
-            _ => Err(std::env::VarError::NotPresent),
-        })
-        .unwrap();
         AppState {
-            config: Arc::new(config),
+            config: Arc::new(auth::test_support::config()),
             db,
         }
     }
