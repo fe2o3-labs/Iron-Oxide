@@ -24,19 +24,24 @@ on the URL configured in `.env`.
 | Layout | yes | yes | yes | yes | yes | yes (read-only, see below) |
 | SW / offline (release build) | yes | yes | yes | yes | yes | no (not a secure context) |
 | Install to home screen | yes | yes | yes | yes | yes | bookmark only |
-| Wake Lock | API only¹ | API only¹ | yes | yes | yes | no |
-| Passkeys | expected² | yes, with a Play-services image³ | yes | yes | unverified⁴ | no |
+| Wake Lock | API only¹ | API only¹ | yes | yes⁶ | yes⁶ | no |
+| Passkeys | unverified² | unverified³ | unverified³ | yes⁷ | unverified⁴ | no |
 | Google sign-in | yes (local client) | yes (local client) | yes (local client) | yes (own client) | **no**⁵ | no |
 | Google popup in the *installed* iOS app | not representative | n/a | n/a | **yes** | no | no |
 
 1. The call succeeds, but a simulator's screen never sleeps, so the effect cannot be observed.
 2. Enrol Face ID first (Simulator menu **Features → Face ID → Enrolled**, then **Matching Face**
-   when prompted). Not tried yet on this project.
-3. A system image *with Google Play*, a Google account signed in, and a screen lock set.
+   when prompted). Apple documents nothing about passkeys in the Simulator and reports are split;
+   if it fails, use a real iPhone with Tailscale.
+3. Needs a system image *with Google Play* (emulator), a Google account signed in and a screen lock
+   set (emulator and phone). Whether Google Password Manager accepts the `localhost` RP ID is not
+   verified; if it does not, the Android part of passkeys can only be tested on staging.
 4. The server accepts `<mac>.local` as RP ID; whether Safari does is not verified. If it fails, use
    Tailscale.
 5. Google refuses redirect URIs on a top-level domain outside the Public Suffix List (`.local`) and
    on raw IPs; only `localhost` may use http.
+6. In a Safari tab from iOS 16.4; in the *installed* web app only from iOS 18.4.
+7. The iPhone needs a passcode and iCloud Keychain (or another passkey provider) turned on.
 
 Passkeys are bound to their RP ID: a passkey made on `localhost` or on the Tailscale host never
 works on `iron-oxyde.com` (see [docs/auth.md](../auth.md#running-it-locally)).
@@ -89,7 +94,13 @@ target/dx/iron-oxide-app/release/web/server      # binds IP:PORT from .env, defa
 
 **Keep the app on `127.0.0.1:8080`** in every setup in this document. The phone reaches it through
 `adb reverse`, `tailscale serve` or caddy, all of which forward to the Mac's loopback. Nothing
-needs `IP=0.0.0.0`, and the app is never exposed on the Wi-Fi without TLS.
+needs `IP=0.0.0.0`. What each forwarder exposes:
+
+- `adb reverse`: only the attached device.
+- `tailscale serve`: every device in your tailnet that its ACLs allow, until `tailscale serve reset`.
+- caddy (mkcert): **anyone on the same Wi-Fi** can connect on port 8443. TLS encrypts the traffic
+  but does not limit who connects. On a shared or public network, stop caddy (Ctrl-C) as soon as
+  you are done.
 
 Switching setups is a copy and a restart:
 
@@ -103,9 +114,10 @@ $EDITOR .env                        # fill in the placeholders, then restart dx 
 ### macOS firewall
 
 With the firewall on (System Settings → Network → Firewall), the first program that listens on a
-non-loopback address gets an "accept incoming network connections?" prompt. Here that is only
-**caddy** (mkcert setup): answer **Allow**. `adb reverse` and `tailscale serve` need no prompt.
-If you missed it, allow caddy under Firewall → Options.
+non-loopback address gets an "accept incoming network connections?" prompt: **caddy** (mkcert
+setup), or dx and the app server if you use `--addr 0.0.0.0` (below). Answer **Allow**; if you
+missed it, allow the program under Firewall → Options. `adb reverse` and `tailscale serve` need no
+prompt.
 
 ### A quick look over plain http (layout only)
 
@@ -210,10 +222,12 @@ Once per Mac and tailnet:
 
    It is also shown in the admin console's **Machines** page.
 
-5. Google Cloud console, as in [docs/auth.md](../auth.md#creating-the-google-oauth-client): a new
-   **Web application** client, e.g. "Iron Oxide (tailscale)", with the authorized redirect URI
-   `https://<machine>.<tailnet>.ts.net/auth/google/callback`. The console may ask for
-   `<tailnet>.ts.net` under the consent screen's authorized domains (not verified).
+5. Google Cloud console, as in [docs/auth.md](../auth.md#creating-the-google-oauth-client):
+   first add `<tailnet>.ts.net` under **Google Auth Platform → Branding → Authorized domains**
+   (every domain used by a client must be listed there before its redirect URIs). No Search
+   Console verification is needed while the app is in "Testing". Then create a new **Web
+   application** client, e.g. "Iron Oxide (tailscale)", with the authorized redirect URI
+   `https://<machine>.<tailnet>.ts.net/auth/google/callback`.
 6. `cp .env.tailscale.example .env` and fill it in with that host and client.
 
 Each session:
@@ -226,8 +240,11 @@ tailscale serve status
 tailscale serve reset                              # stop publishing
 ```
 
-`tailscale serve` only publishes to devices in your tailnet, not the internet (that would be
-`tailscale funnel`). Hot reload works through it (websockets are proxied).
+`--bg` makes the serve config **persistent**: it survives reboots and `tailscale down`/`up`, so
+the app is published again whenever something listens on 8080, until `tailscale serve reset`.
+It is only reachable from your tailnet, not the internet (that would be `tailscale funnel`), but
+from *every* device and user in it that the tailnet's ACLs allow, including shared nodes. Hot
+reload works through it (websockets are proxied).
 
 ### Real iPhone: mkcert
 
@@ -235,12 +252,15 @@ Once:
 
 ```sh
 brew install mkcert caddy
-mkcert -install                      # trust the CA on the Mac too (asks for your password)
 H="$(scutil --get LocalHostName).local"; echo "$H"
 mkdir -p ~/.iron-oxide-dev && cd ~/.iron-oxide-dev
 mkcert -cert-file cert.pem -key-file key.pem "$H" localhost
 open "$(mkcert -CAROOT)"             # AirDrop rootCA.pem (never rootCA-key.pem) to the iPhone
 ```
+
+The first `mkcert` run creates the CA without adding it to the Mac's trust stores. Skip
+`mkcert -install`: nothing here needs it, and it would make the Mac trust a root whose private key
+sits on disk.
 
 On the iPhone, after AirDropping `rootCA.pem`:
 
@@ -278,7 +298,7 @@ cd ~/.iron-oxide-dev && caddy run --config Caddyfile     # Ctrl-C to stop
 
 Open `https://<mac>.local:8443` on the iPhone (same Wi-Fi). caddy listens on all interfaces on
 port 8443 only (`disable_redirects` keeps it off port 80) and proxies to the app on loopback,
-websockets included.
+websockets included. Anyone on that Wi-Fi can reach it: stop caddy with Ctrl-C when done.
 
 `dx serve` can also serve TLS itself, through `[web.https]` in a `Dioxus.toml` (`enabled`,
 `key_path`, `cert_path`); its `mkcert = true` option only covers `localhost`. That file would
@@ -326,5 +346,6 @@ little and keeps another app deployed, so it is left to the maintainer to decide
 - From the tools' documentation and source: MiniSim's SDK lookup, Google's redirect URI rules,
   mkcert's iOS steps, `tailscale serve`, Safari and Chrome remote debugging.
 - Not tried yet (no simulator runtime, Android SDK or phones were available): every step on a
-  simulator, emulator or device, passkeys in the simulators and on `.local`, and whether the
-  Google console accepts a `*.ts.net` redirect URI without further domain checks.
+  simulator, emulator or device, passkeys in the iOS Simulator, on Android with the `localhost`
+  RP ID and on `.local`, and the Google console accepting the `*.ts.net` authorized domain and
+  redirect URI.
