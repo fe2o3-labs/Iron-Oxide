@@ -21,13 +21,20 @@ use super::model::SessionStatus;
 ///    rotation** is the anchor. The next day is the one after the anchor's, wrapping from the last
 ///    day back to the first. When two sessions finished at the same time, the one later in
 ///    `history` wins.
-/// 3. Sessions whose day is no longer in the rotation (the program was edited, or the user switched
-///    programs) are passed over, so the rotation carries on from the most recent day it still
+/// 3. Sessions whose day is no longer in the rotation (a newer version of the program dropped or
+///    renamed it) are passed over, so the rotation carries on from the most recent day it still
 ///    knows.
-/// 4. With no anchor (no history, only abandoned sessions, or only days from another program), the
+/// 4. With no anchor (no history, only abandoned sessions, or only days that were dropped), the
 ///    rotation starts at its first day.
 ///
 /// Days are matched by [`DayId`] only, whatever program version a session was run from.
+///
+/// # Precondition
+///
+/// `history` must contain only sessions of the **active program** (every version of it, but no
+/// other program). The caller filters by program before calling: another program may reuse the
+/// same day slugs (`a`, `b`, ...), and its sessions would then wrongly set the position in this
+/// rotation. Rule 3 only covers days that disappeared from the active program's own rotation.
 ///
 /// # Errors
 /// - [`RotationError::EmptyRotation`] when `rotation` is empty.
@@ -178,7 +185,8 @@ mod tests {
     }
 
     #[test]
-    fn a_history_from_another_program_starts_at_the_first_day() {
+    fn a_history_of_only_dropped_days_starts_at_the_first_day() {
+        // Every day trained so far was removed by a newer version of the program.
         let rotation = days(&["push", "pull", "legs"]);
         let history = [done("a", 10), done("b", 20)];
         assert_eq!(next(&rotation, &history), "push");
