@@ -69,6 +69,13 @@ jobs:
           test "$(curl -sSf http://127.0.0.1:8080/healthz)" = "ok"
           curl -sSf http://127.0.0.1:8080/ | grep -q "Iron Oxide"
           curl -sSf http://127.0.0.1:8080/api/server-time | grep -Eq '^[0-9]+$'
+          # /readyz (#3/#4) must report the database as reachable. Until it exists, the path falls
+          # through to the app's HTML page, which is tolerated.
+          readyz=$(curl -sS http://127.0.0.1:8080/readyz)
+          case "$readyz" in
+            "<!DOCTYPE"*) echo "::notice::/readyz is not implemented yet" ;;
+            *) test "$readyz" = "ok" ;;
+          esac
       - name: Container log
         if: always()
         run: docker logs iron-oxide || true
