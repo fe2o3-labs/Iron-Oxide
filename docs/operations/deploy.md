@@ -16,7 +16,8 @@ app as environment variables.
 ## Build and run the image locally
 
 The server connects to Postgres and runs the migrations before it listens, so start the local
-docker compose database first (`docker compose up -d`, see the README), then:
+docker compose database first (`docker compose up -d`, see the README), then (or simply
+`make docker-build` and `make docker-run`, which also starts the database):
 
 ```sh
 docker build -t iron-oxide .
