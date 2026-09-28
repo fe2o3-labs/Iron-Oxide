@@ -46,8 +46,9 @@ pub struct UserSettings {
 }
 
 impl UserSettings {
-    /// The settings of a user who never saved any. Must match the column defaults of
-    /// `user_settings` (a test checks it).
+    /// The column defaults of `user_settings` (a test checks they match): what a row inserted
+    /// without values holds. Not what the app shows a user who never saved settings, see
+    /// [`find`].
     pub fn defaults() -> Self {
         Self {
             unit: Unit::Kg,
@@ -59,15 +60,11 @@ impl UserSettings {
     }
 }
 
-/// The user's settings, or [`UserSettings::defaults`] if they never saved any.
-pub async fn get(pool: &PgPool, user: UserId) -> Result<UserSettings, RepoError> {
-    Ok(find(pool, user)
-        .await?
-        .unwrap_or_else(UserSettings::defaults))
-}
-
-/// The user's saved settings, `None` if they never saved any (so a caller can tell the defaults
-/// apart from saved values that happen to be equal to them).
+/// The user's saved settings, `None` if they never saved any.
+///
+/// There is deliberately no "or the defaults" variant: what a user who never saved settings gets
+/// is decided once, by `crate::api::settings::Settings::defaults` (with the domain's default
+/// plate inventory), not by the column defaults.
 pub async fn find(pool: &PgPool, user: UserId) -> Result<Option<UserSettings>, RepoError> {
     let row = sqlx::query!(
         "SELECT unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled
@@ -146,9 +143,8 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     #[ignore = "needs Postgres"]
-    async fn a_user_without_settings_gets_the_defaults(pool: PgPool) {
+    async fn a_user_without_settings_has_none_until_the_first_save(pool: PgPool) {
         let user = testing::user(&pool).await;
-        assert_eq!(get(&pool, user).await.unwrap(), UserSettings::defaults());
         assert_eq!(find(&pool, user).await.unwrap(), None);
         save(&pool, user, &UserSettings::defaults()).await.unwrap();
         assert_eq!(
@@ -168,17 +164,23 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert_eq!(get(&pool, user).await.unwrap(), UserSettings::defaults());
+        assert_eq!(
+            find(&pool, user).await.unwrap(),
+            Some(UserSettings::defaults())
+        );
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
     #[ignore = "needs Postgres"]
-    async fn save_then_get_round_trips_and_save_replaces(pool: PgPool) {
+    async fn save_then_find_round_trips_and_save_replaces(pool: PgPool) {
         let user = testing::user(&pool).await;
         save(&pool, user, &custom()).await.unwrap();
-        assert_eq!(get(&pool, user).await.unwrap(), custom());
+        assert_eq!(find(&pool, user).await.unwrap(), Some(custom()));
         save(&pool, user, &UserSettings::defaults()).await.unwrap();
-        assert_eq!(get(&pool, user).await.unwrap(), UserSettings::defaults());
+        assert_eq!(
+            find(&pool, user).await.unwrap(),
+            Some(UserSettings::defaults())
+        );
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -211,7 +213,7 @@ mod tests {
             let error = save(&pool, user, &bad).await.unwrap_err();
             assert!(matches!(error, RepoError::Invalid { .. }), "{error:?}");
         }
-        assert_eq!(get(&pool, user).await.unwrap(), max);
+        assert_eq!(find(&pool, user).await.unwrap(), Some(max));
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -219,10 +221,10 @@ mod tests {
     async fn users_only_see_and_change_their_own_settings(pool: PgPool) {
         let (a, b) = testing::users_a_and_b(&pool).await;
         save(&pool, a, &custom()).await.unwrap();
-        // B sees the defaults, not A's settings.
-        assert_eq!(get(&pool, b).await.unwrap(), UserSettings::defaults());
+        // B has none, not A's settings.
+        assert_eq!(find(&pool, b).await.unwrap(), None);
         // B saving creates B's row and leaves A's alone.
         save(&pool, b, &UserSettings::defaults()).await.unwrap();
-        assert_eq!(get(&pool, a).await.unwrap(), custom());
+        assert_eq!(find(&pool, a).await.unwrap(), Some(custom()));
     }
 }

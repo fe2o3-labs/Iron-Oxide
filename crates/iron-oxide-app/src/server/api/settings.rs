@@ -37,8 +37,9 @@ pub async fn update(
 
 /// Checks an update and turns it into settings.
 pub fn validate(update: SettingsUpdate) -> Result<Settings, ApiError> {
+    // Fixed messages: the domain's would echo the number, which can print as hundreds of digits.
     let bar_weight = Weight::from_kg(update.bar_weight)
-        .map_err(|error| ApiError::invalid(format!("Bar weight: {error}.")))?;
+        .map_err(|_| ApiError::invalid("The bar weight must be between 0 and 2000 kg."))?;
     let stock = update
         .plate_inventory
         .into_iter()
@@ -49,7 +50,7 @@ pub fn validate(update: SettingsUpdate) -> Result<Settings, ApiError> {
             })
         })
         .collect::<Result<Vec<_>, ValueError>>()
-        .map_err(|error| ApiError::invalid(format!("Plate inventory: {error}.")))?;
+        .map_err(|_| ApiError::invalid("Plate weights must be between 0 and 2000 kg."))?;
     let plate_inventory = PlateInventory::new(stock)
         .map_err(|error| ApiError::invalid(format!("Plate inventory: {error}.")))?;
     if update.default_rest > MAX_DEFAULT_REST {
@@ -126,7 +127,7 @@ pub async fn set_training_max(
 ) -> Result<TrainingMax, ApiError> {
     let exercise = exercise_id(exercise)?;
     let weight = Weight::from_kg(weight_kg)
-        .map_err(|error| ApiError::invalid(format!("Training max: {error}.")))?;
+        .map_err(|_| ApiError::invalid("A training max must be between 0 and 2000 kg."))?;
     if weight.is_zero() {
         return Err(ApiError::invalid("A training max must be more than zero."));
     }
@@ -243,14 +244,28 @@ mod tests {
                     plate_inventory: vec![plate(-5.0, 1)],
                     ..custom()
                 },
-                "Plate inventory: weight must not be negative (got -5).",
+                "Plate weights must be between 0 and 2000 kg.",
+            ),
+            (
+                SettingsUpdate {
+                    bar_weight: -1e300,
+                    ..custom()
+                },
+                "The bar weight must be between 0 and 2000 kg.",
+            ),
+            (
+                SettingsUpdate {
+                    plate_inventory: vec![plate(-5e-324, 1)],
+                    ..custom()
+                },
+                "Plate weights must be between 0 and 2000 kg.",
             ),
             (
                 SettingsUpdate {
                     bar_weight: 2_000.5,
                     ..custom()
                 },
-                "Bar weight: weight must be at most 2000 kg.",
+                "The bar weight must be between 0 and 2000 kg.",
             ),
             (
                 SettingsUpdate {
@@ -380,7 +395,7 @@ mod tests {
         let error = a.call_err(UPDATE, json!({ "settings": heavy_bar })).await;
         assert_eq!(
             (error.status.as_u16(), error.message.as_str()),
-            (422, "Bar weight: weight must be at most 2000 kg.")
+            (422, "The bar weight must be between 0 and 2000 kg.")
         );
         // A value that does not even decode (an unknown unit) is the generic 422.
         let mut bad_unit = serde_json::to_value(custom()).unwrap();
@@ -469,13 +484,13 @@ mod tests {
             ),
             (
                 SET_MAX,
-                json!({ "exercise_id": "back-squat", "weight": -5.0 }),
-                "Training max: weight must not be negative (got -5).",
+                json!({ "exercise_id": "back-squat", "weight": -1e300 }),
+                "A training max must be between 0 and 2000 kg.",
             ),
             (
                 SET_MAX,
                 json!({ "exercise_id": "back-squat", "weight": 2_000.5 }),
-                "Training max: weight must be at most 2000 kg.",
+                "A training max must be between 0 and 2000 kg.",
             ),
         ];
         for (path, body, message) in cases {

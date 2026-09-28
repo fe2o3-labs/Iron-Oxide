@@ -189,7 +189,9 @@ Epley formula.
 - **Cursor.** `HistoryCursor` is opaque to the client: pass back the `next` of the previous page.
   It holds the last session's `finished_at` in **microseconds** (the database's precision) and its
   id. A millisecond cursor would skip sessions finished within the same millisecond. A cursor
-  whose time is out of range is `422`; another user's cursor just gives an empty page.
+  whose time is outside what can be stored (before 4714 BC, Postgres' earliest `timestamptz`, or
+  after the year 9999) is `422`; another user's cursor just gives an empty page. At every page
+  size, including the largest, `next` is set whenever another session follows.
 - **Charts.** A point's key is the session's start time and id (`SeriesKey`), so two sessions
   started in the same millisecond stay apart. Sets without a weight (body-weight work) have no
   point; sets of abandoned sessions count (they were lifted). A session still in progress is left
@@ -202,7 +204,7 @@ Epley formula.
 | Path | Arguments | Result |
 |---|---|---|
 | `/api/settings/get` | none | `Settings`. A user who never saved any gets `Settings::defaults()`: kg, a 20 kg bar, the domain's default kg plate inventory (`PlateInventory::default_for(Kg)`), 120 s of rest, sound on. |
-| `/api/settings/update` | `settings: SettingsUpdate` | The saved `Settings` (plates sorted heaviest first). A full replace, so a retry is harmless. |
+| `/api/settings/update` | `settings: SettingsUpdate` | The saved `Settings` (plates sorted heaviest first). A full replace, so a retry is harmless. Concurrent updates (two devices) are last-writer-wins: the row always holds one whole update, never fields mixed from two. |
 | `/api/settings/training-maxes` | none | The user's `TrainingMax`es, by exercise id. |
 | `/api/settings/training-max/set` | `exercise_id`, `weight` (kg) | The saved `TrainingMax`. |
 | `/api/settings/training-max/delete` | `exercise_id` | Nothing; `404` if the user has no training max for it. |
@@ -211,7 +213,7 @@ Epley formula.
   unchecked: `bar_weight` and each plate as kg numbers (the same JSON as a `Weight`), the plate
   inventory as a plain list. The server validates them with the domain (`Weight::from_kg`,
   `PlateInventory::new`: no zero, duplicate or off-grid plate, at most 50 pairs and 16 sizes), and
-  the default rest must be at most one hour. A typed `Weight` or `PlateInventory` argument would
+  the default rest must be at most one hour. Weights out of range get a fixed message ("… must be between 0 and 2000 kg."), never the number echoed back. A typed `Weight` or `PlateInventory` argument would
   fail while the body is decoded, before the function runs, and only give the generic
   `422 Invalid request.` without saying which value is wrong.
 - **Defaults only when nothing was saved.** A user who saves an empty plate inventory keeps an
