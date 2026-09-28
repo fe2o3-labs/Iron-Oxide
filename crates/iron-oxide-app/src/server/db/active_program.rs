@@ -73,7 +73,7 @@ mod tests {
     use super::*;
     use crate::server::db::{
         MIGRATOR, programs,
-        testing::{self, random_uuid},
+        testing::{self, random_uuid, unlimited},
     };
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -126,9 +126,7 @@ mod tests {
     async fn an_archived_program_cannot_be_made_active(pool: PgPool) {
         let user = testing::user(&pool).await;
         let (program, _) = testing::program(&pool, user).await;
-        programs::set_archived(&pool, user, program, true)
-            .await
-            .unwrap();
+        programs::archive(&pool, user, program).await.unwrap();
         let result = set(&pool, user, program).await;
         assert!(
             matches!(result, Err(RepoError::ProgramArchived)),
@@ -136,11 +134,11 @@ mod tests {
         );
         assert_eq!(get(&pool, user).await.unwrap(), None);
         // Restored, it can.
-        programs::set_archived(&pool, user, program, false)
+        programs::unarchive(&pool, user, program, unlimited)
             .await
             .unwrap();
         set(&pool, user, program).await.unwrap();
-        let archive = programs::set_archived(&pool, user, program, true).await;
+        let archive = programs::archive(&pool, user, program).await;
         assert!(
             matches!(archive, Err(RepoError::ProgramActive)),
             "{archive:?}"
@@ -155,9 +153,7 @@ mod tests {
         let (active, _) = testing::program(&pool, user).await;
         let (archived, _) = testing::program(&pool, user).await;
         set(&pool, user, active).await.unwrap();
-        programs::set_archived(&pool, user, archived, true)
-            .await
-            .unwrap();
+        programs::archive(&pool, user, archived).await.unwrap();
 
         let archive_active = sqlx::query("UPDATE programs SET archived = true WHERE id = $1")
             .bind(active.as_uuid())
@@ -206,9 +202,7 @@ mod tests {
     async fn another_users_archived_program_is_not_found(pool: PgPool) {
         let (a, b) = testing::users_a_and_b(&pool).await;
         let (program, _) = testing::program(&pool, a).await;
-        programs::set_archived(&pool, a, program, true)
-            .await
-            .unwrap();
+        programs::archive(&pool, a, program).await.unwrap();
         let result = set(&pool, b, program).await;
         assert!(matches!(result, Err(RepoError::NotFound)), "{result:?}");
         let raw = sqlx::query("INSERT INTO active_program (user_id, program_id) VALUES ($1, $2)")

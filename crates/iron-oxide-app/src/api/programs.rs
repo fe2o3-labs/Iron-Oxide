@@ -200,7 +200,7 @@ pub async fn copy_builtin_program(
     builtin_id: String,
     creation_id: CreationId,
 ) -> Result<ProgramDetail, ServerFnError> {
-    Ok(programs::copy_builtin(&state.db, user.owner(), &builtin_id, creation_id).await?)
+    Ok(programs::copy_builtin(&state.db, user, &builtin_id, creation_id).await?)
 }
 
 /// The user's programs, oldest first; the archived ones too when `include_archived`.
@@ -239,7 +239,7 @@ pub async fn upload_program(
     target: UploadTarget,
     document: String,
 ) -> Result<UploadOutcome, ServerFnError> {
-    Ok(programs::upload(&state.db, user.owner(), target, &document).await?)
+    Ok(programs::upload(&state.db, user, target, &document).await?)
 }
 
 /// Every version of one of the user's programs, oldest first, without their documents.
@@ -257,7 +257,7 @@ pub async fn set_program_archived(
     program_id: ProgramId,
     archived: bool,
 ) -> Result<(), ServerFnError> {
-    Ok(programs::set_archived(&state.db, user.owner(), program_id, archived).await?)
+    Ok(programs::set_archived(&state.db, user, program_id, archived).await?)
 }
 
 #[cfg(test)]

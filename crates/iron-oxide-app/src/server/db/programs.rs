@@ -8,16 +8,34 @@
 //!
 //! Versions are never updated (a trigger rejects it): an upload adds a new version, and sessions
 //! keep pointing at the version they were run from.
+//!
+//! The writes that add an unarchived program ([`create`], [`copy_builtin`], [`unarchive`]) take a
+//! `reserve` step: the caller's quota check (`server::entitlements::reserve_quota`), run inside
+//! the write's transaction, after the user's row is locked and the write is known not to be a
+//! replay or a no-op, and before anything is written. Locks are always taken user row first, then
+//! program row, so these writes cannot deadlock with each other.
+
+/// The future of a `reserve` step: takes a quota slot on the write's connection, or refuses.
+pub type Reserve<'c, E> = Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'c>>;
+
+/// Locks the user's row for a write that may take a quota slot: the first lock of such a write.
+async fn lock_user(tx: &mut PgConnection, user: UserId) -> Result<(), RepoError> {
+    // A user deleted meanwhile has no row to lock; the reservation then refuses the write.
+    users::lock_plan(tx, user).await.map(drop)
+}
+
+use std::pin::Pin;
 
 use iron_oxide_domain::program::BuiltinProgram;
 use sqlx::{
-    PgExecutor, PgPool, Postgres, Transaction,
+    PgConnection, PgExecutor, PgPool, Postgres, Transaction,
     types::{JsonValue, Uuid, time::OffsetDateTime},
 };
 
 use super::{
     error::{Change, RepoError, narrow},
     ids::{CreationId, ProgramId, ProgramVersionId, UserId},
+    users,
 };
 
 /// A program's header.
@@ -218,18 +236,21 @@ pub async fn list_builtins(pool: &PgPool) -> Result<Vec<Builtin>, RepoError> {
 /// # Errors
 /// - [`RepoError::NotFound`] when no built-in with that id is available.
 /// - [`RepoError::Conflict`] when `creation` was already used for another request.
-pub async fn copy_builtin(
+/// - `reserve`'s error when it refuses the new program (a replay is never refused).
+pub async fn copy_builtin<E: From<RepoError>>(
     pool: &PgPool,
     user: UserId,
     creation: CreationId,
     builtin_id: &str,
-) -> Result<(Change, Program, ProgramVersion), RepoError> {
+    reserve: impl for<'c> FnOnce(&'c mut PgConnection) -> Reserve<'c, E>,
+) -> Result<(Change, Program, ProgramVersion), E> {
     let same = |program: &Program, _same_document: bool| {
         program.source_builtin_id.as_deref() == Some(builtin_id)
     };
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin().await.map_err(RepoError::from)?;
+    lock_user(&mut tx, user).await?;
     if let Some(existing) = find_creation(&mut tx, user, creation, None).await? {
-        return replayed(existing, same);
+        return Ok(replayed(existing, same)?);
     }
     let source = sqlx::query!(
         "SELECT p.name, v.document FROM programs p
@@ -239,8 +260,10 @@ pub async fn copy_builtin(
         builtin_id,
     )
     .fetch_optional(&mut *tx)
-    .await?
+    .await
+    .map_err(RepoError::from)?
     .ok_or(RepoError::NotFound)?;
+    reserve(&mut tx).await?;
     let new = NewProgram {
         name: &source.name,
         source_builtin_id: Some(builtin_id),
@@ -248,7 +271,7 @@ pub async fn copy_builtin(
         compare_document: false,
     };
     let result = insert_program(&mut tx, user, creation, &new, same).await?;
-    tx.commit().await?;
+    tx.commit().await.map_err(RepoError::from)?;
     Ok(result)
 }
 
@@ -262,20 +285,26 @@ pub async fn copy_builtin(
 /// - [`RepoError::Conflict`] when `creation` was already used for another request.
 /// - [`RepoError::Invalid`] for an empty or too long name (1 to 100 characters) or a document that
 ///   is not a JSON object with a numeric `schema_version`.
-pub async fn create(
+/// - `reserve`'s error when it refuses the new program (a replay is never refused).
+pub async fn create<E: From<RepoError>>(
     pool: &PgPool,
     user: UserId,
     creation: CreationId,
     name: &str,
     document: &JsonValue,
-) -> Result<(Change, Program, ProgramVersion), RepoError> {
+    reserve: impl for<'c> FnOnce(&'c mut PgConnection) -> Reserve<'c, E>,
+) -> Result<(Change, Program, ProgramVersion), E> {
     let same = |program: &Program, same_document: bool| {
         program.source_builtin_id.is_none() && same_document
     };
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin().await.map_err(RepoError::from)?;
+    // Locked before the replay check, so that a concurrent request with the same creation id,
+    // waiting here, then sees the first one's program and is answered as a replay, not refused.
+    lock_user(&mut tx, user).await?;
     if let Some(existing) = find_creation(&mut tx, user, creation, Some(document)).await? {
-        return replayed(existing, same);
+        return Ok(replayed(existing, same)?);
     }
+    reserve(&mut tx).await?;
     let new = NewProgram {
         name,
         source_builtin_id: None,
@@ -283,7 +312,7 @@ pub async fn create(
         compare_document: true,
     };
     let result = insert_program(&mut tx, user, creation, &new, same).await?;
-    tx.commit().await?;
+    tx.commit().await.map_err(RepoError::from)?;
     Ok(result)
 }
 
@@ -477,8 +506,8 @@ pub async fn rename(
     found(updated)
 }
 
-/// Archives (hides) or restores one of the user's programs. Archiving keeps its versions and the
-/// sessions run from them.
+/// Archives (hides) one of the user's programs. Its versions and the sessions run from them stay.
+/// Archiving an archived program is a no-op.
 ///
 /// The program's row is locked while it is checked and changed, like `active_program::set` does,
 /// so a concurrent activation of the same program either happens first (and archiving is refused)
@@ -488,47 +517,84 @@ pub async fn rename(
 /// # Errors
 /// - [`RepoError::NotFound`] when the user has no program with that id.
 /// - [`RepoError::ProgramActive`] when archiving the user's active program.
-pub async fn set_archived(
+pub async fn archive(pool: &PgPool, user: UserId, id: ProgramId) -> Result<(), RepoError> {
+    let mut tx = pool.begin().await?;
+    if lock_archived(&mut tx, user, id).await? {
+        return Ok(());
+    }
+    let active = sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+               SELECT 1 FROM active_program WHERE user_id = $1 AND program_id = $2
+           ) AS "active!""#,
+        user.as_uuid(),
+        id.as_uuid(),
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if active {
+        return Err(RepoError::ProgramActive);
+    }
+    write_archived(&mut tx, user, id, true).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Restores one of the user's archived programs. Restoring a program that is not archived is a
+/// no-op, and `reserve` is not called.
+///
+/// Restoring takes a quota slot: `reserve` runs after the user's row and then the program's row
+/// are locked (in that order, as every quota write does), and before the update.
+///
+/// # Errors
+/// - [`RepoError::NotFound`] when the user has no program with that id.
+/// - `reserve`'s error when it refuses the restore.
+pub async fn unarchive<E: From<RepoError>>(
     pool: &PgPool,
     user: UserId,
     id: ProgramId,
-    archived: bool,
-) -> Result<(), RepoError> {
-    let mut tx = pool.begin().await?;
-    let was_archived = sqlx::query_scalar!(
+    reserve: impl for<'c> FnOnce(&'c mut PgConnection) -> Reserve<'c, E>,
+) -> Result<(), E> {
+    let mut tx = pool.begin().await.map_err(RepoError::from)?;
+    lock_user(&mut tx, user).await?;
+    if !lock_archived(&mut tx, user, id).await? {
+        return Ok(());
+    }
+    reserve(&mut tx).await?;
+    write_archived(&mut tx, user, id, false).await?;
+    tx.commit().await.map_err(RepoError::from)?;
+    Ok(())
+}
+
+/// Locks the user's program `id` (`FOR UPDATE`) and returns whether it is archived.
+async fn lock_archived(
+    tx: &mut PgConnection,
+    user: UserId,
+    id: ProgramId,
+) -> Result<bool, RepoError> {
+    sqlx::query_scalar!(
         "SELECT archived FROM programs WHERE id = $1 AND user_id = $2 FOR UPDATE",
         id.as_uuid(),
         user.as_uuid(),
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx)
     .await?
-    .ok_or(RepoError::NotFound)?;
-    if archived == was_archived {
-        return Ok(());
-    }
-    if archived {
-        let active = sqlx::query_scalar!(
-            r#"SELECT EXISTS (
-                   SELECT 1 FROM active_program WHERE user_id = $1 AND program_id = $2
-               ) AS "active!""#,
-            user.as_uuid(),
-            id.as_uuid(),
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if active {
-            return Err(RepoError::ProgramActive);
-        }
-    }
+    .ok_or(RepoError::NotFound)
+}
+
+async fn write_archived(
+    tx: &mut PgConnection,
+    user: UserId,
+    id: ProgramId,
+    archived: bool,
+) -> Result<(), RepoError> {
     sqlx::query!(
         "UPDATE programs SET archived = $3 WHERE id = $1 AND user_id = $2",
         id.as_uuid(),
         user.as_uuid(),
         archived,
     )
-    .execute(&mut *tx)
+    .execute(tx)
     .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -670,7 +736,7 @@ mod tests {
     use super::*;
     use crate::server::db::{
         MIGRATOR,
-        testing::{self, creation, document, random_uuid},
+        testing::{self, creation, document, random_uuid, unlimited},
     };
 
     const STARTER: BuiltinSeed<'static> = BuiltinSeed {
@@ -765,7 +831,7 @@ mod tests {
         }
         // A user can copy it.
         let user = testing::user(&pool).await;
-        let (_, copy, version) = copy_builtin(&pool, user, creation(), "full-body-3day")
+        let (_, copy, version) = copy_builtin(&pool, user, creation(), "full-body-3day", unlimited)
             .await
             .unwrap();
         assert_eq!(copy.name, "Full-body 3-day barbell");
@@ -777,7 +843,7 @@ mod tests {
     async fn copying_a_builtin_creates_an_owned_program(pool: PgPool) {
         seed_builtins(&pool, &[STARTER]).await.unwrap();
         let user = testing::user(&pool).await;
-        let (_, program, version) = copy_builtin(&pool, user, creation(), "starter")
+        let (_, program, version) = copy_builtin(&pool, user, creation(), "starter", unlimited)
             .await
             .unwrap();
         assert_eq!(program.name, "Starter");
@@ -794,30 +860,44 @@ mod tests {
             list_builtins(&pool).await.unwrap()[0].program.id
         );
         assert_eq!(list(&pool, user, false).await.unwrap(), vec![program]);
-        not_found(copy_builtin(&pool, user, creation(), "missing").await);
+        not_found(copy_builtin(&pool, user, creation(), "missing", unlimited).await);
         // An archived built-in cannot be copied any more.
         seed_builtins(&pool, &[]).await.unwrap();
-        not_found(copy_builtin(&pool, user, creation(), "starter").await);
+        not_found(copy_builtin(&pool, user, creation(), "starter", unlimited).await);
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
     #[ignore = "needs Postgres"]
     async fn create_rename_archive_and_list(pool: PgPool) {
         let user = testing::user(&pool).await;
-        let (_, first, version) = create(&pool, user, creation(), "First", &document("First"))
-            .await
-            .unwrap();
+        let (_, first, version) = create(
+            &pool,
+            user,
+            creation(),
+            "First",
+            &document("First"),
+            unlimited,
+        )
+        .await
+        .unwrap();
         assert_eq!(first.source_builtin_id, None);
         assert_eq!(version.version, 1);
         // Database-generated ids are UUIDv7 (#65).
         assert_eq!(first.id.as_uuid().get_version_num(), 7);
         assert_eq!(version.id.as_uuid().get_version_num(), 7);
-        let (_, second, _) = create(&pool, user, creation(), "Second", &document("Second"))
-            .await
-            .unwrap();
+        let (_, second, _) = create(
+            &pool,
+            user,
+            creation(),
+            "Second",
+            &document("Second"),
+            unlimited,
+        )
+        .await
+        .unwrap();
         rename(&pool, user, first.id, "Renamed").await.unwrap();
         assert_eq!(get(&pool, user, first.id).await.unwrap().name, "Renamed");
-        set_archived(&pool, user, second.id, true).await.unwrap();
+        archive(&pool, user, second.id).await.unwrap();
         let active: Vec<ProgramId> = list(&pool, user, false)
             .await
             .unwrap()
@@ -826,7 +906,7 @@ mod tests {
             .collect();
         assert_eq!(active, vec![first.id]);
         assert_eq!(list(&pool, user, true).await.unwrap().len(), 2);
-        set_archived(&pool, user, second.id, false).await.unwrap();
+        unarchive(&pool, user, second.id, unlimited).await.unwrap();
         assert_eq!(list(&pool, user, false).await.unwrap().len(), 2);
     }
 
@@ -845,16 +925,23 @@ mod tests {
                 serde_json::json!({"schema_version": 1, "pad": "x".repeat(1_048_576)}),
             ),
         ] {
-            let result = create(&pool, user, creation(), name, &document).await;
+            let result = create(&pool, user, creation(), name, &document, unlimited).await;
             assert!(
                 matches!(result, Err(RepoError::Invalid { .. })),
                 "{result:?}"
             );
         }
         assert!(list(&pool, user, true).await.unwrap().is_empty());
-        let (_, program, _) = create(&pool, user, creation(), &"x".repeat(100), &document("x"))
-            .await
-            .unwrap();
+        let (_, program, _) = create(
+            &pool,
+            user,
+            creation(),
+            &"x".repeat(100),
+            &document("x"),
+            unlimited,
+        )
+        .await
+        .unwrap();
         let result = rename(&pool, user, program.id, "").await;
         assert!(
             matches!(result, Err(RepoError::Invalid { .. })),
@@ -866,7 +953,7 @@ mod tests {
     #[ignore = "needs Postgres"]
     async fn versions_are_numbered_and_identical_uploads_are_no_ops(pool: PgPool) {
         let user = testing::user(&pool).await;
-        let (_, program, v1) = create(&pool, user, creation(), "P", &document("one"))
+        let (_, program, v1) = create(&pool, user, creation(), "P", &document("one"), unlimited)
             .await
             .unwrap();
         let (change, v2) = add_version(&pool, user, program.id, &document("two"))
@@ -894,7 +981,7 @@ mod tests {
     #[ignore = "needs Postgres"]
     async fn concurrent_uploads_get_consecutive_versions(pool: PgPool) {
         let user = testing::user(&pool).await;
-        let (_, program, _) = create(&pool, user, creation(), "P", &document("0"))
+        let (_, program, _) = create(&pool, user, creation(), "P", &document("0"), unlimited)
             .await
             .unwrap();
         let uploads = (1..=8).map(|n| {
@@ -919,7 +1006,7 @@ mod tests {
     #[ignore = "needs Postgres"]
     async fn another_users_programs_are_invisible_and_untouchable(pool: PgPool) {
         let (a, b) = testing::users_a_and_b(&pool).await;
-        let (_, program, version) = create(&pool, a, creation(), "A's", &document("A"))
+        let (_, program, version) = create(&pool, a, creation(), "A's", &document("A"), unlimited)
             .await
             .unwrap();
         let guessed = ProgramId::from_uuid(random_uuid());
@@ -929,7 +1016,7 @@ mod tests {
         for id in [program.id, guessed] {
             not_found(get(&pool, b, id).await);
             not_found(rename(&pool, b, id, "Mine now").await);
-            not_found(set_archived(&pool, b, id, true).await);
+            not_found(archive(&pool, b, id).await);
             not_found(add_version(&pool, b, id, &document("B")).await);
             not_found(list_versions(&pool, b, id).await);
             not_found(latest_version(&pool, b, id).await);
@@ -956,7 +1043,7 @@ mod tests {
         let id = builtin.program.id;
         not_found(get(&pool, user, id).await);
         not_found(rename(&pool, user, id, "Mine").await);
-        not_found(set_archived(&pool, user, id, true).await);
+        not_found(archive(&pool, user, id).await);
         not_found(add_version(&pool, user, id, &document("B")).await);
         not_found(list_versions(&pool, user, id).await);
         not_found(get_version(&pool, user, builtin.latest.id).await);
@@ -968,24 +1055,31 @@ mod tests {
     async fn a_retried_create_returns_the_same_program(pool: PgPool) {
         let (a, b) = testing::users_a_and_b(&pool).await;
         let key = creation();
-        let (change, program, first) = create(&pool, a, key, "P", &document("P")).await.unwrap();
+        let (change, program, first) = create(&pool, a, key, "P", &document("P"), unlimited)
+            .await
+            .unwrap();
         assert_eq!(change, Change::Applied);
-        let (change, again, again_first) =
-            create(&pool, a, key, "P", &document("P")).await.unwrap();
+        let (change, again, again_first) = create(&pool, a, key, "P", &document("P"), unlimited)
+            .await
+            .unwrap();
         assert_eq!(
             (change, &again, &again_first),
             (Change::Unchanged, &program, &first)
         );
         // Still a retry after a rename (the name is not part of the comparison).
         rename(&pool, a, program.id, "Renamed").await.unwrap();
-        let (change, again, _) = create(&pool, a, key, "P", &document("P")).await.unwrap();
+        let (change, again, _) = create(&pool, a, key, "P", &document("P"), unlimited)
+            .await
+            .unwrap();
         assert_eq!((change, again.id), (Change::Unchanged, program.id));
         // The same key for other content is not a retry.
-        let result = create(&pool, a, key, "P", &document("other")).await;
+        let result = create(&pool, a, key, "P", &document("other"), unlimited).await;
         assert!(matches!(result, Err(RepoError::Conflict)), "{result:?}");
         assert_eq!(list(&pool, a, true).await.unwrap().len(), 1);
         // Keys are per user: B's request with A's key is B's own.
-        let (change, program_b, _) = create(&pool, b, key, "B", &document("B")).await.unwrap();
+        let (change, program_b, _) = create(&pool, b, key, "B", &document("B"), unlimited)
+            .await
+            .unwrap();
         assert_eq!(change, Change::Applied);
         assert_ne!(program_b.id, program.id);
     }
@@ -998,7 +1092,9 @@ mod tests {
         let tasks: Vec<_> = (0..8)
             .map(|_| {
                 let pool = pool.clone();
-                tokio::spawn(async move { create(&pool, user, key, "P", &document("P")).await })
+                tokio::spawn(async move {
+                    create(&pool, user, key, "P", &document("P"), unlimited).await
+                })
             })
             .collect();
         let mut applied = 0;
@@ -1017,7 +1113,9 @@ mod tests {
         seed_builtins(&pool, &[STARTER]).await.unwrap();
         let user = testing::user(&pool).await;
         let key = creation();
-        let (change, program, first) = copy_builtin(&pool, user, key, "starter").await.unwrap();
+        let (change, program, first) = copy_builtin(&pool, user, key, "starter", unlimited)
+            .await
+            .unwrap();
         assert_eq!(change, Change::Applied);
         // The built-in changes and is then archived: a retry still returns the copy.
         let changed = BuiltinSeed {
@@ -1026,16 +1124,18 @@ mod tests {
         };
         seed_builtins(&pool, &[changed]).await.unwrap();
         seed_builtins(&pool, &[]).await.unwrap();
-        let (change, again, again_first) = copy_builtin(&pool, user, key, "starter").await.unwrap();
+        let (change, again, again_first) = copy_builtin(&pool, user, key, "starter", unlimited)
+            .await
+            .unwrap();
         assert_eq!(
             (change, &again, &again_first),
             (Change::Unchanged, &program, &first)
         );
         // A key used for a copy cannot be replayed as a create, and the other way round.
-        let result = create(&pool, user, key, "P", &first.document).await;
+        let result = create(&pool, user, key, "P", &first.document, unlimited).await;
         assert!(matches!(result, Err(RepoError::Conflict)), "{result:?}");
         seed_builtins(&pool, &[STARTER]).await.unwrap();
-        let (_, created, _) = create(&pool, user, creation(), "P", &document("P"))
+        let (_, created, _) = create(&pool, user, creation(), "P", &document("P"), unlimited)
             .await
             .unwrap();
         assert!(created.source_builtin_id.is_none());
@@ -1048,8 +1148,10 @@ mod tests {
         seed_builtins(&pool, &[STARTER]).await.unwrap();
         let user = testing::user(&pool).await;
         let key = creation();
-        create(&pool, user, key, "P", &document("P")).await.unwrap();
-        let result = copy_builtin(&pool, user, key, "starter").await;
+        create(&pool, user, key, "P", &document("P"), unlimited)
+            .await
+            .unwrap();
+        let result = copy_builtin(&pool, user, key, "starter", unlimited).await;
         assert!(matches!(result, Err(RepoError::Conflict)), "{result:?}");
         assert_eq!(list(&pool, user, true).await.unwrap().len(), 1);
     }
@@ -1063,11 +1165,15 @@ mod tests {
         let big: JsonValue =
             serde_json::from_str(r#"{"schema_version": 1, "big": 1e16, "small": 1.50}"#).unwrap();
         let key = creation();
-        let (change, program, first) = create(&pool, user, key, "P", &big).await.unwrap();
+        let (change, program, first) = create(&pool, user, key, "P", &big, unlimited)
+            .await
+            .unwrap();
         assert_eq!(change, Change::Applied);
         // What comes back differs from what was sent, as serde_json values.
         assert_ne!(first.document, big);
-        let (change, again, _) = create(&pool, user, key, "P", &big).await.unwrap();
+        let (change, again, _) = create(&pool, user, key, "P", &big, unlimited)
+            .await
+            .unwrap();
         assert_eq!((change, again.id), (Change::Unchanged, program.id));
 
         let (change, v2) = add_version(&pool, user, program.id, &big).await.unwrap();
@@ -1078,7 +1184,7 @@ mod tests {
         assert_eq!((change, v2.version), (Change::Applied, 2));
         let (change, again) = add_version(&pool, user, program.id, &other).await.unwrap();
         assert_eq!((change, again.id), (Change::Unchanged, v2.id));
-        let result = create(&pool, user, key, "P", &other).await;
+        let result = create(&pool, user, key, "P", &other, unlimited).await;
         assert!(matches!(result, Err(RepoError::Conflict)), "{result:?}");
     }
 }

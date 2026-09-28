@@ -14,10 +14,11 @@ use dioxus::server::axum::{
 };
 use iron_oxide_domain::{
     CreationId, ProgramId,
+    entitlements::Quota,
     program::{BuiltinProgramId, Program, limits::MAX_DOCUMENT_BYTES},
 };
 use serde_json::json;
-use sqlx::{PgPool, types::JsonValue};
+use sqlx::{PgConnection, PgPool, types::JsonValue};
 
 use super::{ApiError, timestamp};
 use crate::api::programs::{
@@ -29,8 +30,9 @@ use crate::server::db::{
     active_program,
     error::Change,
     ids::UserId,
-    programs::{self, ProgramVersion},
+    programs::{self, ProgramVersion, Reserve},
 };
+use crate::server::entitlements;
 
 /// The built-in programs, by name, with their current document.
 pub async fn list_builtins(pool: &PgPool) -> Result<Vec<BuiltinProgramView>, ApiError> {
@@ -52,18 +54,38 @@ pub async fn list_builtins(pool: &PgPool) -> Result<Vec<BuiltinProgramView>, Api
         .collect()
 }
 
-/// Copies the built-in `builtin_id` into a new program of `owner`'s (idempotent on `creation`).
+/// Copies the built-in `builtin_id` into a new program of `user`'s (idempotent on `creation`).
+/// Takes a program slot: `403` at the plan's limit, except for a replay.
 pub async fn copy_builtin(
     pool: &PgPool,
-    owner: UserId,
+    user: AuthUser,
     builtin_id: &str,
     creation: CreationId,
 ) -> Result<ProgramDetail, ApiError> {
     // Not a slug, so no built-in has that id.
     let builtin_id = BuiltinProgramId::new(builtin_id).map_err(|_| ApiError::NotFound)?;
-    let (_, program, version) =
-        programs::copy_builtin(pool, owner, creation.into(), builtin_id.as_str()).await?;
+    let (_, program, version) = programs::copy_builtin(
+        pool,
+        user.owner(),
+        creation.into(),
+        builtin_id.as_str(),
+        program_slot(user),
+    )
+    .await?;
     detail_of(program, &version)
+}
+
+/// The `reserve` step of the writes that add an unarchived program: one `CustomPrograms` slot,
+/// under the user's row lock, in the write's transaction (`403` at the plan's limit).
+fn program_slot(
+    user: AuthUser,
+) -> impl for<'c> FnOnce(&'c mut PgConnection) -> Reserve<'c, ApiError> {
+    move |tx| {
+        Box::pin(async move {
+            entitlements::reserve_quota(tx, user, Quota::CustomPrograms).await?;
+            Ok(())
+        })
+    }
 }
 
 /// `owner`'s programs, oldest first.
@@ -121,20 +143,28 @@ pub async fn versions(
         .collect()
 }
 
-/// Archives or restores `owner`'s program `id`. `409` when archiving the active program.
+/// Archives or restores `user`'s program `id`. `409` when archiving the active program; restoring
+/// takes a program slot (`403` at the plan's limit), unless the program is not archived.
 pub async fn set_archived(
     pool: &PgPool,
-    owner: UserId,
+    user: AuthUser,
     id: ProgramId,
     archived: bool,
 ) -> Result<(), ApiError> {
-    Ok(programs::set_archived(pool, owner, id.into(), archived).await?)
+    if archived {
+        Ok(programs::archive(pool, user.owner(), id.into()).await?)
+    } else {
+        programs::unarchive(pool, user.owner(), id.into(), program_slot(user)).await
+    }
 }
 
 /// Validates an uploaded document and stores it as a new program or a new version.
+///
+/// A new program takes a program slot (`403` at the plan's limit, except for a replay); a new
+/// version does not.
 pub async fn upload(
     pool: &PgPool,
-    owner: UserId,
+    user: AuthUser,
     target: UploadTarget,
     document: &str,
 ) -> Result<UploadOutcome, ApiError> {
@@ -142,9 +172,11 @@ pub async fn upload(
     // Stored as written, like the built-ins, so that uploading the same file again equals the
     // stored version (compared as jsonb: formatting and key order do not matter).
     let stored: JsonValue = serde_json::from_str(document).map_err(ApiError::internal)?;
+    let owner = user.owner();
     let (change, program, version) = match target {
         UploadTarget::NewProgram { creation_id } => {
-            programs::create(pool, owner, creation_id.into(), &program.name, &stored).await?
+            let (name, creation) = (&program.name, creation_id.into());
+            programs::create(pool, owner, creation, name, &stored, program_slot(user)).await?
         }
         UploadTarget::NewVersion { program_id } => {
             let (change, version) =

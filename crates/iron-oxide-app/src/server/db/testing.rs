@@ -13,11 +13,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::json;
 use sqlx::{
-    PgPool,
+    PgConnection, PgPool,
     types::{JsonValue, Uuid, time::OffsetDateTime},
 };
 
 use super::{
+    error::RepoError,
     ids::{CreationId, ProgramId, ProgramVersionId, SessionId, SetId, UserId},
     programs, sessions,
     sets::{self, LoggedSet},
@@ -54,6 +55,12 @@ pub fn random_uuid() -> Uuid {
     Uuid::from_u128(0x5eed_0000_0000_4000_8000_0000_0000_0000 | u128::from(n))
 }
 
+/// The `reserve` step of the program writes that take a quota slot, for repository tests that do
+/// not test the quota: it takes the slot without checking anything.
+pub fn unlimited(_: &mut PgConnection) -> programs::Reserve<'_, RepoError> {
+    Box::pin(async { Ok(()) })
+}
+
 /// A fresh creation id (idempotency key) for `programs::create` and `copy_builtin`.
 pub fn creation() -> CreationId {
     CreationId::from_uuid(random_uuid())
@@ -61,10 +68,16 @@ pub fn creation() -> CreationId {
 
 /// Creates a program owned by `user`, with one version.
 pub async fn program(pool: &PgPool, user: UserId) -> (ProgramId, ProgramVersionId) {
-    let (_, program, version) =
-        programs::create(pool, user, creation(), "Program", &document("Program"))
-            .await
-            .unwrap();
+    let (_, program, version) = programs::create(
+        pool,
+        user,
+        creation(),
+        "Program",
+        &document("Program"),
+        unlimited,
+    )
+    .await
+    .unwrap();
     (program.id, version.id)
 }
 

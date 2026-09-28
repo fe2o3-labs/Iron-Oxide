@@ -819,10 +819,22 @@ async fn another_users_programs_are_not_listed_or_copied_into(db: PgPool) {
 async fn valid_program(db: &PgPool, owner: UserId) -> ProgramId {
     let document: JsonValue = serde_json::from_str(&document("Race")).unwrap();
     let creation = crate::server::db::ids::CreationId::from(CreationId::new_v7());
-    let (_, program, _) = programs::create(db, owner, creation, "Race", &document)
-        .await
-        .unwrap();
+    let (_, program, _) = programs::create(
+        db,
+        owner,
+        creation,
+        "Race",
+        &document,
+        db_testing::unlimited,
+    )
+    .await
+    .unwrap();
     program.id.into()
+}
+
+/// `owner` as the signed-in user.
+fn auth(owner: UserId) -> AuthUser {
+    AuthUser::for_tests(crate::auth::types::UserId::from_uuid(owner.as_uuid()))
 }
 
 /// `owner`'s active program and whether `program` is archived, as stored.
@@ -869,7 +881,7 @@ async fn activating_and_archiving_at_once_never_leave_an_archived_active_program
         let program = valid_program(&db, owner).await;
         let (activated, archived) = tokio::join!(
             set_active(&db, owner, program),
-            set_archived(&db, owner, program, true)
+            set_archived(&db, auth(owner), program, true)
         );
         let state = stored_state(&db, owner, program).await;
         match (&activated, &archived) {
@@ -907,7 +919,7 @@ async fn an_archive_waits_for_a_pending_activation(db: PgPool) {
     wait_for_lock_waiters(&db, 1).await;
     let archive = tokio::spawn({
         let db = db.clone();
-        async move { set_archived(&db, owner, program, true).await }
+        async move { set_archived(&db, auth(owner), program, true).await }
     });
     // The archive waits for the activation's lock on the program instead of going ahead.
     wait_for_lock_waiters(&db, 2).await;
@@ -925,4 +937,162 @@ async fn an_archive_waits_for_a_pending_activation(db: PgPool) {
         stored_state(&db, owner, program).await,
         (Some(program), false)
     );
+}
+
+// --- The custom program quota (#21) -------------------------------------------------------------
+
+/// The free plan's `CustomPrograms` limit.
+const FREE_PROGRAMS: usize = 10;
+
+/// Gives `owner` `n` more unarchived programs, straight through the repository.
+async fn fill(db: &PgPool, owner: UserId, n: usize) {
+    for _ in 0..n {
+        db_testing::program(db, owner).await;
+    }
+}
+
+async fn unarchived(user: &mut TestUser) -> usize {
+    programs_of(user, false).await.len()
+}
+
+fn archive_body(program: ProgramId, archived: bool) -> Value {
+    json!({ "program_id": program, "archived": archived })
+}
+
+/// Asserts a `403` with the plan's message.
+async fn refused_by_the_plan(user: &mut TestUser, path: &str, body: Value) {
+    let (status, body) = fails(user, path, body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
+    assert_eq!(
+        message(&body),
+        "Your plan keeps up to 10 programs. Archive one, or upgrade to Pro."
+    );
+}
+
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn a_free_user_at_the_limit_cannot_create_copy_or_restore_until_archiving_one(db: PgPool) {
+    let api = api(db).await;
+    let mut a = api.user("A").await;
+    let first = upload(&mut a, new_program(), &document("First")).await;
+    fill(&api.db, a.id, FREE_PROGRAMS - 1).await;
+    assert_eq!(unarchived(&mut a).await, FREE_PROGRAMS);
+
+    // At the limit: no new program, no copy.
+    let body = upload_body(new_program(), &document("Eleventh"));
+    refused_by_the_plan(&mut a, UPLOAD, body).await;
+    let body = json!({ "builtin_id": FULL_BODY, "creation_id": CreationId::new_v7() });
+    refused_by_the_plan(&mut a, COPY, body).await;
+    // A new version and restoring a program that is not archived take no slot.
+    let v2 = upload_version(&mut a, first.program.id, &document("First v2")).await;
+    assert!(v2.saved);
+    let () = ok(&mut a, ARCHIVE, archive_body(first.program.id, false)).await;
+    assert_eq!(unarchived(&mut a).await, FREE_PROGRAMS);
+
+    // Archiving one frees a slot, which a new program then takes.
+    let () = ok(&mut a, ARCHIVE, archive_body(first.program.id, true)).await;
+    let copy = copy_of(&mut a, CreationId::new_v7()).await;
+    assert_eq!(unarchived(&mut a).await, FREE_PROGRAMS);
+    // Restoring the archived one would exceed the limit.
+    refused_by_the_plan(&mut a, ARCHIVE, archive_body(first.program.id, false)).await;
+    assert_eq!(unarchived(&mut a).await, FREE_PROGRAMS);
+
+    // Archive another one: now it can be restored.
+    let () = ok(&mut a, ARCHIVE, archive_body(copy.program.id, true)).await;
+    let () = ok(&mut a, ARCHIVE, archive_body(first.program.id, false)).await;
+    let visible = programs_of(&mut a, false).await;
+    assert_eq!(visible.len(), FREE_PROGRAMS);
+    assert!(visible.iter().any(|p| p.id == first.program.id));
+    assert!(visible.iter().all(|p| p.id != copy.program.id));
+}
+
+/// A retried create at the limit is answered from the program it created, never refused.
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn a_replay_at_the_limit_returns_the_existing_program(db: PgPool) {
+    let api = api(db).await;
+    let mut a = api.user("A").await;
+    fill(&api.db, a.id, FREE_PROGRAMS - 2).await;
+    let copy_key = CreationId::new_v7();
+    let copy = copy_of(&mut a, copy_key).await;
+    let target = new_program();
+    let created = upload(&mut a, target, &document("Last")).await;
+    assert!(created.saved);
+    assert_eq!(unarchived(&mut a).await, FREE_PROGRAMS);
+
+    let again = upload(&mut a, target, &document("Last")).await;
+    assert!(!again.saved);
+    assert_eq!(again.program.id, created.program.id);
+    let copy_again = copy_of(&mut a, copy_key).await;
+    assert_eq!(copy_again.program.id, copy.program.id);
+    assert_eq!(unarchived(&mut a).await, FREE_PROGRAMS);
+}
+
+/// Two creates at one below the limit, forced to run at once (both wait on the user's row): one
+/// takes the last slot, the other is refused.
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn two_concurrent_creates_cannot_both_take_the_last_slot(db: PgPool) {
+    let owner = db_testing::user(&db).await;
+    fill(&db, owner, FREE_PROGRAMS - 1).await;
+
+    let mut blocker = db.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR UPDATE")
+        .bind(owner.as_uuid())
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let create = || {
+        let db = db.clone();
+        tokio::spawn(async move {
+            super::upload(&db, auth(owner), new_program(), &document("Racer")).await
+        })
+    };
+    let (first, second) = (create(), create());
+    wait_for_lock_waiters(&db, 2).await;
+    blocker.rollback().await.unwrap();
+
+    let results = [first.await.unwrap(), second.await.unwrap()];
+    let created = results.iter().filter(|result| result.is_ok()).count();
+    let refused = results
+        .iter()
+        .filter(|result| matches!(result, Err(ApiError::Forbidden(_))))
+        .count();
+    assert_eq!((created, refused), (1, 1), "{results:?}");
+    let stored = programs::list(&db, owner, false).await.unwrap();
+    assert_eq!(stored.len(), FREE_PROGRAMS);
+}
+
+/// Only the user's own programs count: B at the limit does not limit A.
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn another_users_programs_do_not_take_a_slot(db: PgPool) {
+    let api = api(db).await;
+    let (mut a, b) = api.users_a_and_b().await;
+    fill(&api.db, b.id, FREE_PROGRAMS).await;
+    fill(&api.db, a.id, FREE_PROGRAMS - 1).await;
+
+    let created = upload(&mut a, new_program(), &document("Mine")).await;
+    assert!(created.saved);
+    assert_eq!(unarchived(&mut a).await, FREE_PROGRAMS);
+}
+
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn a_pro_user_has_no_program_limit(db: PgPool) {
+    let api = api(db).await;
+    let mut a = api.user("A").await;
+    sqlx::query("UPDATE users SET plan = 'pro' WHERE id = $1")
+        .bind(a.id.as_uuid())
+        .execute(&api.db)
+        .await
+        .unwrap();
+    let archived = upload(&mut a, new_program(), &document("Archived")).await;
+    let () = ok(&mut a, ARCHIVE, archive_body(archived.program.id, true)).await;
+    fill(&api.db, a.id, FREE_PROGRAMS).await;
+
+    upload(&mut a, new_program(), &document("Eleventh")).await;
+    copy_of(&mut a, CreationId::new_v7()).await;
+    let () = ok(&mut a, ARCHIVE, archive_body(archived.program.id, false)).await;
+    assert_eq!(unarchived(&mut a).await, FREE_PROGRAMS + 3);
 }

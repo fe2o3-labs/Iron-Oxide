@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT EXISTS (\n                   SELECT 1 FROM active_program WHERE user_id = $1 AND program_id = $2\n               ) AS \"active!\"",
+  "query": "SELECT EXISTS (\n               SELECT 1 FROM active_program WHERE user_id = $1 AND program_id = $2\n           ) AS \"active!\"",
   "describe": {
     "columns": [
       {
@@ -19,5 +19,5 @@
       null
     ]
   },
-  "hash": "1826b9663a73e2bc164ca07a13b4c37c6c2c7c1cfbb47db16ec6e79f725f5547"
+  "hash": "67a8fcfdb93b0f84bdcb7c9be057c90f61ebcc79802a76647a47ac67c70a77a2"
 }

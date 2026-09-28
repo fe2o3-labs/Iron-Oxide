@@ -12,7 +12,7 @@ use dioxus::prelude::ServerFnError;
 use iron_oxide_domain::{SessionError, ValueError, program::ProgramError};
 
 use crate::api::programs::ProgramProblems;
-use crate::server::{auth::AuthError, db::error::RepoError};
+use crate::server::{auth::AuthError, db::error::RepoError, entitlements::EntitlementError};
 
 /// The public message of a 404.
 pub const NOT_FOUND: &str = "Not found.";
@@ -171,6 +171,20 @@ fn is_transient(error: &sqlx::Error) -> bool {
             )
         }
         _ => false,
+    }
+}
+
+impl From<EntitlementError> for ApiError {
+    /// A plan refusal is a `403` with the plan's message; a failure to read the plan maps like any
+    /// repository error (so a transient one stays retryable).
+    fn from(error: EntitlementError) -> Self {
+        match error {
+            EntitlementError::FeatureNotIncluded { .. } | EntitlementError::QuotaReached { .. } => {
+                Self::Forbidden(Cow::Owned(error.public().1))
+            }
+            EntitlementError::UnknownUser => Self::Unauthorized,
+            EntitlementError::Repo(source) => source.into(),
+        }
     }
 }
 
