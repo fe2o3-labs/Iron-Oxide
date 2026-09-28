@@ -20,6 +20,10 @@ pub enum RepoError {
     /// The session has ended: no new set can be added to it.
     #[error("the session has already ended")]
     SessionEnded,
+    /// A concurrent write got in the way and nothing was saved: retrying the same request is safe
+    /// and expected to succeed (a client retry queue treats it as transient, like a timeout).
+    #[error("please try again")]
+    Transient,
     /// A value broke a database constraint (range, format, immutability).
     #[error("invalid value")]
     Invalid {

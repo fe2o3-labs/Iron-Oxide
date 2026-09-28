@@ -82,6 +82,8 @@ impl TryFrom<SetRow> for LoggedSet {
 /// - [`RepoError::NotFound`] when the session is not one of the user's.
 /// - [`RepoError::SessionEnded`] when the set is new and the session has ended.
 /// - [`RepoError::Invalid`] for an exercise id that is not a slug or a weight above 2000 kg.
+/// - [`RepoError::Transient`] in the unlikely case that the session kept changing under two
+///   attempts: nothing was saved, and a retry is expected to succeed.
 pub async fn upsert_idempotent(
     pool: &PgPool,
     user: UserId,
@@ -96,7 +98,32 @@ pub async fn upsert_idempotent(
         })
         .transpose()?;
     let duration_s = set.duration_s.map(i64::from);
+    // A second attempt covers a save that races its session's start: the insert's snapshot did
+    // not see the session yet, the status read afterwards does. The next insert sees it too.
+    for _ in 0..2 {
+        match save_once(pool, user, set, weight_ng, duration_s).await? {
+            Attempt::Done(change) => return Ok(change),
+            Attempt::SessionAppeared => {}
+        }
+    }
+    Err(RepoError::Transient)
+}
 
+/// What one attempt of [`upsert_idempotent`] found.
+enum Attempt {
+    Done(Change),
+    /// Nothing was inserted, yet the session is in progress now: it was created (committed) during
+    /// the attempt.
+    SessionAppeared,
+}
+
+async fn save_once(
+    pool: &PgPool,
+    user: UserId,
+    set: &LoggedSet,
+    weight_ng: Option<i64>,
+    duration_s: Option<i64>,
+) -> Result<Attempt, RepoError> {
     // Inserts only into a session of this user that is still in progress. Ids are unique per user
     // (primary key `(user_id, id)`), so only this user's own set with this id inserts nothing.
     let inserted = sqlx::query!(
@@ -122,7 +149,7 @@ pub async fn upsert_idempotent(
     .await?
     .rows_affected();
     if inserted == 1 {
-        return Ok(Change::Applied);
+        return Ok(Attempt::Done(Change::Applied));
     }
 
     // Nothing inserted: this user already has a set with this id, or the session is not an
@@ -147,7 +174,7 @@ pub async fn upsert_idempotent(
     .fetch_optional(pool)
     .await?;
     match same {
-        Some(true) => return Ok(Change::Unchanged),
+        Some(true) => return Ok(Attempt::Done(Change::Unchanged)),
         Some(false) => return Err(RepoError::Conflict),
         None => {}
     }
@@ -162,8 +189,7 @@ pub async fn upsert_idempotent(
     .await?;
     match status.as_deref() {
         None => Err(RepoError::NotFound),
-        // Only reachable if the session changed between the two statements: ask for a retry.
-        Some("in_progress") => Err(RepoError::Conflict),
+        Some("in_progress") => Ok(Attempt::SessionAppeared),
         Some(_) => Err(RepoError::SessionEnded),
     }
 }
@@ -245,6 +271,8 @@ pub async fn completed_for_exercise(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
     use crate::server::db::{
         MIGRATOR, programs,
         sessions::{self, SessionOutcome},
@@ -715,5 +743,44 @@ mod tests {
                 "{expected}: {errors:?}"
             );
         }
+    }
+
+    /// A set saved while its session's start is still committing must never come back as a
+    /// conflict: it is saved (the second attempt sees the session) or, at worst, reported as
+    /// transient. Reproducer from the review of #58.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn a_set_racing_its_sessions_start_is_saved(pool: PgPool) {
+        let pool = PgPoolOptions::new()
+            .max_connections(40)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let user = testing::user(&pool).await;
+        let (_, version) = testing::program(&pool, user).await;
+        let mut not_found = 0;
+        for _ in 0..300 {
+            let session = new_session(version);
+            let set = new_set(session.id);
+            let (pool_1, session_1) = (pool.clone(), session.clone());
+            let start =
+                tokio::spawn(async move { sessions::start(&pool_1, user, &session_1).await });
+            let (pool_2, set_2) = (pool.clone(), set.clone());
+            let save = tokio::spawn(async move { upsert_idempotent(&pool_2, user, &set_2).await });
+            assert_eq!(start.await.unwrap().unwrap(), Change::Applied);
+            match save.await.unwrap() {
+                Ok(change) => {
+                    assert_eq!(change, Change::Applied);
+                    assert_eq!(
+                        list_for_session(&pool, user, session.id).await.unwrap(),
+                        vec![set]
+                    );
+                }
+                // The save ran entirely before the session existed: an honest answer.
+                Err(RepoError::NotFound) => not_found += 1,
+                Err(error) => panic!("{error:?}"),
+            }
+        }
+        assert!(not_found < 300, "the race was never exercised");
     }
 }

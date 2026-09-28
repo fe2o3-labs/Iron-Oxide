@@ -48,6 +48,11 @@ uuid_id!(
     ProgramVersionId
 );
 uuid_id!(
+    /// The client's idempotency key for a request that creates a program (create or copy), so a
+    /// retried request returns the program it already created. Unique per user.
+    CreationId
+);
+uuid_id!(
     /// A workout session, generated on the client (`workout_sessions.id`).
     SessionId
 );

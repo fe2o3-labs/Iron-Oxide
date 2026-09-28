@@ -38,6 +38,20 @@ BEGIN
 END;
 $$;
 
+-- Rejects a direct DELETE; only deletes cascading from a foreign key (a deleted user) pass.
+-- pg_trigger_depth() is 1 for a trigger fired by a statement and at least 2 for one fired from
+-- the referential action of a cascading foreign key.
+CREATE FUNCTION forbid_direct_delete() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    IF pg_trigger_depth() < 2 THEN
+        RAISE EXCEPTION '% rows are only deleted by cascade', TG_TABLE_NAME
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
 -- ---------------------------------------------------------------------------------------------
 -- Settings: one row per user, created on the first save. Until then the app uses the column
 -- defaults below (mirrored in the repository, and tested to match).
@@ -76,16 +90,22 @@ CREATE TRIGGER training_maxes_owner BEFORE UPDATE OF user_id ON training_maxes
 -- Programs. A built-in program has no owner (`user_id IS NULL`) and a `source_builtin_id`; it is
 -- seeded at startup and read by everyone. A user's program always has an owner; one copied from a
 -- built-in keeps the built-in's id in `source_builtin_id`. Programs are archived, never deleted
--- (sessions stay linked to their versions), except by deleting the account.
+-- (sessions stay linked to their versions), except by deleting the account (enforced by a trigger).
+-- `creation_id` is the client's idempotency key for the request that created a user's program, so
+-- a retried create or copy returns the program it already made instead of making a second one.
 
 CREATE TABLE programs (
     id                uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id           uuid        REFERENCES users ON DELETE CASCADE,
+    creation_id       uuid,
     source_builtin_id text        CHECK (is_slug(source_builtin_id)),
     name              text        NOT NULL CHECK (char_length(name) BETWEEN 1 AND 100),
     archived          boolean     NOT NULL DEFAULT false,
     created_at        timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT programs_owner_or_builtin CHECK (user_id IS NOT NULL OR source_builtin_id IS NOT NULL),
+    -- Every user program has a creation id; built-ins (seeded by the server) have none.
+    CONSTRAINT programs_creation_id_iff_owned CHECK ((user_id IS NULL) = (creation_id IS NULL)),
+    CONSTRAINT programs_user_id_creation_id_key UNIQUE (user_id, creation_id),
     -- Target of the composite foreign keys that tie child rows to the same owner.
     CONSTRAINT programs_id_user_id_key UNIQUE (id, user_id)
 );
@@ -95,6 +115,10 @@ CREATE UNIQUE INDEX programs_builtin_key ON programs (source_builtin_id) WHERE u
 
 CREATE TRIGGER programs_owner BEFORE UPDATE OF user_id ON programs
     FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
+
+-- Programs are archived, never deleted: only the cascade from a deleted user removes them.
+CREATE TRIGGER programs_no_direct_delete BEFORE DELETE ON programs
+    FOR EACH ROW EXECUTE FUNCTION forbid_direct_delete();
 
 -- Immutable versions of a program: an upload or edit adds a version, nothing updates one.
 -- `user_id` is copied from the program by a trigger (the caller cannot choose it), so a version
@@ -140,9 +164,13 @@ BEGIN
 END;
 $$;
 
--- UPDATE only: deletes must still cascade from the program and the user.
 CREATE TRIGGER program_versions_immutable BEFORE UPDATE ON program_versions
     FOR EACH ROW EXECUTE FUNCTION forbid_update();
+
+-- No direct delete either (a deleted version would free its number for other content): only the
+-- cascade from a deleted user removes versions.
+CREATE TRIGGER program_versions_no_direct_delete BEFORE DELETE ON program_versions
+    FOR EACH ROW EXECUTE FUNCTION forbid_direct_delete();
 
 -- The program a user trains with. The composite key means it can only be one of the user's own
 -- programs (never a built-in: copy it first, #19).

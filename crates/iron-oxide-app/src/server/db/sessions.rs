@@ -176,7 +176,10 @@ pub async fn start(pool: &PgPool, user: UserId, session: &NewSession) -> Result<
     .await?;
     match same {
         Some(true) => Ok(Change::Unchanged),
-        Some(false) | None => Err(RepoError::Conflict),
+        Some(false) => Err(RepoError::Conflict),
+        // Not inserted, yet no row of this user: cannot happen while sessions are never deleted
+        // (except with their user). Nothing was saved, so a retry is the right answer.
+        None => Err(RepoError::Transient),
     }
 }
 

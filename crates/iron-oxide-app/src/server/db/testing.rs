@@ -18,7 +18,7 @@ use sqlx::{
 };
 
 use super::{
-    ids::{ProgramId, ProgramVersionId, SessionId, SetId, UserId},
+    ids::{CreationId, ProgramId, ProgramVersionId, SessionId, SetId, UserId},
     programs, sessions,
     sets::{self, LoggedSet},
 };
@@ -54,11 +54,17 @@ pub fn random_uuid() -> Uuid {
     Uuid::from_u128(0x5eed_0000_0000_4000_8000_0000_0000_0000 | u128::from(n))
 }
 
+/// A fresh creation id (idempotency key) for `programs::create` and `copy_builtin`.
+pub fn creation() -> CreationId {
+    CreationId::from_uuid(random_uuid())
+}
+
 /// Creates a program owned by `user`, with one version.
 pub async fn program(pool: &PgPool, user: UserId) -> (ProgramId, ProgramVersionId) {
-    let (program, version) = programs::create(pool, user, "Program", &document("Program"))
-        .await
-        .unwrap();
+    let (_, program, version) =
+        programs::create(pool, user, creation(), "Program", &document("Program"))
+            .await
+            .unwrap();
     (program.id, version.id)
 }
 

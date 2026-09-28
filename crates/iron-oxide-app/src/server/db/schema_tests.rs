@@ -527,3 +527,132 @@ async fn slugs_are_checked(pool: PgPool) {
         assert_eq!(result.is_ok(), ok, "{slug:?}: {result:?}");
     }
 }
+
+#[sqlx::test(migrator = "MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn programs_and_versions_are_only_deleted_with_their_user(pool: PgPool) {
+    let user = testing::user(&pool).await;
+    let (program, version) = testing::program(&pool, user).await;
+    super::programs::seed_builtins(
+        &pool,
+        &[super::programs::BuiltinSeed {
+            builtin_id: "starter",
+            name: "Starter",
+            json: r#"{"schema_version": 1}"#,
+        }],
+    )
+    .await
+    .unwrap();
+    for (sql, id) in [
+        (
+            "DELETE FROM program_versions WHERE id = $1",
+            version.as_uuid(),
+        ),
+        ("DELETE FROM programs WHERE id = $1", program.as_uuid()),
+    ] {
+        let error = sqlx::query(sql).bind(id).execute(&pool).await.unwrap_err();
+        let db_error = error.as_database_error().unwrap();
+        assert_eq!(db_error.code().as_deref(), Some("23000"), "{sql}: {error}");
+        assert!(
+            db_error.message().contains("only deleted by cascade"),
+            "{error}"
+        );
+    }
+    // Built-ins neither, even in bulk.
+    for sql in [
+        "DELETE FROM program_versions WHERE user_id IS NULL",
+        "DELETE FROM programs WHERE user_id IS NULL",
+    ] {
+        assert!(!accepts(&pool, sql, &[]).await, "{sql}");
+    }
+    // Deleting the user still cascades to both.
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let left: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM programs WHERE user_id = $1) \
+              + (SELECT count(*) FROM program_versions WHERE user_id = $1)",
+    )
+    .bind(user.as_uuid())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0);
+    assert_eq!(
+        super::programs::list_builtins(&pool).await.unwrap().len(),
+        1
+    );
+}
+
+/// Foreign keys between user-owned tables that may leave `user_id` out, with the reason.
+const FOREIGN_KEYS_WITHOUT_OWNER: &[&str] = &[
+    // Paired with program_versions_program_owner_fkey, which includes user_id; this one alone
+    // covers built-ins, whose NULL user_id the composite key does not check.
+    "program_versions_program_id_fkey",
+];
+
+#[sqlx::test(migrator = "MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn every_foreign_key_between_user_owned_tables_includes_user_id(pool: PgPool) {
+    // For each foreign key whose source and target both have a user_id column: user_id must be
+    // among the source columns and map to the target's user_id, so the two rows share an owner.
+    let keys = sqlx::query!(
+        r#"SELECT con.conname AS "name!", src.relname AS "table!",
+                  EXISTS (
+                      SELECT 1 FROM unnest(con.conkey, con.confkey) AS k(src_col, dst_col)
+                      JOIN pg_attribute sa ON sa.attrelid = con.conrelid AND sa.attnum = k.src_col
+                      JOIN pg_attribute da ON da.attrelid = con.confrelid AND da.attnum = k.dst_col
+                      WHERE sa.attname = 'user_id' AND da.attname = 'user_id'
+                  ) AS "owned!"
+           FROM pg_constraint con
+           JOIN pg_class src ON src.oid = con.conrelid
+           WHERE con.contype = 'f'
+             AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = con.conrelid
+                         AND a.attname = 'user_id' AND NOT a.attisdropped)
+             AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = con.confrelid
+                         AND a.attname = 'user_id' AND NOT a.attisdropped)
+           ORDER BY 2, 1"#
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    // Guards the query: the composite keys are among the ones it sees.
+    for expected in [
+        "workout_sets_session_owner_fkey",
+        "workout_sessions_program_version_owner_fkey",
+        "active_program_program_owner_fkey",
+    ] {
+        assert!(
+            keys.iter().any(|key| key.name == expected && key.owned),
+            "{expected}"
+        );
+    }
+    let bad: Vec<String> = keys
+        .iter()
+        .filter(|key| !key.owned && !FOREIGN_KEYS_WITHOUT_OWNER.contains(&key.name.as_str()))
+        .map(|key| format!("{}.{}", key.table, key.name))
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "foreign keys between user-owned tables without user_id: {bad:?}"
+    );
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn no_tables_outside_public(pool: PgPool) {
+    // The catalog checks above look at `public`: a table elsewhere would escape them. Extend them
+    // before allowing another schema.
+    let elsewhere = sqlx::query_scalar!(
+        r#"SELECT (table_schema || '.' || table_name) AS "table!" FROM information_schema.tables
+           WHERE table_schema NOT IN ('public', 'pg_catalog', 'information_schema')
+             AND table_schema NOT LIKE 'pg\_%'
+           ORDER BY 1"#
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(elsewhere.is_empty(), "{elsewhere:?}");
+}
