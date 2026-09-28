@@ -32,7 +32,13 @@ jobs:
         run: docker image ls iron-oxide:ci
       - name: Smoke test the container
         run: |
-          docker run --detach --init --name iron-oxide --publish 8080:8080 iron-oxide:ci
+          # The server validates its config at startup (see .env.example). The database pool
+          # connects lazily and /healthz does not touch it, so no Postgres is needed here.
+          # Throwaway placeholder values for an ephemeral container; not secrets.
+          docker run --detach --init --name iron-oxide --publish 8080:8080 \
+            --env APP_BASE_URL=http://127.0.0.1:8080 \
+            --env DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide_test \
+            iron-oxide:ci
           for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
             sleep 1
