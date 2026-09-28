@@ -1,4 +1,5 @@
-// Unit tests for the caching rule in public/sw.js. Run with: node --test crates/iron-oxide-app/tests/sw
+// Unit tests for the caching rule in public/sw.js.
+// Run with: node --test crates/iron-oxide-app/tests/sw/is_cacheable.test.mjs
 //
 // sw.js is a classic service worker script, not a module, so it is evaluated in a sandbox with a
 // minimal `self`; its top-level function declarations become properties of the sandbox.

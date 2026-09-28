@@ -136,7 +136,7 @@ jobs:
         run: cargo test -p iron-oxide-domain --locked
       # The service worker's caching rule, with the Node.js preinstalled on the runner (node:test).
       - name: Service worker unit tests
-        run: node --test crates/iron-oxide-app/tests/sw
+        run: node --test crates/iron-oxide-app/tests/sw/is_cacheable.test.mjs
 
   # Builds the whole workspace with SQLX_OFFLINE=true (set globally above), so a query whose
   # `.sqlx/` metadata is missing or stale fails CI without needing a database.
