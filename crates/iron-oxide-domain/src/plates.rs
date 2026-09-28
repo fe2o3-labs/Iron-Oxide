@@ -9,12 +9,20 @@
 //! integer arithmetic and no tolerance.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::units::Unit;
 use crate::weight::Weight;
+
+/// Every kg plate is a whole multiple of 0.025 kg (in nanograms). Real fractional kg plates are
+/// 0.1, 0.125, 0.25 and 0.5 kg; all standard plates are multiples of 0.25 kg.
+const KG_GRID: u64 = 25_000_000_000;
+/// Every lb plate is a whole multiple of 0.125 lb (in nanograms). Real fractional lb plates are
+/// 0.25, 0.5, 0.625 and 0.75 lb; all standard plates are multiples of 1.25 lb.
+const LB_GRID: u64 = 56_699_046_250;
+/// Grid steps in the heaviest possible side (1000 kg), on the finer of the two grids (kg).
+const MAX_GRID_STEPS: u64 = Weight::MAX.as_nanograms() / 2 / KG_GRID;
 
 /// A plate size and how many pairs of it are available. Serialized as
 /// `{"plate": 20.0, "pairs": 4}`, with the plate as a kg number like every [`Weight`].
@@ -35,6 +43,15 @@ pub enum PlateInventoryError {
     /// The same plate size was listed twice.
     #[error("plate size {} is listed more than once", .0.display_in(Unit::Kg))]
     DuplicatePlate(Weight),
+    /// A plate that is neither a multiple of 0.025 kg nor of 0.125 lb.
+    #[error("plate size {} is not a multiple of 0.025 kg or 0.125 lb", .0.display_in(Unit::Kg))]
+    OffGrid(Weight),
+    /// More pairs of one size than [`PlateInventory::MAX_PAIRS`].
+    #[error("at most {max} pairs of a plate size are allowed")]
+    TooManyPairs {
+        /// The maximum number of pairs of one size.
+        max: u32,
+    },
     /// More distinct plate sizes than [`PlateInventory::MAX_SIZES`].
     #[error("at most {max} plate sizes are allowed")]
     TooManySizes {
@@ -45,7 +62,8 @@ pub enum PlateInventoryError {
 
 /// The plates a user can load: plate size → number of pairs available.
 ///
-/// Sizes are unique, non-zero and kept heaviest first. kg and lb plates may be mixed.
+/// Sizes are unique, non-zero, on the 0.025 kg or 0.125 lb grid and kept heaviest first, with at
+/// most [`MAX_PAIRS`](Self::MAX_PAIRS) pairs each. kg and lb plates may be mixed.
 ///
 /// # Serde
 ///
@@ -59,20 +77,39 @@ pub struct PlateInventory {
 }
 
 impl PlateInventory {
-    /// The most distinct plate sizes an inventory may hold. Real gyms have fewer than ten; the cap
-    /// keeps the exact search in [`calculate_plates`] small.
+    /// The most distinct plate sizes an inventory may hold. Real gyms have fewer than ten.
     pub const MAX_SIZES: usize = 16;
+    /// The most pairs of one size. A bar sleeve holds about a dozen plates, so 50 pairs is more
+    /// than any load needs.
+    pub const MAX_PAIRS: u32 = 50;
 
     /// Builds an inventory from plate sizes and pair counts, in any order.
     ///
+    /// Every plate must be a whole multiple of 0.025 kg or of 0.125 lb. That admits every real
+    /// plate, fractional ones included (0.1, 0.125, 0.25, 0.5 kg; 0.25, 0.5, 0.625 lb), and keeps
+    /// [`calculate_plates`] within a fixed amount of work whatever the input.
+    ///
     /// # Errors
-    /// [`PlateInventoryError::ZeroPlate`] for a zero plate, [`PlateInventoryError::DuplicatePlate`]
-    /// for a size listed twice and [`PlateInventoryError::TooManySizes`] above
-    /// [`PlateInventory::MAX_SIZES`].
+    /// - [`PlateInventoryError::ZeroPlate`] for a zero plate.
+    /// - [`PlateInventoryError::OffGrid`] for a plate on neither grid.
+    /// - [`PlateInventoryError::TooManyPairs`] above [`PlateInventory::MAX_PAIRS`].
+    /// - [`PlateInventoryError::DuplicatePlate`] for a size listed twice.
+    /// - [`PlateInventoryError::TooManySizes`] above [`PlateInventory::MAX_SIZES`].
     pub fn new(stock: impl IntoIterator<Item = PlateStock>) -> Result<Self, PlateInventoryError> {
         let mut stock: Vec<PlateStock> = stock.into_iter().collect();
-        if stock.iter().any(|s| s.plate.is_zero()) {
-            return Err(PlateInventoryError::ZeroPlate);
+        for entry in &stock {
+            let nanograms = entry.plate.as_nanograms();
+            if nanograms == 0 {
+                return Err(PlateInventoryError::ZeroPlate);
+            }
+            if !nanograms.is_multiple_of(KG_GRID) && !nanograms.is_multiple_of(LB_GRID) {
+                return Err(PlateInventoryError::OffGrid(entry.plate));
+            }
+            if entry.pairs > Self::MAX_PAIRS {
+                return Err(PlateInventoryError::TooManyPairs {
+                    max: Self::MAX_PAIRS,
+                });
+            }
         }
         stock.sort_by_key(|s| std::cmp::Reverse(s.plate));
         if let Some(pair) = stock.windows(2).find(|w| w[0].plate == w[1].plate) {
@@ -326,25 +363,109 @@ impl PlateResult {
     }
 }
 
-/// A partial or complete choice of pair counts during the search.
-#[derive(Debug, Clone)]
-struct Candidate {
-    /// Weight of one side, in nanograms.
-    side: u64,
-    /// Plates on one side.
-    plates: u64,
-    /// Pairs used per inventory entry, in inventory order (heaviest first).
-    counts: Vec<u32>,
+/// Counters for the work done by one search, so tests can check the bound without timing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SearchStats {
+    /// Table cells allocated: one per per-side weight on the grid, per plate size.
+    cells: usize,
+    /// Inner-loop iterations: one per (cell, number of pairs tried).
+    steps: u64,
 }
 
-impl Candidate {
-    /// Among loadouts of the same weight: fewer plates first, then more of the heavier plates.
-    fn is_nicer_than(&self, other: &Self) -> bool {
-        match self.plates.cmp(&other.plates) {
-            Ordering::Less => true,
-            Ordering::Greater => false,
-            Ordering::Equal => self.counts > other.counts,
+/// Marks a per-side weight that no combination of plates reaches.
+const UNREACHABLE: u16 = u16::MAX;
+
+/// The nicest way to reach every per-side weight with the plates of one grid.
+///
+/// `plate_counts[s]` is the fewest plates reaching `s` grid steps (or [`UNREACHABLE`]) and
+/// `choices[i][s]` is how many of plate `i` (lightest first) that nicest loadout uses.
+struct GridTable {
+    grid: u64,
+    /// Plate sizes in grid steps with their pairs, lightest first, zero-pair sizes left out.
+    plates: Vec<(PlateStock, usize)>,
+    plate_counts: Vec<u16>,
+    choices: Vec<Vec<u8>>,
+}
+
+impl GridTable {
+    /// Bounded knapsack over the per-side weights `0..=max_steps` grid steps.
+    ///
+    /// Plates are added lightest first. Among loadouts of the same weight the one with the fewest
+    /// plates wins, then the one with more of the plate being added. Because that plate is the
+    /// heaviest so far, and the lighter plates of each candidate already form the nicest loadout
+    /// of what remains, this picks the nicest loadout overall: fewest plates, then the most heavy
+    /// plates, heaviest first.
+    fn build(stock: &[PlateStock], grid: u64, max_steps: usize, stats: &mut SearchStats) -> Self {
+        let width = max_steps + 1;
+        let plates: Vec<(PlateStock, usize)> = stock
+            .iter()
+            .rev()
+            .filter(|s| s.pairs > 0)
+            .map(|s| {
+                let steps = usize::try_from(s.plate.as_nanograms() / grid).unwrap_or(usize::MAX);
+                (*s, steps)
+            })
+            .collect();
+        let mut plate_counts = vec![UNREACHABLE; width];
+        plate_counts[0] = 0;
+        let mut choices = Vec::with_capacity(plates.len());
+        for &(stock, size) in &plates {
+            // Validation caps pairs at MAX_PAIRS (50), so these fit a u8 and a u16.
+            let pairs = usize::try_from(stock.pairs).unwrap_or(0);
+            let mut next = vec![UNREACHABLE; width];
+            let mut choice = vec![0_u8; width];
+            stats.cells += width;
+            for side in 0..width {
+                let most = pairs.min(side / size);
+                stats.steps += most as u64 + 1;
+                for count in 0..=most {
+                    let base = plate_counts[side - count * size];
+                    if base == UNREACHABLE {
+                        continue;
+                    }
+                    let total = base.saturating_add(u16::try_from(count).unwrap_or(u16::MAX));
+                    // `count` grows, so on a tie in plates the later (heavier-first) choice wins.
+                    if total <= next[side] {
+                        next[side] = total;
+                        choice[side] = u8::try_from(count).unwrap_or(u8::MAX);
+                    }
+                }
+            }
+            plate_counts = next;
+            choices.push(choice);
         }
+        Self {
+            grid,
+            plates,
+            plate_counts,
+            choices,
+        }
+    }
+
+    /// Every reachable per-side weight in nanograms, lightest first.
+    fn reachable(&self) -> Vec<u64> {
+        (0_u64..)
+            .zip(&self.plate_counts)
+            .filter(|&(_, &count)| count != UNREACHABLE)
+            .map(|(steps, _)| steps * self.grid)
+            .collect()
+    }
+
+    /// The plates of the nicest loadout weighing `side` nanograms (which must be reachable).
+    fn plates_for(&self, side: u64) -> Vec<PlateCount> {
+        let mut rest = usize::try_from(side / self.grid).unwrap_or(0);
+        let mut plates = Vec::new();
+        for (&(stock, size), choice) in self.plates.iter().zip(&self.choices).rev() {
+            let count = choice.get(rest).copied().unwrap_or(0);
+            if count > 0 {
+                plates.push(PlateCount {
+                    plate: stock.plate,
+                    per_side: u32::from(count),
+                });
+                rest = rest.saturating_sub(usize::from(count) * size);
+            }
+        }
+        plates
     }
 }
 
@@ -361,66 +482,85 @@ impl Candidate {
 /// - Among loadouts of the same weight, the one with the fewest plates wins, then the one with the
 ///   most heavy plates (30 kg per side is 25 + 5, not 15 + 15).
 ///
-/// Runs a dynamic programme over the reachable per-side weights, one plate size at a time. Only
-/// weights up to half the target are kept, so the work is bounded by the number of distinct
-/// reachable side weights (a few hundred for a real gym) times the pair counts.
+/// # Cost
+///
+/// Every plate is a multiple of 0.025 kg or of 0.125 lb (see [`PlateInventory::new`]). The kg
+/// plates and the lb plates are each solved by a table over their grid, up to the heaviest side
+/// that can matter (half the target plus one plate, never more than 1000 kg). The two tables are
+/// then combined: a kg side and a lb side never add up to the same total as another pair, because
+/// the smallest weight that is on both grids is over 1 000 000 kg.
+///
+/// So the work is at most 16 sizes × 40 001 grid steps × 51 pair counts (about 33 million simple
+/// steps) and 16 × 40 001 bytes of table, whatever the plate sizes, pair counts and target.
 #[must_use]
 pub fn calculate_plates(target: Weight, bar: Weight, inventory: &PlateInventory) -> PlateResult {
-    let Some(plates_total) = target.as_nanograms().checked_sub(bar.as_nanograms()) else {
-        return PlateResult {
-            target,
-            loadouts: Loadouts::AboveOnly(Loadout::bar_only(bar)),
-        };
-    };
-    // A side may weigh at most this much for the total to stay at or below the target.
-    let side_limit = plates_total / 2;
-    let empty = Candidate {
-        side: 0,
-        plates: 0,
-        counts: vec![0; inventory.stock.len()],
-    };
+    search(target, bar, inventory).0
+}
 
-    // Reachable side weights up to the limit, with the nicest way to reach each.
-    let mut reachable = BTreeMap::from([(0, empty)]);
-    let mut above: Option<Candidate> = None;
-    for (index, stock) in inventory.stock.iter().enumerate() {
-        if stock.pairs == 0 {
-            continue;
+fn search(target: Weight, bar: Weight, inventory: &PlateInventory) -> (PlateResult, SearchStats) {
+    let mut stats = SearchStats::default();
+    let Some(plates_total) = target.as_nanograms().checked_sub(bar.as_nanograms()) else {
+        let loadouts = Loadouts::AboveOnly(Loadout::bar_only(bar));
+        return (PlateResult { target, loadouts }, stats);
+    };
+    // A side may weigh at most `side_limit` for the total to stay at or below the target, and at
+    // most `side_cap` for the total to stay within Weight::MAX.
+    let side_limit = plates_total / 2;
+    let side_cap = Weight::MAX
+        .as_nanograms()
+        .saturating_sub(bar.as_nanograms())
+        / 2;
+    // The lightest loadout above the target is below the limit plus one plate: removing any plate
+    // from it lands at or below the limit, otherwise it would not be the lightest.
+    let heaviest = inventory
+        .stock
+        .iter()
+        .filter(|s| s.pairs > 0)
+        .map(|s| s.plate.as_nanograms())
+        .max()
+        .unwrap_or(0);
+    let side_max = side_limit.saturating_add(heaviest).min(side_cap);
+
+    let (kg_stock, lb_stock): (Vec<PlateStock>, Vec<PlateStock>) = inventory
+        .stock
+        .iter()
+        .partition(|s| s.plate.as_nanograms().is_multiple_of(KG_GRID));
+    let steps = |grid: u64| usize::try_from((side_max / grid).min(MAX_GRID_STEPS)).unwrap_or(0);
+    let kg = GridTable::build(&kg_stock, KG_GRID, steps(KG_GRID), &mut stats);
+    let lb = GridTable::build(&lb_stock, LB_GRID, steps(LB_GRID), &mut stats);
+
+    // Combine a kg side `x` and a lb side `y`: the heaviest x + y <= limit and the lightest
+    // x + y > limit (within the cap).
+    let lb_sides = lb.reachable();
+    let mut below: Option<(u64, u64)> = None;
+    let mut above: Option<(u64, u64)> = None;
+    for x in kg.reachable() {
+        // Index of the first lb side that makes x + y exceed the limit.
+        let split = match side_limit.checked_sub(x) {
+            Some(room) => lb_sides.partition_point(|&y| y <= room),
+            None => 0,
+        };
+        if let Some(&y) = split.checked_sub(1).and_then(|i| lb_sides.get(i))
+            && below.is_none_or(|(bx, by)| x + y > bx + by)
+        {
+            below = Some((x, y));
         }
-        let plate = stock.plate.as_nanograms();
-        let mut next: BTreeMap<u64, Candidate> = BTreeMap::new();
-        for base in reachable.values() {
-            let mut side = base.side;
-            let mut count = 0_u32;
-            loop {
-                let candidate = Candidate {
-                    side,
-                    plates: base.plates + u64::from(count),
-                    counts: with_count(&base.counts, index, count),
-                };
-                if side > side_limit {
-                    // Too heavy for "at or below". Adding more only makes it heavier, so this is
-                    // an "above" candidate and the loop stops here.
-                    offer_above(&mut above, candidate);
-                    break;
-                }
-                offer_reachable(&mut next, candidate);
-                if count == stock.pairs {
-                    break;
-                }
-                count += 1;
-                // side <= side_limit <= Weight::MAX and plate <= Weight::MAX, so no overflow.
-                side += plate;
-            }
+        if let Some(&y) = lb_sides.get(split)
+            && x + y <= side_cap
+            && above.is_none_or(|(ax, ay)| x + y < ax + ay)
+        {
+            above = Some((x, y));
         }
-        reachable = next;
     }
 
-    let below = reachable
-        .into_values()
-        .next_back()
-        .and_then(|c| loadout(&c, bar, inventory));
-    let above = above.and_then(|c| loadout(&c, bar, inventory));
+    let build = |(x, y): (u64, u64)| {
+        let mut plates = kg.plates_for(x);
+        plates.extend(lb.plates_for(y));
+        plates.sort_by_key(|c| std::cmp::Reverse(c.plate));
+        loadout(plates, x + y, bar)
+    };
+    let below = below.and_then(build);
+    let above = above.and_then(build);
     let loadouts = match (below, above) {
         (Some(below), _) if below.total == target => Loadouts::Exact(below),
         (Some(below), Some(above)) => Loadouts::Between { below, above },
@@ -430,57 +570,13 @@ pub fn calculate_plates(target: Weight, bar: Weight, inventory: &PlateInventory)
         // bar. Fall back to the bar alone rather than failing.
         (None, None) => Loadouts::BelowOnly(Loadout::bar_only(bar)),
     };
-    PlateResult { target, loadouts }
+    (PlateResult { target, loadouts }, stats)
 }
 
-fn with_count(counts: &[u32], index: usize, count: u32) -> Vec<u32> {
-    let mut counts = counts.to_vec();
-    if let Some(slot) = counts.get_mut(index) {
-        *slot = count;
-    }
-    counts
-}
-
-fn offer_reachable(reachable: &mut BTreeMap<u64, Candidate>, candidate: Candidate) {
-    match reachable.get_mut(&candidate.side) {
-        Some(current) => {
-            if candidate.is_nicer_than(current) {
-                *current = candidate;
-            }
-        }
-        None => {
-            reachable.insert(candidate.side, candidate);
-        }
-    }
-}
-
-fn offer_above(above: &mut Option<Candidate>, candidate: Candidate) {
-    let better = above
-        .as_ref()
-        .is_none_or(|current| match candidate.side.cmp(&current.side) {
-            Ordering::Less => true,
-            Ordering::Greater => false,
-            Ordering::Equal => candidate.is_nicer_than(current),
-        });
-    if better {
-        *above = Some(candidate);
-    }
-}
-
-/// Turns pair counts into a loadout. `None` when the total would exceed [`Weight::MAX`].
-fn loadout(candidate: &Candidate, bar: Weight, inventory: &PlateInventory) -> Option<Loadout> {
-    let per_side = Weight::from_nanograms(candidate.side).ok()?;
+/// Builds a loadout. `None` when the total would exceed [`Weight::MAX`].
+fn loadout(plates: Vec<PlateCount>, side: u64, bar: Weight) -> Option<Loadout> {
+    let per_side = Weight::from_nanograms(side).ok()?;
     let total = per_side.checked_mul(2).ok()?.checked_add(bar).ok()?;
-    let plates = inventory
-        .stock
-        .iter()
-        .zip(&candidate.counts)
-        .filter(|&(_, &count)| count > 0)
-        .map(|(stock, &count)| PlateCount {
-            plate: stock.plate,
-            per_side: count,
-        })
-        .collect();
     Some(Loadout {
         plates,
         per_side,
@@ -659,6 +755,10 @@ mod tests {
         assert!(serde_json::from_str::<PlateInventory>(duplicate).is_err());
         let negative_pairs = r#"[{"plate":20,"pairs":-1}]"#;
         assert!(serde_json::from_str::<PlateInventory>(negative_pairs).is_err());
+        let too_many_pairs = r#"[{"plate":20,"pairs":51}]"#;
+        assert!(serde_json::from_str::<PlateInventory>(too_many_pairs).is_err());
+        let off_grid = r#"[{"plate":0.001,"pairs":1}]"#;
+        assert!(serde_json::from_str::<PlateInventory>(off_grid).is_err());
         let negative_plate = r#"[{"plate":-20,"pairs":1}]"#;
         assert!(serde_json::from_str::<PlateInventory>(negative_plate).is_err());
     }
@@ -760,10 +860,11 @@ mod tests {
     #[test]
     fn odd_nanogram_difference_is_never_exact() {
         // Plates go on both sides, so the plate total must be even.
-        let inv = inventory(&[(Weight::from_nanograms(1).unwrap(), 10)]);
-        let result = calculate_plates(Weight::from_nanograms(5).unwrap(), Weight::ZERO, &inv);
-        assert_eq!(result.below().unwrap().total().as_nanograms(), 4);
-        assert_eq!(result.above().unwrap().total().as_nanograms(), 6);
+        let inv = inventory(&[(kg(0.025), 10)]);
+        let target = Weight::from_nanograms(kg(0.05).as_nanograms() + 1).unwrap();
+        let result = calculate_plates(target, Weight::ZERO, &inv);
+        assert_eq!(result.below().unwrap().total(), kg(0.05));
+        assert_eq!(result.above().unwrap().total(), kg(0.1));
     }
 
     #[test]
@@ -913,17 +1014,164 @@ mod tests {
     }
 
     #[test]
-    fn huge_pair_counts_stay_cheap() {
-        let inv = inventory(&[(kg(1.25), u32::MAX)]);
-        let result = calculate_plates(Weight::MAX, kg(20.0), &inv);
-        let exact = result.exact().unwrap();
+    fn inventory_accepts_real_fractional_plates() {
+        let fractional = [
+            kg(0.1),
+            kg(0.125),
+            kg(0.25),
+            kg(0.5),
+            lb(0.25),
+            lb(0.5),
+            lb(0.625),
+        ];
+        let inv = PlateInventory::new(fractional.iter().map(|&p| stock(p, 2))).unwrap();
+        assert_eq!(inv.stock().len(), fractional.len());
+        let result = calculate_plates(kg(20.2), kg(20.0), &inv);
+        assert_eq!(plates_of(result.exact().unwrap()), vec![(kg(0.1), 1)]);
+    }
+
+    #[test]
+    fn inventory_rejects_plates_off_both_grids() {
+        for plate in [
+            Weight::from_nanograms(1).unwrap(),
+            kg(0.001),
+            kg(0.00001),
+            kg(0.01),
+            kg(0.12),
+            lb(0.1),
+            kg(20.001),
+        ] {
+            let err = PlateInventory::new([stock(plate, 1)]).unwrap_err();
+            assert_eq!(err, PlateInventoryError::OffGrid(plate));
+        }
         assert_eq!(
-            exact.plates(),
-            &[PlateCount {
-                plate: kg(1.25),
-                per_side: 792
-            }]
+            PlateInventoryError::OffGrid(kg(0.01)).to_string(),
+            "plate size 0.01 kg is not a multiple of 0.025 kg or 0.125 lb"
         );
+    }
+
+    #[test]
+    fn inventory_caps_pairs_per_size() {
+        assert!(PlateInventory::new([stock(kg(20.0), 50)]).is_ok());
+        let err = PlateInventory::new([stock(kg(20.0), 51)]).unwrap_err();
+        assert_eq!(err, PlateInventoryError::TooManyPairs { max: 50 });
+        assert_eq!(
+            err.to_string(),
+            "at most 50 pairs of a plate size are allowed"
+        );
+        assert!(PlateInventory::new([stock(kg(20.0), u32::MAX)]).is_err());
+    }
+
+    // ---------------------------------------------------------------- bounded work
+
+    /// The most table cells and inner steps any valid input can cost: 16 sizes, each with a table
+    /// of at most 40 001 grid steps (1000 kg on the 0.025 kg grid) and at most 51 pair counts
+    /// tried per step.
+    const MAX_CELLS: usize = 16 * 40_001;
+    const MAX_STEPS: u64 = 16 * 40_001 * 51;
+
+    fn assert_bounded(stats: SearchStats) {
+        assert!(stats.cells <= MAX_CELLS, "{stats:?}");
+        assert!(stats.steps <= MAX_STEPS, "{stats:?}");
+    }
+
+    #[test]
+    fn review_input_many_realistic_sizes_is_bounded() {
+        // 16 real sizes, kg and lb mixed, 10 pairs each: previously 5 s and 2.4 GB.
+        let json = r#"[
+            {"plate":25,"pairs":10},{"plate":20,"pairs":10},{"plate":15,"pairs":10},
+            {"plate":10,"pairs":10},{"plate":5,"pairs":10},{"plate":2.5,"pairs":10},
+            {"plate":1.25,"pairs":10},{"plate":0.5,"pairs":10},
+            {"plate":20.41165665,"pairs":10},{"plate":15.87573295,"pairs":10},
+            {"plate":11.33980925,"pairs":10},{"plate":4.5359237,"pairs":10},
+            {"plate":2.26796185,"pairs":10},{"plate":1.133980925,"pairs":10},
+            {"plate":0.5669904625,"pairs":10},{"plate":0.1133980925,"pairs":10}
+        ]"#;
+        let inv: PlateInventory = serde_json::from_str(json).unwrap();
+        assert_eq!(inv.stock().len(), 16);
+        for target in [kg(1000.0), Weight::MAX, kg(137.3)] {
+            let (result, stats) = search(target, kg(20.0), &inv);
+            assert_bounded(stats);
+            assert!(result.below().unwrap().total() <= target);
+            assert!(result.above().is_none_or(|above| above.total() > target));
+        }
+        // A mixed exact load: 20 kg bar + 2 × (20 kg + 45 lb).
+        let target = kg(60.0).checked_add(lb(90.0)).unwrap();
+        let (result, stats) = search(target, kg(20.0), &inv);
+        assert_bounded(stats);
+        assert_eq!(
+            plates_of(result.exact().unwrap()),
+            vec![(lb(45.0), 1), (kg(20.0), 1)]
+        );
+    }
+
+    #[test]
+    fn review_input_tiny_plate_with_huge_pairs_is_rejected() {
+        // Previously 20 s and 8.6 GB.
+        let json = r#"[{"plate":0.00001,"pairs":4294967295}]"#;
+        assert!(serde_json::from_str::<PlateInventory>(json).is_err());
+        let json = r#"[{"plate":0.001,"pairs":4294967295}]"#;
+        assert!(serde_json::from_str::<PlateInventory>(json).is_err());
+        // The smallest grid plate with the most pairs is accepted and bounded.
+        let inv = inventory(&[(kg(0.025), 50)]);
+        let (result, stats) = search(Weight::MAX, Weight::ZERO, &inv);
+        assert_bounded(stats);
+        assert_eq!(result.below().unwrap().total(), kg(2.5));
+    }
+
+    #[test]
+    fn review_input_near_equal_tiny_plates_is_rejected() {
+        // Previously more than 60 s.
+        let json = r#"[{"plate":0.001,"pairs":1000000},{"plate":0.001001,"pairs":1000000}]"#;
+        assert!(serde_json::from_str::<PlateInventory>(json).is_err());
+        // The closest accepted equivalent: two adjacent grid plates with the most pairs.
+        let inv = inventory(&[(kg(0.025), 50), (kg(0.05), 50)]);
+        let (result, stats) = search(kg(60.0), Weight::ZERO, &inv);
+        assert_bounded(stats);
+        assert_eq!(result.below().unwrap().total(), kg(7.5));
+    }
+
+    #[test]
+    fn worst_case_under_the_limits_stays_small() {
+        // 16 sizes on the finest grid with the most pairs and the heaviest target: every table
+        // has its full width.
+        let inv = PlateInventory::new(
+            (1..=16_u32)
+                .map(|i| stock(Weight::from_nanograms(u64::from(i) * KG_GRID).unwrap(), 50)),
+        )
+        .unwrap();
+        let (result, stats) = search(Weight::MAX, Weight::ZERO, &inv);
+        assert_eq!(stats.cells, MAX_CELLS);
+        assert_bounded(stats);
+        // 50 pairs each of 0.025 .. 0.4 kg: 50 × 3.4 kg = 170 kg per side.
+        assert_eq!(result.below().unwrap().total(), kg(340.0));
+
+        // Mixed kg and lb at the limits costs no more.
+        let mixed = PlateInventory::new((1..=8_u32).flat_map(|i| {
+            [
+                stock(Weight::from_nanograms(u64::from(i) * KG_GRID).unwrap(), 50),
+                stock(Weight::from_nanograms(u64::from(i) * LB_GRID).unwrap(), 50),
+            ]
+        }))
+        .unwrap();
+        for target in [Weight::MAX, kg(500.0), kg(20.0)] {
+            let (_, stats) = search(target, Weight::ZERO, &mixed);
+            assert_bounded(stats);
+        }
+    }
+
+    #[test]
+    fn grids_never_share_a_weight_within_the_cap() {
+        // x + y == x' + y' with x != x' would need a common multiple of both grids of at most
+        // 1000 kg; the smallest one is over a million kg.
+        let gcd = |mut a: u64, mut b: u64| {
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            a
+        };
+        let lcm = u128::from(KG_GRID / gcd(KG_GRID, LB_GRID)) * u128::from(LB_GRID);
+        assert!(lcm > u128::from(Weight::MAX.as_nanograms()));
     }
 
     // ---------------------------------------------------------------- brute force comparison
@@ -1004,12 +1252,15 @@ mod tests {
             kg(2.5),
             kg(1.25),
             kg(0.5),
+            kg(0.25),
             lb(45.0),
             lb(35.0),
             lb(25.0),
             lb(10.0),
             lb(5.0),
             lb(2.5),
+            lb(1.25),
+            lb(0.625),
         ]
     }
 
