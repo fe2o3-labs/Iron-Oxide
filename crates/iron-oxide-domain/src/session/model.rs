@@ -4,9 +4,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{ProgramVersionId, SessionId};
+use crate::ids::{DayId, ProgramVersionId, SessionId};
 
-use super::day::DayId;
 use super::error::SessionError;
 
 /// Where a session is in its lifecycle.

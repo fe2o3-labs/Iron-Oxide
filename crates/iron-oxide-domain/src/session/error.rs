@@ -1,21 +1,12 @@
 //! Errors raised by the session model and the day rotation.
 
-use crate::ids::{SessionId, SetId};
+use crate::ids::{DayId, SessionId, SetId};
 
-use super::day::DayId;
 use super::model::SessionStatus;
 
-/// A session, a logged set or a day id broke one of the session rules.
+/// A session or a logged set broke one of the session rules.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SessionError {
-    /// A day ID is not a valid slug.
-    #[error("invalid day id `{value}`: {reason}")]
-    InvalidDayId {
-        /// The rejected input.
-        value: String,
-        /// Why it was rejected.
-        reason: &'static str,
-    },
     /// The session has already ended, so it cannot take a new set or end a second time differently.
     #[error("session {session_id} has already ended ({status})")]
     AlreadyEnded {

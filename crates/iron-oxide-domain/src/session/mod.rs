@@ -13,14 +13,12 @@
 //! [`ProgramVersionId`]: crate::ProgramVersionId
 //! [`SetId`]: crate::SetId
 
-mod day;
 mod error;
 mod log;
 mod model;
 mod rotation;
 mod set;
 
-pub use day::DayId;
 pub use error::{RotationError, SessionError};
 pub use log::SessionLog;
 pub use model::{Change, Session, SessionOutcome, SessionStatus};

@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use super::day::DayId;
+use crate::ids::DayId;
+
 use super::error::RotationError;
 use super::model::Session;
 #[cfg(doc)]

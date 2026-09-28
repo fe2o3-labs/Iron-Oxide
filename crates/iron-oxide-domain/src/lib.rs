@@ -30,7 +30,7 @@ pub use ids::{
 pub use percent::Percent;
 pub use reps::Reps;
 pub use session::{
-    Change, DayId, LoggedSet, RotationError, Session, SessionError, SessionLog, SessionOutcome,
+    Change, LoggedSet, RotationError, Session, SessionError, SessionLog, SessionOutcome,
     SessionStatus, next_day,
 };
 pub use units::Unit;
