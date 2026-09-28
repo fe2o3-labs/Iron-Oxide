@@ -10,7 +10,7 @@ use webauthn_rs_proto::{
     RequestChallengeResponse,
 };
 
-use super::test_support::{Browser, Grant, Passkey, TestApp, query_param};
+use super::test_support::{Browser, CallError, Grant, Passkey, TestApp, query_param, sign_up};
 use crate::auth::types::Me;
 
 const SIGN_UP_BEGIN: &str = "/api/auth/passkey/sign-up/begin";
@@ -25,21 +25,6 @@ const SIGN_OUT: &str = "/api/auth/sign-out";
 const GOOGLE_BEGIN: &str = "/api/auth/google/begin";
 const GOOGLE_UNLINK: &str = "/api/auth/google/unlink";
 
-/// Signs up with a new passkey; returns the account and the credential id.
-async fn sign_up(browser: &mut Browser, passkey: &mut Passkey, name: &str) -> (Me, Vec<u8>) {
-    let ccr: CreationChallengeResponse = browser
-        .call(SIGN_UP_BEGIN, json!({ "display_name": name }))
-        .await
-        .unwrap();
-    let credential = passkey.register(ccr);
-    let credential_id = credential.raw_id.to_vec();
-    let me: Me = browser
-        .call(SIGN_UP_FINISH, json!({ "credential": credential }))
-        .await
-        .unwrap();
-    (me, credential_id)
-}
-
 async fn sign_in_assertion(
     browser: &mut Browser,
     passkey: &mut Passkey,
@@ -49,7 +34,7 @@ async fn sign_in_assertion(
     passkey.sign_in(rcr, credential_id)
 }
 
-async fn me(browser: &mut Browser) -> Result<Me, super::test_support::ApiError> {
+async fn me(browser: &mut Browser) -> Result<Me, CallError> {
     browser.call(ME, json!({})).await
 }
 

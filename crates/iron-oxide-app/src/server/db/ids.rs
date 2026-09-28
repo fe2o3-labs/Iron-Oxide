@@ -63,6 +63,34 @@ uuid_id!(
     SetId
 );
 
+/// Conversions to and from the domain's id of the same name, for the server functions: their
+/// arguments and results use the domain ids (serde-transparent UUIDs), the repository uses these.
+macro_rules! domain_id {
+    ($($name:ident),+) => {$(
+        impl From<iron_oxide_domain::$name> for $name {
+            fn from(id: iron_oxide_domain::$name) -> Self {
+                Self(id.as_uuid())
+            }
+        }
+
+        impl From<$name> for iron_oxide_domain::$name {
+            fn from(id: $name) -> Self {
+                Self::from_uuid(id.0)
+            }
+        }
+    )+};
+}
+
+domain_id!(UserId, ProgramId, ProgramVersionId, SessionId, SetId);
+
+/// The signed-in user (from [`AuthUser`](crate::server::auth::AuthUser)) as the repository's
+/// owner key.
+impl From<crate::auth::types::UserId> for UserId {
+    fn from(id: crate::auth::types::UserId) -> Self {
+        Self(id.as_uuid())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +105,18 @@ mod tests {
             "SetId(00000000-0000-0000-0000-00000000002a)"
         );
         assert_eq!(UserId::from_uuid(uuid), UserId::from_uuid(uuid));
+    }
+
+    #[test]
+    fn ids_convert_to_and_from_the_domain_and_auth_ids() {
+        let uuid = Uuid::from_u128(7);
+        let domain = iron_oxide_domain::SessionId::from_uuid(uuid);
+        assert_eq!(SessionId::from(domain).as_uuid(), uuid);
+        assert_eq!(
+            iron_oxide_domain::SessionId::from(SessionId::from_uuid(uuid)),
+            domain
+        );
+        let auth = crate::auth::types::UserId::from_uuid(uuid);
+        assert_eq!(UserId::from(auth), UserId::from_uuid(uuid));
     }
 }

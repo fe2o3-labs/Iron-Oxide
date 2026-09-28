@@ -269,6 +269,12 @@ impl AuthUser {
         self.user_id
     }
 
+    /// The same id as the repository's owner key: pass it to every `server::db` call.
+    #[must_use]
+    pub fn owner(&self) -> super::db::ids::UserId {
+        self.user_id.into()
+    }
+
     /// An authenticated user without a request, for tests of code that takes an `AuthUser`.
     #[cfg(test)]
     pub(crate) fn for_tests(user_id: UserId) -> Self {

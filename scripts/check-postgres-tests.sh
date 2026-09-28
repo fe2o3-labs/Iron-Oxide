@@ -4,7 +4,7 @@
 # file, and checks that:
 #   1) every `#[ignore = "needs Postgres"]` test in the app's src/ passed;
 #   2) every isolation and schema test is among them: the schema tests by module, the repository
-#      isolation tests by naming convention.
+#      and server-function isolation tests by naming convention.
 # Called by `make test-db` (and so by CI's integration job). Run it from the repository root.
 set -euo pipefail
 
@@ -19,9 +19,13 @@ if [ "$expected" -lt 1 ] || [ "$passed" -ne "$expected" ]; then
 fi
 schema=$(grep -cE '^test server::db::schema_tests::\S+ \.\.\. ok$' "$log" || true)
 isolation=$(grep -cE '^test server::db::\w+::tests::\w*(another_users|users_only|nobody_can|two_users|only_the_users)\w* \.\.\. ok$' "$log" || true)
-echo "schema tests passed: $schema, isolation tests passed: $isolation"
+# Server-function isolation tests (docs/api.md): `another_users_*` under server::api.
+endpoint_isolation=$(grep -cE '^test server::api::\S+::another_users\w* \.\.\. ok$' "$log" || true)
+echo "schema tests passed: $schema, isolation tests passed: $isolation," \
+  "endpoint isolation tests passed: $endpoint_isolation"
 # Floors: today's counts. Raise them when adding tests; lowering one needs a reason.
-if [ "$schema" -lt 20 ] || [ "$isolation" -lt 11 ]; then
-  echo "::error::isolation or schema tests missing (schema $schema < 20 or isolation $isolation < 11)"
+if [ "$schema" -lt 20 ] || [ "$isolation" -lt 11 ] || [ "$endpoint_isolation" -lt 1 ]; then
+  echo "::error::isolation or schema tests missing (schema $schema < 20, isolation $isolation < 11" \
+    "or endpoint isolation $endpoint_isolation < 1)"
   exit 1
 fi

@@ -198,7 +198,7 @@ mod tests {
     use super::*;
     use crate::auth::types::Me;
     use crate::auth::types::UserId;
-    use crate::server::auth::test_support::{ApiError, Browser, Passkey, TestApp};
+    use crate::server::auth::test_support::{Browser, CallError, Passkey, TestApp};
     use crate::server::db::{MIGRATOR, testing};
     use dioxus::server::axum::http::StatusCode;
     use iron_oxide_domain::entitlements::FREE_CUSTOM_PROGRAMS;
@@ -480,7 +480,7 @@ mod tests {
         me.user_id
     }
 
-    async fn my_entitlements(browser: &mut Browser) -> Result<Entitlements, ApiError> {
+    async fn my_entitlements(browser: &mut Browser) -> Result<Entitlements, CallError> {
         browser.call(ENTITLEMENTS, json!({})).await
     }
 

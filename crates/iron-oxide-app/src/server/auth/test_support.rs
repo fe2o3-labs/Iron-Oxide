@@ -29,6 +29,7 @@ use webauthn_rs_proto::{
 };
 
 use super::AuthState;
+use crate::auth::types::Me;
 use crate::server::{AppState, Config, router};
 
 pub const ORIGIN: &str = "http://localhost:8080";
@@ -97,9 +98,10 @@ impl TestApp {
     }
 }
 
-/// A server-function error as decoded from the response body.
-#[derive(Debug)]
-pub struct ApiError {
+/// A failed server-function call, as decoded from the response: the status and the `error`
+/// message of the body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallError {
     pub status: StatusCode,
     pub message: String,
 }
@@ -143,12 +145,8 @@ impl Browser {
         builder
     }
 
-    /// Calls a server function (`POST` with a JSON body) and decodes the result.
-    pub async fn call<T: DeserializeOwned>(
-        &mut self,
-        path: &str,
-        body: Value,
-    ) -> Result<T, ApiError> {
+    /// `POST path` with a JSON body, returning the status and the raw body.
+    pub async fn post_json(&mut self, path: &str, body: Value) -> (StatusCode, Vec<u8>) {
         let request = self
             .request("POST", path)
             .header(header::CONTENT_TYPE, "application/json")
@@ -157,15 +155,32 @@ impl Browser {
         let response = self.send(request).await;
         let status = response.status();
         let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        (status, bytes.to_vec())
+    }
+
+    /// Calls a server function (`POST` with a JSON body) and decodes the result.
+    pub async fn call<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        body: Value,
+    ) -> Result<T, CallError> {
+        let (status, bytes) = self.post_json(path, body).await;
         if status.is_success() {
             Ok(serde_json::from_slice(&bytes)
                 .unwrap_or_else(|e| panic!("{path}: {e}: {}", String::from_utf8_lossy(&bytes))))
         } else {
+            // `/api/` errors carry our message in `data.ServerError.message` (see
+            // `server::api::errors_layer`); other routes send `{"error": message}`.
             let message = serde_json::from_slice::<Value>(&bytes)
                 .ok()
-                .and_then(|v| v["error"].as_str().map(str::to_owned))
+                .and_then(|v| {
+                    v["data"]["ServerError"]["message"]
+                        .as_str()
+                        .or_else(|| v["error"].as_str())
+                        .map(str::to_owned)
+                })
                 .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
-            Err(ApiError { status, message })
+            Err(CallError { status, message })
         }
     }
 
@@ -182,6 +197,28 @@ impl Browser {
             String::from_utf8_lossy(&bytes).into_owned(),
         )
     }
+}
+
+/// Signs up with a new passkey on `browser`, which is then signed in as the new user. Returns the
+/// account and the credential id.
+pub async fn sign_up(browser: &mut Browser, passkey: &mut Passkey, name: &str) -> (Me, Vec<u8>) {
+    let ccr: CreationChallengeResponse = browser
+        .call(
+            "/api/auth/passkey/sign-up/begin",
+            json!({ "display_name": name }),
+        )
+        .await
+        .unwrap();
+    let credential = passkey.register(ccr);
+    let credential_id = credential.raw_id.to_vec();
+    let me: Me = browser
+        .call(
+            "/api/auth/passkey/sign-up/finish",
+            json!({ "credential": credential }),
+        )
+        .await
+        .unwrap();
+    (me, credential_id)
 }
 
 /// A software passkey, adapted to discoverable credentials: `SoftPasskey` supports neither

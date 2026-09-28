@@ -1,5 +1,6 @@
 //! The axum server: the Dioxus app (SSR, assets, server functions) plus custom routes.
 
+pub mod api;
 pub mod auth;
 pub mod billing;
 pub mod config;
@@ -210,6 +211,8 @@ pub fn router(state: AppState, auth: auth::AuthState) -> Router {
         .layer(from_fn(missing_assets_are_not_found));
     // Sign-in (#5): sessions, the CSRF check and the Google callback around the app.
     auth::install(app, auth, state.db.clone())
+        // One error body for every `/api/` failure, CSRF and sign-in rejections included (#68).
+        .layer(from_fn(api::errors_layer::normalize))
         // Merged after `auth::install`, so outside its session and CSRF layers: Stripe's webhook
         // deliveries are cross-site POSTs, authenticated by their signature (billing.rs).
         .merge(billing::routes())
