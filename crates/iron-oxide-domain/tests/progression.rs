@@ -1046,6 +1046,23 @@ fn every_builtin_exercise_has_loadable_targets() {
                     assert!(warmup < working, "{} in {unit}", exercise.id);
                 }
             }
+            // A session at the target that hits the top of the range progresses every rule.
+            if let (Some(working), Work::Reps { sets, reps }) = (working, exercise.work)
+                && !exercise.progression.is_none()
+            {
+                let top = PastSession::new(vec![
+                    WorkingSet::new(working, reps.max());
+                    usize::from(sets)
+                ]);
+                let after = ready(next_targets(exercise, training_max, settings, &[top]));
+                let kind = after.change.unwrap().kind;
+                assert!(kind.is_progress(), "{} in {unit}: {kind:?}", exercise.id);
+                assert!(
+                    after.working[0].weight.unwrap() >= working,
+                    "{} in {unit}",
+                    exercise.id
+                );
+            }
         }
     }
 }
