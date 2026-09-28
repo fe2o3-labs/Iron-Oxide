@@ -103,14 +103,8 @@ pub async fn set_active(
     owner: UserId,
     id: ProgramId,
 ) -> Result<ProgramDetail, ApiError> {
-    let detail = detail(pool, owner, id).await?;
-    if detail.program.archived {
-        return Err(ApiError::conflict(
-            "This program is archived. Restore it before training with it.",
-        ));
-    }
     active_program::set(pool, owner, id.into()).await?;
-    Ok(detail)
+    detail(pool, owner, id).await
 }
 
 /// Every version of `owner`'s program `id`, oldest first.
@@ -133,13 +127,6 @@ pub async fn set_archived(
     id: ProgramId,
     archived: bool,
 ) -> Result<(), ApiError> {
-    // The program must be the owner's before anything else is said about it.
-    programs::get(pool, owner, id.into()).await?;
-    if archived && active_program::get(pool, owner).await? == Some(id.into()) {
-        return Err(ApiError::conflict(
-            "This is the program you train with. Choose another one before archiving it.",
-        ));
-    }
     Ok(programs::set_archived(pool, owner, id.into(), archived).await?)
 }
 

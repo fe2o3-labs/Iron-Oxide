@@ -16,6 +16,7 @@ use crate::server::api::{
     error::{INVALID_PROGRAM, NOT_FOUND},
     testing::{self, TestApi, TestUser},
 };
+use crate::server::db::testing as db_testing;
 
 const BUILTINS: &str = "/api/programs/builtins";
 const COPY: &str = "/api/programs/copy-builtin";
@@ -728,4 +729,118 @@ async fn another_users_programs_are_not_listed_or_copied_into(db: PgPool) {
     );
     assert_eq!(programs_of(&mut a, true).await, a_programs);
     assert_eq!(active_of(&mut a).await, a_active);
+}
+
+// --- Activating and archiving concurrently ------------------------------------------------------
+
+/// A new program of `owner`'s with a valid document (`set_active` returns it).
+async fn valid_program(db: &PgPool, owner: UserId) -> ProgramId {
+    let document: JsonValue = serde_json::from_str(&document("Race")).unwrap();
+    let creation = crate::server::db::ids::CreationId::from(CreationId::new_v7());
+    let (_, program, _) = programs::create(db, owner, creation, "Race", &document)
+        .await
+        .unwrap();
+    program.id.into()
+}
+
+/// `owner`'s active program and whether `program` is archived, as stored.
+async fn stored_state(db: &PgPool, owner: UserId, program: ProgramId) -> (Option<ProgramId>, bool) {
+    let active = active_program::get(db, owner)
+        .await
+        .unwrap()
+        .map(Into::into);
+    let archived = programs::get(db, owner, program.into())
+        .await
+        .unwrap()
+        .archived;
+    (active, archived)
+}
+
+/// Waits until `waiters` statements of this test's database wait for a lock.
+async fn wait_for_lock_waiters(db: &PgPool, waiters: i64) {
+    for _ in 0..1_000 {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity
+             WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(db)
+        .await
+        .unwrap();
+        if waiting >= waiters {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("fewer than {waiters} statements ever waited for a lock");
+}
+
+/// Making a program active and archiving it at the same time: exactly one of them wins, the other
+/// gets `409`, and an archived program is never the active one (it was in 299 of 300 runs before
+/// both took the program's row lock).
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn activating_and_archiving_at_once_never_leave_an_archived_active_program(db: PgPool) {
+    let owner = db_testing::user(&db).await;
+    let other = valid_program(&db, owner).await;
+    for _ in 0..100 {
+        active_program::set(&db, owner, other.into()).await.unwrap();
+        let program = valid_program(&db, owner).await;
+        let (activated, archived) = tokio::join!(
+            set_active(&db, owner, program),
+            set_archived(&db, owner, program, true)
+        );
+        let state = stored_state(&db, owner, program).await;
+        match (&activated, &archived) {
+            (Ok(_), Err(ApiError::Conflict(_))) => assert_eq!(state, (Some(program), false)),
+            (Err(ApiError::Conflict(_)), Ok(())) => assert_eq!(state, (Some(other), true)),
+            _ => panic!(
+                "activate: {:?}, archive: {archived:?}, stored: {state:?}",
+                activated.as_ref().map(|detail| detail.program.id)
+            ),
+        }
+    }
+}
+
+/// The reviewer's interleaving, forced: an activation that waits (here on another transaction's
+/// lock) after its checks makes a concurrent archive wait too, which then sees the new active
+/// program and refuses.
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn an_archive_waits_for_a_pending_activation(db: PgPool) {
+    let owner = db_testing::user(&db).await;
+    let other = valid_program(&db, owner).await;
+    active_program::set(&db, owner, other.into()).await.unwrap();
+    let program = valid_program(&db, owner).await;
+
+    let mut blocker = db.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM active_program WHERE user_id = $1 FOR UPDATE")
+        .bind(owner.as_uuid())
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let activate = tokio::spawn({
+        let db = db.clone();
+        async move { set_active(&db, owner, program).await }
+    });
+    wait_for_lock_waiters(&db, 1).await;
+    let archive = tokio::spawn({
+        let db = db.clone();
+        async move { set_archived(&db, owner, program, true).await }
+    });
+    // The archive waits for the activation's lock on the program instead of going ahead.
+    wait_for_lock_waiters(&db, 2).await;
+    assert!(!archive.is_finished());
+    blocker.rollback().await.unwrap();
+
+    let activated = activate.await.unwrap();
+    assert!(activated.is_ok(), "{activated:?}");
+    let archived = archive.await.unwrap();
+    assert!(
+        matches!(archived, Err(ApiError::Conflict(_))),
+        "{archived:?}"
+    );
+    assert_eq!(
+        stored_state(&db, owner, program).await,
+        (Some(program), false)
+    );
 }

@@ -135,6 +135,12 @@ impl From<RepoError> for ApiError {
             RepoError::NotFound => Self::NotFound,
             RepoError::Conflict => Self::conflict("This was already saved with different values."),
             RepoError::SessionEnded => Self::conflict("This session has already ended."),
+            RepoError::ProgramArchived => {
+                Self::conflict("This program is archived. Restore it before training with it.")
+            }
+            RepoError::ProgramActive => Self::conflict(
+                "This is the program you train with. Choose another one before archiving it.",
+            ),
             RepoError::Transient => Self::Transient("concurrent write".to_owned()),
             RepoError::Invalid { constraint } => {
                 tracing::info!(
@@ -263,6 +269,8 @@ mod tests {
         assert_eq!(status(RepoError::NotFound), 404);
         assert_eq!(status(RepoError::Conflict), 409);
         assert_eq!(status(RepoError::SessionEnded), 409);
+        assert_eq!(status(RepoError::ProgramArchived), 409);
+        assert_eq!(status(RepoError::ProgramActive), 409);
         assert_eq!(status(RepoError::Transient), 503);
         assert_eq!(status(RepoError::Invalid { constraint: None }), 422);
         assert_eq!(status(RepoError::Corrupt("reps")), 500);

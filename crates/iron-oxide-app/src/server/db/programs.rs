@@ -480,24 +480,56 @@ pub async fn rename(
 /// Archives (hides) or restores one of the user's programs. Archiving keeps its versions and the
 /// sessions run from them.
 ///
+/// The program's row is locked while it is checked and changed, like `active_program::set` does,
+/// so a concurrent activation of the same program either happens first (and archiving is refused)
+/// or waits and then sees the program is archived. A trigger enforces the same rule in the
+/// database.
+///
 /// # Errors
-/// [`RepoError::NotFound`] when the user has no program with that id.
+/// - [`RepoError::NotFound`] when the user has no program with that id.
+/// - [`RepoError::ProgramActive`] when archiving the user's active program.
 pub async fn set_archived(
     pool: &PgPool,
     user: UserId,
     id: ProgramId,
     archived: bool,
 ) -> Result<(), RepoError> {
-    let updated = sqlx::query!(
+    let mut tx = pool.begin().await?;
+    let was_archived = sqlx::query_scalar!(
+        "SELECT archived FROM programs WHERE id = $1 AND user_id = $2 FOR UPDATE",
+        id.as_uuid(),
+        user.as_uuid(),
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(RepoError::NotFound)?;
+    if archived == was_archived {
+        return Ok(());
+    }
+    if archived {
+        let active = sqlx::query_scalar!(
+            r#"SELECT EXISTS (
+                   SELECT 1 FROM active_program WHERE user_id = $1 AND program_id = $2
+               ) AS "active!""#,
+            user.as_uuid(),
+            id.as_uuid(),
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if active {
+            return Err(RepoError::ProgramActive);
+        }
+    }
+    sqlx::query!(
         "UPDATE programs SET archived = $3 WHERE id = $1 AND user_id = $2",
         id.as_uuid(),
         user.as_uuid(),
         archived,
     )
-    .execute(pool)
-    .await?
-    .rows_affected();
-    found(updated)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Adds a version to one of the user's programs, unless `document` equals the latest version, in
