@@ -5,6 +5,8 @@ Zero-cost gains. The only overhead is the barbell
 
 See [SECURITY.md](SECURITY.md) for how to report a vulnerability and for the secrets policy.
 Never commit secrets or real `.env` files: CI scans every push and pull request with gitleaks.
+To mark a test fixture that gitleaks flags as a false positive, see "Test fixtures that look like
+secrets" in SECURITY.md.
 
 ## License
 

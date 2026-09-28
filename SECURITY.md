@@ -20,9 +20,24 @@ The repository is public and built in the open.
 
 - Never commit secrets, credentials, private keys or real `.env` files. Configuration comes from
   environment variables; `.env.example` holds placeholders only.
-- CI runs [gitleaks](https://github.com/gitleaks/gitleaks) over the full git history on every push
-  and pull request. A detected secret fails the build.
+- CI runs [gitleaks](https://github.com/gitleaks/gitleaks) on every pull request (the PR's commits)
+  and every push to `main` (the pushed commits), and scans the full history of `main` weekly.
+  A detected secret fails the build.
 - Scan before you push: `gitleaks git --redact` (committed history) and
   `gitleaks dir --redact .` (working tree, including untracked files).
 - If a secret is ever committed, treat it as leaked: **revoke and rotate it first**, then remove
   it from the code. Rewriting git history does not make a pushed secret safe again.
+
+### Test fixtures that look like secrets
+
+Test data sometimes looks like a credential to gitleaks. First make sure it really is fake. Then,
+in order of preference:
+
+1. Use an obviously fake value that doesn't match a secret pattern (for example `"test-secret"`).
+2. Add an inline `gitleaks:allow` comment on that line:
+   `let secret = "…"; // gitleaks:allow (test fixture, not a real key)`.
+3. If the line can't be edited (for example, the finding is in an already-pushed commit), add its
+   fingerprint to `.gitleaksignore`, with a comment line above it that says why it is not a
+   secret. The fingerprint is printed by gitleaks: `<commit>:<file>:<rule-id>:<line>`.
+
+Never use these to silence a real secret. A real secret must be revoked and rotated.
