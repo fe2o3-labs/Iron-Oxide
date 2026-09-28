@@ -12,6 +12,7 @@
 //! - [`Reps`], [`Percent`] and [`Seconds`].
 //! - [`ValueError`] for every rejected value.
 
+mod display;
 mod duration;
 mod error;
 mod ids;
