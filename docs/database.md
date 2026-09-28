@@ -222,11 +222,18 @@ DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
   the owner and immutability triggers, every `CHECK`, and:
   - every `user_id` column in `public` has a cascading foreign key to `users` and an index that
     starts with it (read from `pg_constraint`/`pg_index`);
+  - every table with a `user_id` column has a `BEFORE UPDATE` row trigger that forbids changing
+    the owner (read from `pg_trigger`), and moving a user's rows to a user who has none fails on
+    that trigger;
   - every table in `public` has a `user_id` column or is on a short allowlist (`users`,
     `_sqlx_migrations`);
   - deleting a user empties every table listed by `information_schema` that has a `user_id`
     column, and keeps the other user's rows. `populate` must write to each such table first, so a
     new table fails this test until it is covered.
+
+Not here yet: a test-only way to sign in as a user, and isolation tests at the server-function
+level (including the GDPR export). They come with `AuthUser` (#5) and the server functions
+(#18–#22), which wrap this repository.
 
 CI runs them in the "Integration tests (Postgres)" job, and fails if the key isolation tests do not
 appear as passed in its log.
