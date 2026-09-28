@@ -122,36 +122,76 @@ fn exercise() -> impl Strategy<Value = Exercise> {
         )
 }
 
-/// Another day's (or version's) prescription: other sets, reps and load, or timed work.
+/// Another version's rule: any kind, increment and deload.
+fn other_rule() -> impl Strategy<Value = ProgressionRule> {
+    (0_u8..4, positive_weight(), unit(), deload()).prop_map(|(kind, increment, unit, deload)| {
+        let increment = UnitWeight::from_weight(increment, unit);
+        match kind {
+            0 => ProgressionRule::None,
+            1 => ProgressionRule::AddWhenTopOfRange {
+                increment,
+                deload_after_failures: deload,
+            },
+            2 => ProgressionRule::DoubleProgression {
+                increment,
+                deload_after_failures: deload,
+            },
+            _ => ProgressionRule::TrainingMax {
+                increment,
+                deload_after_failures: deload,
+            },
+        }
+    })
+}
+
+/// Another day's (or version's) prescription: other sets, reps, load and rule, or timed work.
 fn other_prescription() -> impl Strategy<Value = Prescription> {
     prop_oneof![
         8 => (1_u16..=6, rep_target(), prop_oneof![
             percent_up_to(20_000).prop_map(Load::PercentOfTrainingMax),
             (positive_weight(), unit()).prop_map(|(w, u)| Load::Weight(UnitWeight::from_weight(w, u))),
-        ])
-            .prop_map(|(sets, reps, load)| Prescription {
+        ], other_rule())
+            .prop_map(|(sets, reps, load, rule)| Prescription {
                 work: Work::Reps { sets, reps },
                 load: Some(load),
+                rule,
             }),
         1 => Just(Prescription {
             work: Work::Hold { sets: 3, seconds: Seconds::new(30) },
             load: None,
+            rule: ProgressionRule::None,
         }),
     ]
 }
 
-/// Past sessions, each with the planned exercise's prescription (`None`) or another one.
-type RawHistory = Vec<(Option<Prescription>, Vec<WorkingSet>)>;
+/// Which prescription a past session has.
+#[derive(Debug, Clone, Copy)]
+enum Given {
+    /// The planned exercise's.
+    Planned,
+    /// Another day's or version's.
+    Other(Prescription),
+    /// None can be found.
+    Missing,
+}
+
+/// Past sessions, each with its prescription and working sets.
+type RawHistory = Vec<(Given, Vec<WorkingSet>)>;
 
 fn history() -> impl Strategy<Value = RawHistory> {
     let set = (proptest::option::of(weight()), 0_u16..=25).prop_map(|(weight, reps)| WorkingSet {
+        set_index: 0,
         reps: Reps::new(reps),
         weight,
         duration: None,
     });
     proptest::collection::vec(
         (
-            proptest::option::weighted(0.3, other_prescription()),
+            prop_oneof![
+                12 => Just(Given::Planned),
+                5 => other_prescription().prop_map(Given::Other),
+                1 => Just(Given::Missing),
+            ],
             proptest::collection::vec(set, 0..8),
         ),
         0..12,
@@ -160,18 +200,20 @@ fn history() -> impl Strategy<Value = RawHistory> {
 
 fn resolve(exercise: &Exercise, raw: &RawHistory) -> Vec<PastSession> {
     raw.iter()
-        .map(|(prescription, sets)| {
-            PastSession::new(
-                prescription.unwrap_or_else(|| Prescription::of(exercise)),
-                sets.clone(),
-            )
+        .map(|(given, sets)| match given {
+            Given::Planned => PastSession::in_order(Prescription::of(exercise), sets.clone()),
+            Given::Other(prescription) => PastSession::in_order(*prescription, sets.clone()),
+            Given::Missing => PastSession::without_prescription(sets.clone()),
         })
         .collect()
 }
 
-/// Whether a session counts for a rule: it has sets and asks for reps.
+/// Whether a session is judged by a rule: it has sets and a known prescription asking for reps.
 fn counts(session: &PastSession) -> bool {
-    !session.is_empty() && matches!(session.prescription.work, Work::Reps { .. })
+    !session.is_empty()
+        && session
+            .prescription
+            .is_some_and(|prescription| matches!(prescription.work, Work::Reps { .. }))
 }
 
 /// Any valid step: up to [`ProgressionSettings::max_step`].
@@ -291,7 +333,9 @@ proptest! {
         }
     }
 
-    /// Appending a failed session never increases the working weight or the training max.
+    /// Appending a failed session never increases the working weight or the training max. (When
+    /// the last judged session ran under another rule, appending a session makes that session
+    /// apply its own rule instead of the planned one, which may add more: left out.)
     #[test]
     fn a_failure_never_increases(
         exercise in exercise(),
@@ -301,13 +345,20 @@ proptest! {
         weight in weight(),
     ) {
         let history = resolve(&exercise, &raw);
+        let last_rule = history
+            .iter()
+            .rev()
+            .find(|session| counts(session))
+            .and_then(|session| session.prescription)
+            .map(|prescription| prescription.rule);
+        prop_assume!(last_rule.is_none_or(|rule| rule == exercise.progression));
         let before = next_targets(&exercise, Some(training_max), settings, &history);
         let NextTargets::Ready(before) = before else { unreachable!() };
         let target = before.working[0].weight.unwrap();
         // Every set lifted at the target (or the given weight for weight rules) with 0 reps.
         let lifted = if exercise.progression.name() == "training_max" { target } else { weight };
         let mut longer = history.clone();
-        longer.push(PastSession::new(
+        longer.push(PastSession::in_order(
             Prescription::of(&exercise),
             vec![WorkingSet::new(lifted, Reps::ZERO); 3],
         ));
@@ -358,10 +409,43 @@ proptest! {
                 .iter()
                 .map(|set| WorkingSet::new(set.weight.unwrap(), reps.max()))
                 .collect();
-            history.push(PastSession::new(Prescription::of(&exercise), sets));
+            history.push(PastSession::in_order(Prescription::of(&exercise), sets));
             let after = ready(next_targets(&exercise, Some(training_max), settings, &history));
             prop_assert_eq!(after.last_verdict, Some(SessionVerdict::Success));
             prop_assert_eq!(after.failed_sessions, 0);
         }
+    }
+
+    /// Extra sets logged after the prescribed ones (a top single, a failed attempt, back-off
+    /// sets) change nothing.
+    #[test]
+    fn extra_sets_change_nothing(
+        exercise in exercise(),
+        training_max in weight(),
+        settings in settings(),
+        raw in history(),
+        extras in proptest::collection::vec((weight(), 0_u16..=25), 1..4),
+    ) {
+        let history = resolve(&exercise, &raw);
+        let before = ready(next_targets(&exercise, Some(training_max), settings, &history));
+        let with_extras: Vec<PastSession> = history
+            .iter()
+            .map(|session| {
+                let prescribed = match session.prescription.map(|p| p.work) {
+                    Some(Work::Reps { sets, .. } | Work::Hold { sets, .. }) => sets,
+                    Some(Work::Intervals { .. }) | None => 1,
+                };
+                let mut extended = session.clone();
+                if !session.is_empty() {
+                    let first_extra = prescribed.max(u16::try_from(session.sets.len()).unwrap());
+                    extended.sets.extend(extras.iter().zip(first_extra..).map(|((w, r), i)| {
+                        WorkingSet::new(*w, Reps::new(*r)).at(i)
+                    }));
+                }
+                extended
+            })
+            .collect();
+        let after = ready(next_targets(&exercise, Some(training_max), settings, &with_extras));
+        prop_assert_eq!(before, after);
     }
 }

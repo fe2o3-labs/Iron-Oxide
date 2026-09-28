@@ -2,13 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::program::{Exercise, Load, Program, Work};
+use crate::program::{Exercise, Load, Program, ProgressionRule, Work};
 use crate::session::{LoggedSet, Session, SessionLog, SessionStatus};
 use crate::{DayId, ExerciseId, Reps, Seconds, Weight};
 
 /// One working set as it was performed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WorkingSet {
+    /// Position among the session's working sets of the exercise, from 0, as logged
+    /// ([`LoggedSet::set_index`]). The sets with an index below the prescribed number of sets are
+    /// the prescribed working sets; the others (a top single, a back-off set) are extras.
+    pub set_index: u16,
     /// Repetitions done. Zero is a failed attempt.
     pub reps: Reps,
     /// Load, or `None` for body-weight work.
@@ -18,30 +22,40 @@ pub struct WorkingSet {
 }
 
 impl WorkingSet {
-    /// A set of `reps` at `weight`.
+    /// A set of `reps` at `weight`, at index 0 (see [`WorkingSet::at`] and
+    /// [`PastSession::in_order`]).
     #[must_use]
     pub const fn new(weight: Weight, reps: Reps) -> Self {
         Self {
+            set_index: 0,
             reps,
             weight: Some(weight),
             duration: None,
         }
     }
 
-    /// A body-weight set of `reps`.
+    /// A body-weight set of `reps`, at index 0.
     #[must_use]
     pub const fn bodyweight(reps: Reps) -> Self {
         Self {
+            set_index: 0,
             reps,
             weight: None,
             duration: None,
         }
+    }
+
+    /// The same set at `set_index`.
+    #[must_use]
+    pub const fn at(self, set_index: u16) -> Self {
+        Self { set_index, ..self }
     }
 }
 
 impl<T> From<&LoggedSet<T>> for WorkingSet {
     fn from(set: &LoggedSet<T>) -> Self {
         Self {
+            set_index: set.set_index,
             reps: set.reps,
             weight: set.weight,
             duration: set.duration,
@@ -49,18 +63,21 @@ impl<T> From<&LoggedSet<T>> for WorkingSet {
     }
 }
 
-/// What the program asked for in a past session: the exercise's work and load **on the day and
-/// program version that session was run from**.
+/// What the program asked for in a past session: the exercise's work, load and progression rule
+/// **on the day and program version that session was run from**.
 ///
 /// The same exercise can be prescribed differently on different days (5 × 5 at 80 % on day A,
 /// 3 × 3 at 90 % on day B) and in different versions of a program, so each past session is judged
-/// against its own prescription, never against the day being planned.
+/// against its own prescription, never against the day being planned, and its outcome is applied
+/// with its own rule (increment and deload), never with a later version's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Prescription {
     /// Sets and reps (or time) asked for.
     pub work: Work,
     /// The load asked for, `None` for body-weight work.
     pub load: Option<Load>,
+    /// The progression rule in force.
+    pub rule: ProgressionRule,
 }
 
 impl Prescription {
@@ -70,6 +87,7 @@ impl Prescription {
         Self {
             work: exercise.work,
             load: exercise.load,
+            rule: exercise.progression,
         }
     }
 
@@ -96,17 +114,37 @@ impl From<&Exercise> for Prescription {
 /// order.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PastSession {
-    /// What the program asked for in that session.
-    pub prescription: Prescription,
-    /// The working sets (never warm-ups), in the order they were done.
+    /// What the program asked for in that session, or `None` when it cannot be found any more.
+    /// Such a session cannot be judged: it ends a failure streak without progressing.
+    pub prescription: Option<Prescription>,
+    /// The working sets (never warm-ups), in set order, with their logged `set_index`.
     pub sets: Vec<WorkingSet>,
 }
 
 impl PastSession {
-    /// A session with this prescription and these working sets.
+    /// A session with this prescription and these working sets, indices as given.
     #[must_use]
     pub const fn new(prescription: Prescription, sets: Vec<WorkingSet>) -> Self {
-        Self { prescription, sets }
+        Self {
+            prescription: Some(prescription),
+            sets,
+        }
+    }
+
+    /// A session with this prescription and these working sets, numbered 0, 1, 2… in order.
+    #[must_use]
+    pub fn in_order(prescription: Prescription, sets: Vec<WorkingSet>) -> Self {
+        let sets = (0..=u16::MAX).zip(sets).map(|(i, set)| set.at(i)).collect();
+        Self::new(prescription, sets)
+    }
+
+    /// A session whose prescription cannot be found.
+    #[must_use]
+    pub const fn without_prescription(sets: Vec<WorkingSet>) -> Self {
+        Self {
+            prescription: None,
+            sets,
+        }
     }
 
     /// Whether no working set was done: the exercise was skipped.
@@ -127,7 +165,9 @@ impl PastSession {
 /// `prescription` gives what the program asked for in a session: the caller looks up the
 /// program version the session was run from ([`Session::program_version_id`]) and its day
 /// ([`Session::day`]), typically with [`Prescription::in_program`]. Sessions it returns `None`
-/// for (a version or day that can no longer be found) are dropped.
+/// for (a version or day that can no longer be found) are kept without a prescription: the engine
+/// does not judge them, but they still end a failure streak, so two streaks around them never
+/// merge into one.
 ///
 /// It does **not** filter by program: pass the logs of the active program only, and for a load
 /// that is a percentage of the training max, only the sessions since the training max was last
@@ -159,11 +199,10 @@ where
                 return None;
             }
             sets.sort_by_key(|set| set.set_index);
-            let prescription = prescription(log.session())?;
-            Some(PastSession::new(
-                prescription,
-                sets.into_iter().map(WorkingSet::from).collect(),
-            ))
+            Some(PastSession {
+                prescription: prescription(log.session()),
+                sets: sets.into_iter().map(WorkingSet::from).collect(),
+            })
         })
         .collect()
 }
@@ -189,6 +228,7 @@ mod tests {
                 reps: RepTarget::Fixed(Reps::new(5)),
             },
             load: None,
+            rule: ProgressionRule::None,
         }
     }
 
@@ -247,6 +287,7 @@ mod tests {
         assert_eq!(
             WorkingSet::new(weight, Reps::new(5)),
             WorkingSet {
+                set_index: 0,
                 reps: Reps::new(5),
                 weight: Some(weight),
                 duration: None
@@ -258,8 +299,22 @@ mod tests {
         assert_eq!(working.reps, Reps::new(5));
         assert_eq!(working.weight, logged.weight);
         assert_eq!(working.duration, None);
+        assert_eq!(set(2, &squat(), 3, 5, false).set_index, 3);
+        assert_eq!(
+            WorkingSet::from(&set(2, &squat(), 3, 5, false)).set_index,
+            3
+        );
+        assert_eq!(working.at(4).set_index, 4);
         assert!(PastSession::new(five_by_five(), vec![]).is_empty());
         assert!(!PastSession::new(five_by_five(), vec![working]).is_empty());
+        let numbered = PastSession::in_order(five_by_five(), vec![working.at(7); 3]);
+        let indices: Vec<u16> = numbered.sets.iter().map(|set| set.set_index).collect();
+        assert_eq!(indices, [0, 1, 2]);
+        assert_eq!(numbered.prescription, Some(five_by_five()));
+        assert_eq!(
+            PastSession::without_prescription(vec![working]).prescription,
+            None
+        );
     }
 
     #[test]
@@ -272,6 +327,7 @@ mod tests {
         assert_eq!(found, Prescription::from(bench));
         assert_eq!(found.work, bench.work);
         assert_eq!(found.load, bench.load);
+        assert_eq!(found.rule, bench.progression);
         assert_eq!(
             Prescription::in_program(&program, &day.id, &ExerciseId::new("nope").unwrap()),
             None
@@ -324,7 +380,7 @@ mod tests {
                 SessionStatus::Completed,
                 vec![set(60, &bench, 0, 8, false)],
             ),
-            // No prescription can be found for day `gone`: dropped.
+            // No prescription can be found for day `gone`: kept without one.
             log_on(
                 "gone",
                 7,
@@ -342,8 +398,11 @@ mod tests {
             .iter()
             .map(|session| session.sets.iter().map(|set| set.reps.get()).collect())
             .collect();
-        assert_eq!(reps, vec![vec![3], vec![5, 4]]);
-        assert!(history.iter().all(|s| s.prescription == five_by_five()));
+        assert_eq!(reps, vec![vec![3], vec![5, 4], vec![7]]);
+        assert_eq!(history[0].prescription, Some(five_by_five()));
+        assert_eq!(history[1].prescription, Some(five_by_five()));
+        assert_eq!(history[2].prescription, None);
+        assert_eq!(history[1].sets[1].set_index, 1);
         // Only sessions with sets of the exercise are looked up.
         assert_eq!(asked.len(), 3);
     }

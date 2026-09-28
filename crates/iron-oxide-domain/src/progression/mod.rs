@@ -23,19 +23,32 @@
 //! and only their working sets of the exercise, in set order. Sessions where the exercise has no
 //! working set (it was skipped) are ignored by the engine: they are neither a success nor a failure.
 //!
-//! Each [`PastSession`] carries its own [`Prescription`]: the exercise's work and load **on the
-//! day and program version that session was run from**. A program may prescribe the same exercise
-//! differently on different days (5 × 5 at 80 % on day A, 3 × 3 at 90 % on day B), and a new
-//! version may change it, so a past session is always judged against what it asked for, never
-//! against the day being planned. To build it (the stored-history ticket, #18): for each session,
-//! load the program version it was run from (`Session::program_version_id`), and take
+//! Each [`PastSession`] carries its own [`Prescription`]: the exercise's work, load and progression
+//! rule **on the day and program version that session was run from**. A program may prescribe the
+//! same exercise differently on different days (5 × 5 at 80 % on day A, 3 × 3 at 90 % on day B),
+//! and a new version may change it or its rule, so a past session is always judged against what it
+//! asked for, and its outcome applied with its own increment and deload, never with the day or
+//! version being planned. The planned `exercise` decides the sets and reps of the result and the
+//! rule that turns the **last** judged session into the next target (a new version's rule applies
+//! from the next step on, never to the past).
+//!
+//! To build the history (the stored-history ticket, #18): for each session, load the program
+//! version it was run from (`Session::program_version_id`), and take
 //! [`Prescription::in_program`] for its day (`Session::day`); [`exercise_history`] takes this
-//! lookup as a closure. Sessions whose prescription is timed work are left out of a rule's
-//! history. The planned `exercise` only decides the rule and the sets and reps of the result.
+//! lookup as a closure. A session that cannot be judged (its prescription is not found, or it is
+//! timed work) is not judged but **ends a failure streak**, so two streaks on either side of it
+//! never merge into one.
+//!
+//! The working sets carry their logged `set_index`. The sets with an index below the prescribed
+//! number of sets are the **prescribed working sets**; the others are extras (a top single, a
+//! failed heavier attempt, back-off sets, extra AMRAP sets). The session screen (#28) must log
+//! extras after the prescribed sets, with indices from the prescribed count up, and leave a gap
+//! for a skipped working set, so that an extra is never taken for a working set.
 //!
 //! # Judging a session
 //!
-//! Each past session gets a [`SessionVerdict`] against **its own** prescription. With `n` its
+//! Each past session gets a [`SessionVerdict`] against **its own** prescription, on its
+//! prescribed working sets only; extras never change the verdict nor the base. With `n` its
 //! number of working sets and its rep target (a fixed count, where the bottom and top are the
 //! same, or a range), and the counted sets defined below:
 //!
@@ -49,21 +62,21 @@
 //!
 //! Which sets count:
 //!
-//! - **Weight rules** (`add_when_top_of_range`, `double_progression`): the session's weight (the
-//!   *base*) is the `n`-th heaviest weighted set, i.e. the heaviest weight at which the prescribed
-//!   number of sets was done. The sets at the base or heavier count, plus sets logged without a
-//!   weight (a slip in the log). Lighter extra sets, such as a back-off set, neither count nor
-//!   lower the base: 3 × 5 at 100 kg plus 1 × 10 at 60 kg is a success at 100 kg. With fewer
-//!   than `n` weighted sets, the base is the lightest of them; with none, the program's load.
+//! - **Weight rules** (`add_when_top_of_range`, `double_progression`): every prescribed working
+//!   set counts. The session's weight (the *base*) is the lightest of them that has a weight; if
+//!   none has (a slip in the log), the session's prescribed fixed load, else the planned load.
+//!   So 1 × 5 at 100 kg followed by a 110 kg single is a success at 100 kg, 3 × 5 at 100 kg
+//!   followed by 1 × 10 at 60 kg is a success at 100 kg, and 2 × 5 at 100 kg (third set
+//!   skipped) followed by a 60 kg back-off set is a failure at 100 kg.
 //! - **Training max rule**: sets at least as heavy as what the session was prescribed: its
 //!   percentage of the training max at that point of the replay (or its fixed weight), exact and
 //!   unrounded, less a fixed tolerance of half of [`ProgressionSettings::max_step`] (1.25 kg).
 //!   Settings cannot exceed that step, so any target the app showed (rounded to the nearest step)
-//!   counts, and a session done a full step lighter does not. Near [`Weight::MAX`], where targets
-//!   are rounded down, the threshold is lowered so that the target shown still counts. The
-//!   verdict never depends on the current settings.
-//!
-//! Extra sets beyond `n` never hurt: the best `n` of the counted sets are judged.
+//!   counts. A set more than 1.25 kg below the exact prescribed weight does not count (so a set a
+//!   full step lighter than the target shown does not count with the default steps, but may with
+//!   a step of less than 1.25 kg). Near [`Weight::MAX`], where targets are rounded down, the
+//!   threshold is lowered so that the target shown still counts. Only the prescribed working
+//!   sets are considered. The verdict never depends on the current settings.
 //!
 //! # Rules
 //!
@@ -76,7 +89,7 @@
 //!   the next weight is base + increment; after a hold or a failure, it stays the base. Reps aim
 //!   for the top of the target.
 //! - **`double_progression`**: the weight stays the base while the reps climb. After a hold, the
-//!   rep target becomes the lowest reps of the best `n` sets plus one ("reps 8 → 9"). After a
+//!   rep target becomes the lowest reps of the prescribed sets plus one ("reps 8 → 9"). After a
 //!   success, the weight goes up by the increment and the rep target goes back to the bottom of
 //!   the range (at [`Weight::MAX`], where it cannot go up, the reps stay at the top). After a
 //!   failure, the rep target is the bottom of the range. The change is described in the terms of
@@ -86,9 +99,9 @@
 //!   and unrounded, so the replayed training max never depends on the settings.
 //! - **`deload_after_failures`** (any rule): after `failures` consecutive failed sessions, the
 //!   weight is cut to `× (1 − percent)`, rounded to a lighter step (a training max: exactly), and
-//!   the failure
-//!   count starts again from zero, so the session after a deload needs a fresh streak before the
-//!   next one. A success or a hold also resets the count.
+//!   the failure count starts again from zero, so the session after a deload needs a fresh streak
+//!   before the next one. A success, a hold, or a session that cannot be judged also resets the
+//!   count. Each session's failure counts against its own version's deload setting.
 //!
 //! For weight rules, the base is what was actually lifted, not what was prescribed: going heavier
 //! than the target moves the base up, and going lighter moves it down.

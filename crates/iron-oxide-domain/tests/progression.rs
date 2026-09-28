@@ -135,7 +135,7 @@ fn ready(outcome: NextTargets) -> ExerciseTargets {
 fn history(exercise: &Exercise, sessions: &[Sets]) -> Vec<PastSession> {
     sessions
         .iter()
-        .map(|sets| PastSession::new(Prescription::of(exercise), sets.clone()))
+        .map(|sets| PastSession::in_order(Prescription::of(exercise), sets.clone()))
         .collect()
 }
 
@@ -454,9 +454,14 @@ mod double_progression {
     }
 
     #[test]
-    fn the_best_sets_count_and_extra_sets_do_not_hurt() {
-        let next = targets(&row(), &[session(kg(50.0), &[10, 5, 10, 10])]);
+    fn only_the_prescribed_sets_count() {
+        // An extra fourth set, however it went, is ignored.
+        let next = targets(&row(), &[session(kg(50.0), &[10, 10, 10, 5])]);
         assert_eq!(working(&next), (kg(50.0), Reps::new(11)));
+        // It cannot make up for a missed prescribed set either.
+        let next = targets(&row(), &[session(kg(50.0), &[10, 5, 10, 10])]);
+        assert_eq!(next.last_verdict, Some(SessionVerdict::Failure));
+        assert_eq!(working(&next), (kg(50.0), Reps::new(8)));
     }
 
     #[test]
@@ -753,6 +758,7 @@ mod timed {
         // A short hold last time does not shorten the target.
         let short = Sets::from(vec![
             WorkingSet {
+                set_index: 0,
                 reps: Reps::new(1),
                 weight: None,
                 duration: Some(Seconds::new(30)),
@@ -779,6 +785,7 @@ mod timed {
         );
         assert_eq!(targets(&carry, &[]).working[0].weight, Some(kg(24.0)));
         let last = Sets::from(vec![WorkingSet {
+            set_index: 0,
             reps: Reps::new(1),
             weight: Some(kg(32.0)),
             duration: Some(Seconds::new(40)),
@@ -809,6 +816,7 @@ mod timed {
         }];
         assert_eq!(targets(&sprints, &[]).working, expected);
         let done = Sets::from(vec![WorkingSet {
+            set_index: 0,
             reps: Reps::new(6),
             weight: None,
             duration: Some(Seconds::new(180)),
@@ -832,6 +840,7 @@ mod timed {
             },
         );
         let done = Sets::from(vec![WorkingSet {
+            set_index: 0,
             reps: Reps::new(1),
             weight: Some(kg(10.0)),
             duration: Some(Seconds::new(60)),
@@ -977,7 +986,7 @@ mod review_cases {
     use super::*;
 
     fn with_prescription(exercise: &Exercise, sets: Sets) -> PastSession {
-        PastSession::new(Prescription::of(exercise), sets)
+        PastSession::in_order(Prescription::of(exercise), sets)
     }
 
     /// Bench on day A: 5 × 5 at 80 %; on day B: 3 × 3 at 90 %. Same rule everywhere.
@@ -1151,6 +1160,44 @@ mod review_cases {
     }
 
     #[test]
+    fn a_top_single_after_the_work_set_is_ignored() {
+        let mut deadlift = squat();
+        deadlift.work = fixed(1, 5);
+        let done = [session(kg(100.0), &[5])
+            .into_iter()
+            .chain([WorkingSet::new(kg(110.0), Reps::new(1))])
+            .collect()];
+        let next = targets(&deadlift, &done);
+        assert_eq!(next.last_verdict, Some(SessionVerdict::Success));
+        assert_eq!(describe(&next, Unit::Kg), "Squat: 100 → 102.5 kg");
+        // A failed attempt after it too.
+        let done = [session(kg(100.0), &[5])
+            .into_iter()
+            .chain([WorkingSet::new(kg(110.0), Reps::ZERO)])
+            .collect()];
+        assert_eq!(working(&targets(&deadlift, &done)).0, kg(102.5));
+    }
+
+    #[test]
+    fn a_backoff_set_does_not_rescue_a_missing_working_set() {
+        // The third working set was skipped; the back-off is logged after the prescribed sets.
+        let done = PastSession::new(
+            Prescription::of(&squat()),
+            vec![
+                WorkingSet::new(kg(100.0), Reps::new(5)).at(0),
+                WorkingSet::new(kg(100.0), Reps::new(5)).at(1),
+                WorkingSet::new(kg(60.0), Reps::new(10)).at(3),
+            ],
+        );
+        let next = ready(next_targets(&squat(), None, kg_settings(), &[done]));
+        assert_eq!(next.last_verdict, Some(SessionVerdict::Failure));
+        assert_eq!(
+            describe(&next, Unit::Kg),
+            "Squat: stays at 100 kg (1 failed session)"
+        );
+    }
+
+    #[test]
     fn a_backoff_set_does_not_drag_the_next_target_down() {
         let mut done = session(kg(100.0), &[5, 5, 5]);
         done.push(WorkingSet::new(kg(60.0), Reps::new(10)));
@@ -1218,6 +1265,170 @@ mod review_cases {
         ];
         let next = targets(&press, &[last]);
         assert_eq!(next.warmup[0].weight, Some(kg(30.0)));
+    }
+}
+
+mod program_versions {
+    use super::*;
+
+    fn tm_bench(increment: f64, deload_after: u16) -> Exercise {
+        let mut bench = bench();
+        bench.load = Some(Load::PercentOfTrainingMax(pct(90.0)));
+        bench.progression = ProgressionRule::TrainingMax {
+            increment: unit_weight(increment, Unit::Kg),
+            deload_after_failures: deload(deload_after, 10.0),
+        };
+        bench
+    }
+
+    fn done(version: &Exercise, weight: Weight, reps: &[u16]) -> PastSession {
+        PastSession::in_order(Prescription::of(version), session(weight, reps))
+    }
+
+    #[test]
+    fn a_new_increment_does_not_rejudge_old_sessions() {
+        let v1 = tm_bench(2.5, 3);
+        let v2 = tm_bench(10.0, 3);
+        // Both done exactly as shown under version 1: 90 kg, then 92.5 kg.
+        let history = [
+            done(&v1, kg(90.0), &[5, 5, 5]),
+            done(&v1, kg(92.5), &[5, 5, 5]),
+        ];
+        let from_v1 = ready(next_targets(&v1, Some(kg(100.0)), kg_settings(), &history));
+        assert_eq!(from_v1.last_verdict, Some(SessionVerdict::Success));
+        assert_eq!(from_v1.training_max, Some(kg(105.0)));
+        // Version 2 applies its +10 kg only to the last session, the step it plans.
+        let from_v2 = ready(next_targets(&v2, Some(kg(100.0)), kg_settings(), &history));
+        assert_eq!(from_v2.last_verdict, Some(SessionVerdict::Success));
+        assert_eq!(from_v2.training_max, Some(kg(112.5)));
+        assert_eq!(
+            describe(&from_v2, Unit::Kg),
+            "Bench: training max 102.5 → 112.5 kg"
+        );
+        // Once a session is done under version 2, the version 1 sessions keep their +2.5 kg:
+        // 100 → 102.5 → 105, and the version 2 session adds +10 kg.
+        let mut later = history.to_vec();
+        later.push(done(&v2, kg(95.0), &[5, 5, 5]));
+        let next = ready(next_targets(&v2, Some(kg(100.0)), kg_settings(), &later));
+        assert_eq!(next.training_max, Some(kg(115.0)));
+    }
+
+    #[test]
+    fn a_new_deload_does_not_rejudge_old_sessions() {
+        let v1 = tm_bench(2.5, 3);
+        let v2 = tm_bench(2.5, 2);
+        let history = [
+            done(&v1, kg(90.0), &[5, 5, 2]),
+            done(&v1, kg(90.0), &[5, 5, 2]),
+            done(&v1, kg(90.0), &[5, 5, 5]),
+        ];
+        for version in [&v1, &v2] {
+            let next = ready(next_targets(
+                version,
+                Some(kg(100.0)),
+                kg_settings(),
+                &history,
+            ));
+            assert_eq!(next.training_max, Some(kg(102.5)));
+            assert_eq!(next.failed_sessions, 0);
+        }
+        // The planned version's deload applies to the last session.
+        let failing = [
+            done(&v1, kg(90.0), &[5, 5, 5]),
+            done(&v1, kg(92.5), &[5, 5, 2]),
+            done(&v1, kg(92.5), &[5, 5, 2]),
+        ];
+        let from_v1 = ready(next_targets(&v1, Some(kg(100.0)), kg_settings(), &failing));
+        assert_eq!(from_v1.failed_sessions, 2);
+        assert_eq!(from_v1.training_max, Some(kg(102.5)));
+        let from_v2 = ready(next_targets(&v2, Some(kg(100.0)), kg_settings(), &failing));
+        assert_eq!(from_v2.failed_sessions, 0);
+        assert_eq!(from_v2.training_max, Some(kg(92.25)));
+    }
+
+    #[test]
+    fn weight_rules_apply_each_sessions_own_deload() {
+        let mut v1 = squat();
+        v1.progression = ProgressionRule::AddWhenTopOfRange {
+            increment: unit_weight(2.5, Unit::Kg),
+            deload_after_failures: deload(1, 10.0),
+        };
+        let v2 = squat(); // deload after 3 failures
+        // Under version 1, one failure deloaded and restarted the count.
+        let history = [
+            PastSession::in_order(Prescription::of(&v1), session(kg(100.0), &[5, 5, 2])),
+            PastSession::in_order(Prescription::of(&v2), session(kg(90.0), &[5, 5, 2])),
+        ];
+        let next = targets_from(&v2, &history);
+        assert_eq!(next.failed_sessions, 1);
+        assert_eq!(working(&next).0, kg(90.0));
+    }
+
+    fn targets_from(exercise: &Exercise, history: &[PastSession]) -> ExerciseTargets {
+        ready(next_targets(exercise, None, kg_settings(), history))
+    }
+
+    #[test]
+    fn a_session_without_a_prescription_ends_a_failure_streak() {
+        let fail =
+            || PastSession::in_order(Prescription::of(&row()), session(kg(50.0), &[8, 8, 6]));
+        let unknown = PastSession::without_prescription(session(kg(50.0), &[8, 8, 6]));
+        // Row deloads after 2 failures: F, unknown, F is one failure, not a deload.
+        let next = targets_from(&row(), &[fail(), unknown.clone(), fail()]);
+        assert_eq!(next.failed_sessions, 1);
+        assert_eq!(working(&next).0, kg(50.0));
+        // Last in the history, it resets the count without a verdict of its own.
+        let next = targets_from(&row(), &[fail(), unknown]);
+        assert_eq!(next.failed_sessions, 0);
+        assert_eq!(next.last_verdict, Some(SessionVerdict::Failure));
+        // The training max rule too.
+        let fail = || done(&tm_bench(2.5, 2), kg(90.0), &[5, 5, 2]);
+        let unknown = PastSession::without_prescription(session(kg(90.0), &[5, 5, 2]));
+        let next = ready(next_targets(
+            &tm_bench(2.5, 2),
+            Some(kg(100.0)),
+            kg_settings(),
+            &[fail(), unknown, fail()],
+        ));
+        assert_eq!(next.failed_sessions, 1);
+        assert_eq!(next.training_max, Some(kg(100.0)));
+    }
+
+    #[test]
+    fn double_progression_describes_the_reset_in_the_sessions_own_range() {
+        let day_a = row(); // 8–12
+        let mut day_b = row();
+        day_b.work = range(3, 5, 8);
+        let history = [PastSession::in_order(
+            Prescription::of(&day_a),
+            session(kg(50.0), &[12, 12, 12]),
+        )];
+        let next = targets_from(&day_b, &history);
+        assert_eq!(working(&next), (kg(52.5), Reps::new(5)));
+        assert_eq!(describe(&next, Unit::Kg), "Row: 50 → 52.5 kg, reps 12 → 8");
+    }
+
+    #[test]
+    fn a_training_max_success_at_the_cap_is_unchanged() {
+        let mut bench = bench();
+        bench.load = Some(Load::PercentOfTrainingMax(pct(100.0)));
+        let settings = kg_settings();
+        let first = ready(plan(&bench, Some(Weight::MAX), settings, &[]));
+        let (weight, _) = working(&first);
+        let next = ready(plan(
+            &bench,
+            Some(Weight::MAX),
+            settings,
+            &[session(weight, &[5, 5, 5])],
+        ));
+        assert_eq!(next.last_verdict, Some(SessionVerdict::Success));
+        assert_eq!(
+            change(&next),
+            ChangeKind::TrainingMaxUnchanged {
+                training_max: Weight::MAX,
+                failed_sessions: 0
+            }
+        );
     }
 }
 

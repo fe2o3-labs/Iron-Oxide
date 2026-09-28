@@ -46,14 +46,18 @@ impl ProgressionSettings {
         } else if step.as_nanograms() > MAX_STEP_NANOGRAMS {
             Err(ValueError::TooLarge {
                 quantity: Quantity::Weight,
-                max: "2.5 kg",
+                max: "2.5 kg (5.51 lb)",
             })
         } else {
             Ok(Self { unit, step })
         }
     }
 
-    /// The largest step: 2.5 kg, which covers both defaults (5 lb is 2.27 kg).
+    /// The largest step: 2.5 kg (5.51 lb), which covers both defaults (5 lb is 2.27 kg).
+    ///
+    /// Any step from 1 ng up to this one is accepted, in either unit: the engine only needs the
+    /// bound. Offering steps the lifter's plates can make (1.25 kg, 2.5 kg, 2.5 lb, 5 lb…) is the
+    /// settings screen's job; an odd step such as 5.5 lb just rounds targets to multiples of it.
     ///
     /// The bound lets past training max sessions be judged without the current settings: any
     /// target rounded to the nearest step is within half of it of the exact percentage, so a
