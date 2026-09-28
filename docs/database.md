@@ -149,7 +149,9 @@ types mirror them field for field, and switch to them once they are merged.
    whatever the application sends.
 4. **Owners never change**: a trigger rejects any update of `user_id` in every user-owned table.
    Programs and versions cannot be deleted directly either (`forbid_direct_delete`, which lets
-   only foreign key cascades through: `pg_trigger_depth() >= 2`).
+   only foreign key cascades through: `pg_trigger_depth() >= 2`), and no table with user data
+   (`users` included) can be truncated: `TRUNCATE` skips row triggers, and
+   `TRUNCATE ... CASCADE` would empty every user's data at once.
 5. **Program versions take their owner from their program**: a trigger sets
    `program_versions.user_id` from `programs.user_id`, ignoring what the caller wrote. This also
    covers built-ins, where the composite key alone would not be checked (a NULL column skips a
@@ -186,6 +188,9 @@ types mirror them field for field, and switch to them once they are merged.
   a `CreationId` per request. A retry with the same key returns the program it created
   (`Change::Unchanged`), including under concurrent retries; the same key for a different request
   (another document, or a create replayed as a copy) is a `Conflict`. Keys are per user.
+  Documents are compared in SQL as `jsonb` (as `add_version` does too), because jsonb normalises
+  numbers: `1e16` comes back as `10000000000000000`, which a `serde_json` comparison would
+  wrongly treat as a different document.
 - **Typed ids** (`UserId`, `ProgramId`, `ProgramVersionId`, `CreationId`, `SessionId`, `SetId`) so ids of
   different kinds cannot be swapped. They will be replaced by the domain ids of #48.
 - Queries use the compile-time checked `sqlx::query!` / `query_as!` macros; the metadata is in
@@ -253,7 +258,9 @@ DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
     `user_id`, or is on the `FOREIGN_KEYS_WITHOUT_OWNER` allowlist with a reason;
   - no table exists outside `public` (and the system schemas), so the checks above see every
     table;
-  - programs and versions cannot be deleted directly, and still go with their user.
+  - programs and versions cannot be deleted directly, and still go with their user;
+  - every table with user data, `users` included, has a `BEFORE TRUNCATE` guard, and
+    `TRUNCATE ... CASCADE` on each of them fails while user deletion still cascades.
 
 Not here yet: a test-only way to sign in as a user, and isolation tests at the server-function
 level (including the GDPR export). They come with `AuthUser` (#5) and the server functions

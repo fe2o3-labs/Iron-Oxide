@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, program_id, version, document, created_at FROM program_versions\n         WHERE program_id = $1 AND user_id = $2 AND version = 1",
+  "query": "SELECT id, program_id, version, document, created_at,\n                  COALESCE(document = $3::jsonb, false) AS \"same_document!\"\n           FROM program_versions\n           WHERE program_id = $1 AND user_id = $2 AND version = 1",
   "describe": {
     "columns": [
       {
@@ -27,12 +27,18 @@
         "ordinal": 4,
         "name": "created_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "same_document!",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
       "Left": [
         "Uuid",
-        "Uuid"
+        "Uuid",
+        "Jsonb"
       ]
     },
     "nullable": [
@@ -40,8 +46,9 @@
       false,
       false,
       false,
-      false
+      false,
+      null
     ]
   },
-  "hash": "e2d103796d0662909ca8470d3c0958879d628c3f46f91ed0058dfedbc8a913cf"
+  "hash": "19917e87c70bdd586a8b96ec2b290703603c1929e2c7d0b72c3ed424c0381519"
 }
