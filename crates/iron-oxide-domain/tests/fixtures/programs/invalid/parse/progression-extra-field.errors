@@ -1,0 +1,1 @@
+days[0].exercises[0].progression.add_when_top_of_range.every: unknown field `every`, expected `increment` or `deload_after_failures` (line 16, column 74)

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "Unknown rule",
+  "days": [
+    {
+      "id": "a",
+      "name": "A",
+      "exercises": [
+        {
+          "id": "squat",
+          "name": "Squat",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "kg": 60 },
+          "rest": 60,
+          "progression": { "add_weekly": { "increment": { "kg": 2.5 } } }
+        }
+      ]
+    }
+  ],
+  "rotation": ["a"]
+}

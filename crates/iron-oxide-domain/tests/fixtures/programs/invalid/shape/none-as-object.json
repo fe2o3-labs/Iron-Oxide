@@ -1,0 +1,171 @@
+{
+  "$schema": "https://raw.githubusercontent.com/guizmaii-opensource/Iron-Oxide/main/schemas/program.schema.json",
+  "schema_version": 1,
+  "name": "Upper/lower in pounds",
+  "description": "Uses every feature of the format.",
+  "days": [
+    {
+      "id": "upper",
+      "name": "Upper",
+      "exercises": [
+        {
+          "id": "bench-press",
+          "name": "Bench press",
+          "work": {
+            "reps": {
+              "sets": 5,
+              "reps": 5
+            }
+          },
+          "load": {
+            "percent_of_training_max": 77.5
+          },
+          "rest": 180,
+          "tempo": "2-1-X-0",
+          "notes": "Paused reps.",
+          "demo_url": "https://example.com/bench",
+          "warmup": [
+            {
+              "sets": 2,
+              "reps": 10,
+              "load": {
+                "lb": 45
+              }
+            },
+            {
+              "reps": 5,
+              "load": {
+                "percent_of_working_weight": 50
+              }
+            },
+            {
+              "reps": 3,
+              "load": {
+                "percent_of_working_weight": 75
+              }
+            }
+          ],
+          "progression": {
+            "training_max": {
+              "increment": {
+                "lb": 5
+              },
+              "deload_after_failures": {
+                "failures": 2,
+                "percent": 10
+              }
+            }
+          }
+        },
+        {
+          "id": "dumbbell-row",
+          "name": "Dumbbell row",
+          "work": {
+            "reps": {
+              "sets": 3,
+              "reps": {
+                "min": 8,
+                "max": 12
+              }
+            }
+          },
+          "load": {
+            "lb": 52.5
+          },
+          "rest": 0,
+          "superset": "a",
+          "progression": {
+            "double_progression": {
+              "increment": {
+                "lb": 5
+              }
+            }
+          }
+        },
+        {
+          "id": "dip",
+          "name": "Dip",
+          "work": {
+            "reps": {
+              "sets": 3,
+              "reps": {
+                "min": 6,
+                "max": 10
+              }
+            }
+          },
+          "rest": 15,
+          "superset": "a"
+        },
+        {
+          "id": "weighted-plank",
+          "name": "Weighted plank",
+          "work": {
+            "hold": {
+              "sets": 3,
+              "seconds": 45
+            }
+          },
+          "load": {
+            "lb": 25
+          },
+          "rest": 90,
+          "superset": "a"
+        }
+      ]
+    },
+    {
+      "id": "lower",
+      "name": "Lower",
+      "exercises": [
+        {
+          "id": "front-squat",
+          "name": "Front squat",
+          "work": {
+            "reps": {
+              "sets": 3,
+              "reps": 3
+            }
+          },
+          "load": {
+            "lb": 135
+          },
+          "rest": 240,
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": {
+                "lb": 5
+              },
+              "deload_after_failures": {
+                "failures": 3,
+                "percent": 15
+              }
+            }
+          }
+        },
+        {
+          "id": "treadmill",
+          "name": "Treadmill sprints",
+          "work": {
+            "intervals": {
+              "work": 30,
+              "rest": 90,
+              "rounds": 8
+            }
+          },
+          "rest": 0,
+          "progression": {
+            "none": null
+          }
+        }
+      ]
+    }
+  ],
+  "rotation": [
+    "upper",
+    "lower",
+    "upper",
+    "lower",
+    "lower"
+  ]
+}

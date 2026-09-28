@@ -1,0 +1,1 @@
+days[0].exercises[0].tempo: invalid tempo `3-1-1`: expected four phases such as `3-1-X-0` (each 0 to 99 seconds, or X for explosive) (line 15, column 9)

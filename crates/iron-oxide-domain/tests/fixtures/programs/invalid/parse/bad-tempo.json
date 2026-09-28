@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "name": "Bad tempo",
+  "days": [
+    {
+      "id": "a",
+      "name": "A",
+      "exercises": [
+        {
+          "id": "squat",
+          "name": "Squat",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "rest": 60,
+          "tempo": "3-1-1"
+        }
+      ]
+    }
+  ],
+  "rotation": ["a"]
+}

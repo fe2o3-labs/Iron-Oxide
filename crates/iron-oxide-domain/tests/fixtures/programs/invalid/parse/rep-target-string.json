@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "Reps as text",
+  "days": [
+    {
+      "id": "a",
+      "name": "A",
+      "exercises": [
+        { "id": "squat", "name": "Squat", "work": { "reps": { "sets": 3, "reps": "5" } }, "rest": 60 }
+      ]
+    }
+  ],
+  "rotation": ["a"]
+}

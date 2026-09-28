@@ -1,0 +1,1 @@
+days[0].exercises[0].work.reps.reps: invalid type: string "5", expected a rep count such as 5, or a range such as {"min": 8, "max": 12} (line 9, column 84)
