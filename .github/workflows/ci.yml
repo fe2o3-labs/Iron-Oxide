@@ -4,15 +4,22 @@ on:
   push:
     branches: [main]
   # No branch filter: stacked PRs (whose base is not `main`) get CI too.
+  # `edited` re-runs CI when a PR is retargeted (e.g. a stacked PR moved to `main` after its base
+  # is merged), so the checks are computed against the new base. It also fires on title/body
+  # edits; that costs a run but is harmless. Never skip jobs on `edited`: a skipped required check
+  # counts as passing and would replace a real result on the same commit.
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# PRs: a new run cancels the superseded one. Pushes to main: one group per commit, so no push run is
+# ever cancelled or dropped (each one scans only its own pushed range, see the gitleaks job).
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -50,7 +57,10 @@ jobs:
           tar -xzf "$archive" gitleaks
       - name: Scan the new commits
         # PR: the PR's own commits (base..head). Push to main: the pushed range. Manual run: the
-        # whole history of the checked-out branch. The weekly full-history scan of main is in
+        # whole history of the checked-out branch. `--remerge-diff` also scans what each merge
+        # commit changed relative to git's automatic merge (conflict resolutions, evil merges);
+        # without it `git log -p` shows no diff for merges. Not `-m`: it diffs a merge against its
+        # first parent and would re-report the base branch's content under the merge's SHA. The weekly full-history scan of main is in
         # secret-scan.yml. Never the gitleaks default (`git log --all`), which would scan every
         # branch fetched by `fetch-depth: 0` and fail this run for someone else's commit.
         # Known false positives: see "Secrets" in SECURITY.md (`gitleaks:allow`, `.gitleaksignore`).
@@ -74,26 +84,13 @@ jobs:
               range="HEAD" ;;
           esac
           echo "Scanning commits: $range"
-          "$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 --log-opts="--no-merges $range" .
+          "$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 --log-opts="--remerge-diff $range" .
 
-  # The Rust jobs below are skipped until a root `Cargo.toml` exists (it lands with #2).
-  detect:
-    name: Detect Rust workspace
-    runs-on: ubuntu-latest
-    outputs:
-      rust: ${{ steps.check.outputs.rust }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - id: check
-        run: |
-          if [ -f Cargo.toml ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi
+  # Rust jobs: they always run (no skip gate). A skipped required check counts as passing, so a gate
+  # could let a PR merge without any Rust check.
 
   fmt:
     name: rustfmt
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -105,8 +102,6 @@ jobs:
 
   clippy:
     name: clippy
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -124,8 +119,6 @@ jobs:
 
   test:
     name: Unit tests
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -146,8 +139,6 @@ jobs:
   # `.sqlx/` metadata is missing or stale fails CI without needing a database.
   sqlx-offline:
     name: sqlx offline build
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -162,8 +153,6 @@ jobs:
 
   integration:
     name: Integration tests (Postgres)
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -217,8 +206,6 @@ jobs:
   # shutdown on SIGTERM.
   dx-bundle:
     name: dx bundle + smoke test
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     # The server connects to Postgres and applies the migrations at startup.
     services:
@@ -290,7 +277,8 @@ jobs:
           done
           # The startup migrations ran.
           test "$(PGPASSWORD=iron_oxide psql -h localhost -U iron_oxide -d iron_oxide -tAc "SELECT to_regclass('users')")" = "users"
-          # SIGTERM (what Fly sends on deploy) stops it cleanly with status 0.
+          # SIGTERM (Docker's stop signal, and what fly.toml sets) stops it cleanly with status 0.
+          # SIGINT (Fly's default) is handled the same way; the Postgres tests cover it.
           kill -TERM "$server_pid"
           wait "$server_pid"
           grep -q "shut down" "$RUNNER_TEMP/server.log"
