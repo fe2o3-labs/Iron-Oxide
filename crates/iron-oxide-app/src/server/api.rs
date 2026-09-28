@@ -6,6 +6,7 @@
 //! and the user and call them.
 
 pub mod error;
+pub mod programs;
 pub mod sessions;
 #[cfg(test)]
 pub(crate) mod testing;

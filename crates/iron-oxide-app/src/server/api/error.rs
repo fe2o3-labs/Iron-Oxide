@@ -11,6 +11,7 @@ use dioxus::logger::tracing;
 use dioxus::prelude::ServerFnError;
 use iron_oxide_domain::{SessionError, ValueError, program::ProgramError};
 
+use crate::api::programs::ProgramProblems;
 use crate::server::{auth::AuthError, db::error::RepoError};
 
 /// The public message of a 404.
@@ -21,6 +22,8 @@ pub const TRANSIENT: &str = "The server is busy. Please try again.";
 pub const INTERNAL: &str = "Something went wrong. Please try again.";
 /// The public message of a 401 (the same as sign-in's).
 pub const UNAUTHORIZED: &str = "Please sign in.";
+/// The public message of a 422 for a program document, whose problems are in the details.
+pub const INVALID_PROGRAM: &str = "This program is not valid.";
 
 /// Why a server function failed. Converts into [`ServerFnError`] with `?`.
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +39,13 @@ pub enum ApiError {
     /// user did not send.
     #[error("invalid: {0}")]
     Invalid(Cow<'static, str>),
+    /// `422`: an invalid program document. The error's `details` carry the problems, each with its
+    /// JSON path ([`ProgramProblems`]), for the UI to list.
+    #[error("invalid program: {} problem(s)", .0.errors.len() + .0.omitted)]
+    InvalidProgram(ProgramProblems),
+    /// `413`: the request is larger than the endpoint accepts. The message is shown to the user.
+    #[error("too large: {0}")]
+    TooLarge(Cow<'static, str>),
     /// `503`: nothing was saved and retrying the same request is safe and expected to succeed
     /// (a concurrent write got in the way, the database was briefly unreachable). The client retry
     /// queue (#30) retries it. The text is for the logs only.
@@ -80,6 +90,8 @@ impl ApiError {
             Self::NotFound => (404, NOT_FOUND),
             Self::Conflict(message) => (409, message),
             Self::Invalid(message) => (422, message),
+            Self::InvalidProgram(_) => (422, INVALID_PROGRAM),
+            Self::TooLarge(message) => (413, message),
             Self::Transient(_) => (503, TRANSIENT),
             Self::Unauthorized => (401, UNAUTHORIZED),
             Self::Forbidden(message) => (403, message),
@@ -104,10 +116,15 @@ impl From<ApiError> for ServerFnError {
     fn from(error: ApiError) -> Self {
         error.log();
         let (code, message) = error.public();
+        let details = match &error {
+            // Plain data (strings and numbers): serializing it cannot fail.
+            ApiError::InvalidProgram(problems) => serde_json::to_value(problems).ok(),
+            _ => None,
+        };
         ServerFnError::ServerError {
             message: message.to_owned(),
             code,
-            details: None,
+            details,
         }
     }
 }
@@ -173,10 +190,11 @@ impl From<ValueError> for ApiError {
 }
 
 impl From<ProgramError> for ApiError {
-    /// A program document the user sent is not valid. The messages point at the offending field
-    /// and cap how much of the user's text they echo.
+    /// A program document the user sent is not valid: every problem the domain reports (bounded),
+    /// each pointing at the offending field. The messages cap how much of the user's text they
+    /// echo.
     fn from(error: ProgramError) -> Self {
-        Self::invalid(error.to_string())
+        Self::InvalidProgram(ProgramProblems::from(error))
     }
 }
 
@@ -228,6 +246,7 @@ mod tests {
             (ApiError::NotFound, 404, NOT_FOUND),
             (ApiError::conflict("Taken."), 409, "Taken."),
             (ApiError::invalid("Too heavy."), 422, "Too heavy."),
+            (ApiError::TooLarge("Too big.".into()), 413, "Too big."),
             (ApiError::Transient("x".to_owned()), 503, TRANSIENT),
             (ApiError::Unauthorized, 401, UNAUTHORIZED),
             (ApiError::Forbidden("Pro only.".into()), 403, "Pro only."),
@@ -334,6 +353,17 @@ mod tests {
         assert!(message.starts_with("invalid session id"), "{message}");
 
         let program = iron_oxide_domain::program::Program::from_json("{").unwrap_err();
-        assert_eq!(server_error(program).0, 422);
+        let ServerFnError::ServerError {
+            code,
+            message,
+            details: Some(details),
+        } = ServerFnError::from(ApiError::from(program))
+        else {
+            panic!("no details");
+        };
+        assert_eq!((code, message.as_str()), (422, INVALID_PROGRAM));
+        assert_eq!(details["errors"][0]["path"], "");
+        assert_eq!(details["errors"][0]["line"], 1);
+        assert_eq!(details["omitted"], 0);
     }
 }

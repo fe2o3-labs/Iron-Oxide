@@ -21,7 +21,8 @@ pub enum FailureKind {
     NotFound,
     /// `409`: contradicts saved data. Retrying the same request cannot succeed.
     Conflict,
-    /// `400`/`422`: the request was rejected as invalid. Retrying cannot succeed.
+    /// `400`/`413`/`422`: the request was rejected as invalid (or too large). Retrying cannot
+    /// succeed.
     Invalid,
     /// `503`, `502`, `504`: the server could not do it right now; nothing was saved. Retry.
     Transient,
@@ -47,7 +48,7 @@ impl FailureKind {
             403 => Self::Forbidden,
             404 => Self::NotFound,
             409 => Self::Conflict,
-            400 | 422 => Self::Invalid,
+            400 | 413 | 422 => Self::Invalid,
             429 => Self::RateLimited,
             502..=504 => Self::Transient,
             _ => Self::Other,
@@ -161,6 +162,7 @@ mod tests {
             (409, FailureKind::Conflict, false),
             (400, FailureKind::Invalid, false),
             (422, FailureKind::Invalid, false),
+            (413, FailureKind::Invalid, false),
             (429, FailureKind::RateLimited, true),
             (500, FailureKind::Other, false),
             (502, FailureKind::Transient, true),
