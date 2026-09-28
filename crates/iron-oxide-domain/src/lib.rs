@@ -11,11 +11,17 @@
 //!   increment and display helpers.
 //! - [`Reps`], [`Percent`] and [`Seconds`].
 //! - [`ValueError`] for every rejected value.
+//!
+//! # Plate calculator
+//!
+//! [`calculate_plates`] loads a target on a bar from a [`PlateInventory`], exactly or as close as
+//! possible from below and above.
 
 mod duration;
 mod error;
 mod ids;
 mod percent;
+mod plates;
 mod reps;
 mod units;
 mod weight;
@@ -24,6 +30,10 @@ pub use duration::Seconds;
 pub use error::{Quantity, ValueError};
 pub use ids::{ExerciseId, ProgramId, ProgramVersionId, SessionId, SetId, UserId};
 pub use percent::Percent;
+pub use plates::{
+    Loadout, PlateCount, PlateInventory, PlateInventoryError, PlateOutcome, PlateResult,
+    PlateStock, calculate_plates,
+};
 pub use reps::Reps;
 pub use units::Unit;
 pub use weight::{Rounding, Weight, WeightDisplay};
