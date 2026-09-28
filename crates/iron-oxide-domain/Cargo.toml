@@ -10,9 +10,10 @@ repository.workspace = true
 
 [features]
 default = ["uuid"]
-# Random `new_v4()` constructors for the typed IDs. `uuid/js` is target-gated by the uuid crate:
-# it only pulls wasm-bindgen on `wasm32-unknown-unknown`, where it uses `crypto.getRandomValues`.
-uuid = ["uuid/v4", "uuid/js"]
+# Time-ordered `new_v7()` constructors for the typed IDs. `uuid/js` is target-gated by the uuid
+# crate: it only pulls wasm-bindgen on `wasm32-unknown-unknown`, where the clock is `Date.now()`
+# and the random bits come from `crypto.getRandomValues` (elsewhere: `SystemTime` and the OS RNG).
+uuid = ["uuid/v7", "uuid/js"]
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
