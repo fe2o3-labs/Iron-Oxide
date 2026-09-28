@@ -2109,6 +2109,7 @@ dependencies = [
  "dotenvy",
  "iron-oxide-domain",
  "secrecy",
+ "serde_json",
  "sqlx",
  "thiserror 2.0.21",
  "tokio",
