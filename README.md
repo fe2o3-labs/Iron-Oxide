@@ -110,6 +110,9 @@ docker compose down           # stop (add -v to delete the data)
 It listens on port 5433 so it does not clash with a local Postgres on 5432; set
 `IRON_OXIDE_PG_PORT` to use another port (and change `DATABASE_URL` to match).
 
+The schema, the repository layer and how users' data is kept apart are described in
+[`docs/database.md`](docs/database.md).
+
 ### Migrations
 
 Migrations live in `crates/iron-oxide-app/migrations/` and are embedded in the server binary
@@ -148,7 +151,8 @@ database instead of `.sqlx/`, so its schema must be migrated. On a fresh databas
 ### Tests that need Postgres
 
 They are marked `#[ignore = "needs Postgres"]`, so plain `cargo test` skips them. Run them against
-the compose test database; each `#[sqlx::test]` creates, and then drops, its own database:
+the compose test database; each `#[sqlx::test]` creates, and then drops, its own database (see
+"Tests" in [`docs/database.md`](docs/database.md)):
 
 ```sh
 DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
