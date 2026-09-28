@@ -96,6 +96,8 @@ pub enum DbError {
     },
     #[error("could not run the database migrations: {0}")]
     Migrate(#[from] MigrateError),
+    #[error("a built-in program does not load: {0}")]
+    Builtins(#[from] iron_oxide_domain::program::BuiltinProgramError),
     #[error("could not seed the built-in programs: {0}")]
     Seed(#[source] error::RepoError),
 }
