@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE programs SET archived = true\n         WHERE user_id IS NULL AND NOT archived AND source_builtin_id <> ALL($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a2f4d23ea5b78b995affde300adf4e43cbb21c8c4c7f47e87805f90b4d7ba29e"
+}

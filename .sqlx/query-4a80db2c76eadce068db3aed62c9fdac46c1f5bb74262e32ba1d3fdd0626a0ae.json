@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.id, s.program_version_id, v.program_id, s.day_id, s.status, s.started_at,\n                s.finished_at\n         FROM workout_sessions s JOIN program_versions v ON v.id = s.program_version_id\n         WHERE s.user_id = $1 AND s.status = 'in_progress'\n         ORDER BY s.started_at DESC, s.id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "program_version_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "program_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "day_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "finished_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "4a80db2c76eadce068db3aed62c9fdac46c1f5bb74262e32ba1d3fdd0626a0ae"
+}

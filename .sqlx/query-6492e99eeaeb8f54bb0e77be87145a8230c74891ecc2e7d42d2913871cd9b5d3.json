@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT cls.relname AS \"table!\" FROM pg_trigger trg\n           JOIN pg_class cls ON cls.oid = trg.tgrelid\n           JOIN pg_namespace ns ON ns.oid = cls.relnamespace\n           JOIN pg_proc proc ON proc.oid = trg.tgfoid\n           WHERE ns.nspname = 'public' AND NOT trg.tgisinternal\n             AND proc.proname = 'forbid_direct_delete'\n             -- A statement-level (bit 0 unset) BEFORE (bit 1) TRUNCATE (bit 5) trigger.\n             AND trg.tgtype & 1 = 0 AND trg.tgtype & 2 = 2 AND trg.tgtype & 32 = 32",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "table!",
+        "type_info": "Name"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6492e99eeaeb8f54bb0e77be87145a8230c74891ecc2e7d42d2913871cd9b5d3"
+}

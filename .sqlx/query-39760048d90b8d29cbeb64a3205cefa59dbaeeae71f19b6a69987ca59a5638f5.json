@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (table_schema || '.' || table_name) AS \"table!\" FROM information_schema.tables\n           WHERE table_schema NOT IN ('public', 'pg_catalog', 'information_schema')\n             AND table_schema NOT LIKE 'pg\\_%'\n           ORDER BY 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "table!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "39760048d90b8d29cbeb64a3205cefa59dbaeeae71f19b6a69987ca59a5638f5"
+}

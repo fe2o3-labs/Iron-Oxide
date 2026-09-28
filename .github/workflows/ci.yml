@@ -201,8 +201,27 @@ jobs:
       # Each `sqlx::test` gets its own fresh database on this server.
       - name: Run the tests that need Postgres
         run: |
+          set -o pipefail
           cargo test --workspace --locked -- --ignored
-          cargo test -p iron-oxide-app --features server --locked -- --ignored
+          cargo test -p iron-oxide-app --features server --locked -- --ignored 2>&1 \
+            | tee "$RUNNER_TEMP/server-tests.log"
+          # Guard against Postgres tests silently not running (a renamed module, a filter, a
+          # feature flag). 1) Every `#[ignore = "needs Postgres"]` test in the app's src/ must
+          # appear as passed. 2) Every isolation and schema test must be among them: the schema
+          # tests by module, the repository isolation tests by naming convention.
+          expected=$(grep -rE '^\s*#\[ignore = "needs Postgres"\]' crates/iron-oxide-app/src | wc -l)
+          passed=$(grep -cE '^test server::\S+ \.\.\. ok$' "$RUNNER_TEMP/server-tests.log" || true)
+          echo "Postgres tests in src/: $expected, passed: $passed"
+          if [ "$expected" -lt 1 ] || [ "$passed" -ne "$expected" ]; then
+            echo "::error::$passed of $expected Postgres tests passed"; exit 1
+          fi
+          schema=$(grep -cE '^test server::db::schema_tests::\S+ \.\.\. ok$' "$RUNNER_TEMP/server-tests.log" || true)
+          isolation=$(grep -cE '^test server::db::\w+::tests::\w*(another_users|users_only|nobody_can|two_users|only_the_users)\w* \.\.\. ok$' "$RUNNER_TEMP/server-tests.log" || true)
+          echo "schema tests passed: $schema, isolation tests passed: $isolation"
+          # Floors: today's counts. Raise them when adding tests; lowering one needs a reason.
+          if [ "$schema" -lt 20 ] || [ "$isolation" -lt 9 ]; then
+            echo "::error::isolation or schema tests missing (schema $schema < 20 or isolation $isolation < 9)"; exit 1
+          fi
 
   # Builds the release bundle exactly as the Dockerfile (#7) will, then runs the server and checks
   # the page, a server function round-trip, /healthz and /readyz over HTTP, and a graceful
