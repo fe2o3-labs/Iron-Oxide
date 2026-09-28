@@ -144,10 +144,13 @@ impl WorkoutSession {
 /// - [`RepoError::NotFound`] when the program version is not one of the user's.
 /// - [`RepoError::Invalid`] for a day id that is not a slug.
 pub async fn start(pool: &PgPool, user: UserId, session: &NewSession) -> Result<Change, RepoError> {
+    // No conflict target: the table has two unique indexes on the id (`id` and `(id, user_id)`),
+    // and with `ON CONFLICT (id)` a concurrent duplicate can surface as a unique violation on the
+    // other one instead of being skipped.
     let inserted = sqlx::query!(
         "INSERT INTO workout_sessions (id, user_id, program_version_id, day_id, status, started_at)
          VALUES ($1, $2, $3, $4, 'in_progress', $5)
-         ON CONFLICT (id) DO NOTHING",
+         ON CONFLICT DO NOTHING",
         session.id.as_uuid(),
         user.as_uuid(),
         session.program_version_id.as_uuid(),

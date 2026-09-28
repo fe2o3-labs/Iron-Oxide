@@ -1,6 +1,12 @@
 //! Training maxes (`training_maxes`): per user and per exercise, used by percentage-based loads.
+//!
+//! Each one carries `set_at`, when the lifter entered it. The progression engine (#57) starts from
+//! the training max and replays the history after `set_at`
+//! ([`sets::completed_for_exercise`](super::sets::completed_for_exercise)), so it must never be
+//! stored back as a training max without `set_at` moving to the time it was computed for:
+//! otherwise the same sets would be counted twice. [`set`] always writes both together.
 
-use sqlx::PgPool;
+use sqlx::{PgPool, types::time::OffsetDateTime};
 
 use super::{
     error::{RepoError, narrow},
@@ -14,12 +20,14 @@ pub struct TrainingMax {
     pub exercise_id: String,
     /// In nanograms (the domain `Weight`).
     pub weight_ng: u64,
+    /// When the lifter entered it: the anchor of the progression replay.
+    pub set_at: OffsetDateTime,
 }
 
 /// The user's training maxes, by exercise id.
 pub async fn list(pool: &PgPool, user: UserId) -> Result<Vec<TrainingMax>, RepoError> {
     sqlx::query!(
-        "SELECT exercise_id, weight_ng FROM training_maxes
+        "SELECT exercise_id, weight_ng, set_at FROM training_maxes
          WHERE user_id = $1 ORDER BY exercise_id",
         user.as_uuid()
     )
@@ -30,12 +38,13 @@ pub async fn list(pool: &PgPool, user: UserId) -> Result<Vec<TrainingMax>, RepoE
         Ok(TrainingMax {
             exercise_id: row.exercise_id,
             weight_ng: narrow(row.weight_ng, "training_maxes.weight_ng")?,
+            set_at: row.set_at,
         })
     })
     .collect()
 }
 
-/// Sets (or replaces) the user's training max for an exercise.
+/// Sets (or replaces) the user's training max for an exercise, with its `set_at` anchor.
 ///
 /// # Errors
 /// [`RepoError::Invalid`] for an exercise id that is not a slug or a weight above 2000 kg.
@@ -44,12 +53,14 @@ pub async fn set(pool: &PgPool, user: UserId, max: &TrainingMax) -> Result<(), R
         constraint: Some("training_maxes_weight_ng_check".to_owned()),
     })?;
     sqlx::query!(
-        "INSERT INTO training_maxes (user_id, exercise_id, weight_ng) VALUES ($1, $2, $3)
+        "INSERT INTO training_maxes (user_id, exercise_id, weight_ng, set_at)
+         VALUES ($1, $2, $3, $4)
          ON CONFLICT (user_id, exercise_id)
-         DO UPDATE SET weight_ng = EXCLUDED.weight_ng, updated_at = now()",
+         DO UPDATE SET weight_ng = EXCLUDED.weight_ng, set_at = EXCLUDED.set_at",
         user.as_uuid(),
         max.exercise_id,
         weight_ng,
+        max.set_at,
     )
     .execute(pool)
     .await?;
@@ -78,12 +89,16 @@ pub async fn delete(pool: &PgPool, user: UserId, exercise_id: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::db::{MIGRATOR, testing};
+    use crate::server::db::{
+        MIGRATOR,
+        testing::{self, at},
+    };
 
     fn squat(weight_ng: u64) -> TrainingMax {
         TrainingMax {
             exercise_id: "back-squat".to_owned(),
             weight_ng,
+            set_at: at(0),
         }
     }
 
@@ -93,13 +108,19 @@ mod tests {
         let user = testing::user(&pool).await;
         assert!(list(&pool, user).await.unwrap().is_empty());
         set(&pool, user, &squat(100_000_000_000_000)).await.unwrap();
-        set(&pool, user, &squat(0)).await.unwrap();
+        // Replacing moves the anchor too.
+        let replaced = TrainingMax {
+            set_at: at(3_600),
+            ..squat(0)
+        };
+        set(&pool, user, &replaced).await.unwrap();
         let bench = TrainingMax {
             exercise_id: "bench".to_owned(),
             weight_ng: 2_000_000_000_000_000,
+            set_at: at(-5),
         };
         set(&pool, user, &bench).await.unwrap();
-        assert_eq!(list(&pool, user).await.unwrap(), vec![squat(0), bench]);
+        assert_eq!(list(&pool, user).await.unwrap(), vec![replaced, bench]);
         delete(&pool, user, "back-squat").await.unwrap();
         assert!(matches!(
             delete(&pool, user, "back-squat").await,
@@ -117,11 +138,11 @@ mod tests {
             squat(u64::MAX),
             TrainingMax {
                 exercise_id: "Back Squat".to_owned(),
-                weight_ng: 1,
+                ..squat(1)
             },
             TrainingMax {
                 exercise_id: "a".repeat(65),
-                weight_ng: 1,
+                ..squat(1)
             },
         ] {
             let error = set(&pool, user, &bad).await.unwrap_err();

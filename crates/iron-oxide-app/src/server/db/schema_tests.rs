@@ -446,7 +446,8 @@ async fn set_values_are_range_checked(pool: PgPool) {
 #[ignore = "needs Postgres"]
 async fn slugs_are_checked(pool: PgPool) {
     let user = testing::user(&pool).await;
-    let insert = "INSERT INTO training_maxes (user_id, exercise_id, weight_ng) VALUES ($1, $2, 1)";
+    let insert = "INSERT INTO training_maxes (user_id, exercise_id, weight_ng, set_at) \
+                  VALUES ($1, $2, 1, now())";
     let long_ok = "a".repeat(64);
     let too_long = "a".repeat(65);
     for (slug, ok) in [

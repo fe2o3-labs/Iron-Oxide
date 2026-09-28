@@ -58,12 +58,14 @@ CREATE TABLE user_settings (
 CREATE TRIGGER user_settings_owner BEFORE UPDATE OF user_id ON user_settings
     FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
 
--- Training maxes are per user and per exercise, not part of a program (#56).
+-- Training maxes are per user and per exercise, not part of a program (#56). `set_at` is when the
+-- lifter entered the value: the progression engine (#57) replays the history after it, so the
+-- engine's computed training max is never written back here without moving `set_at`.
 CREATE TABLE training_maxes (
     user_id     uuid        NOT NULL REFERENCES users ON DELETE CASCADE,
     exercise_id text        NOT NULL CHECK (is_slug(exercise_id)),
     weight_ng   bigint      NOT NULL CHECK (is_weight_ng(weight_ng)),
-    updated_at  timestamptz NOT NULL DEFAULT now(),
+    set_at      timestamptz NOT NULL,
     PRIMARY KEY (user_id, exercise_id)
 );
 
@@ -202,6 +204,8 @@ CREATE TABLE workout_sets (
         REFERENCES workout_sessions (id, user_id) ON DELETE CASCADE
 );
 
+-- Serves the per-exercise history: progression input after a training max's `set_at` (#57) and
+-- the exercise charts (#20).
 CREATE INDEX workout_sets_user_id_idx ON workout_sets (user_id, exercise_id, completed_at);
 CREATE INDEX workout_sets_session_id_idx ON workout_sets (session_id, completed_at);
 

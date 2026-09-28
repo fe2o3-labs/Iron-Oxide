@@ -11,7 +11,7 @@ use sqlx::{
 
 use super::{
     error::{Change, RepoError, narrow},
-    ids::{SessionId, SetId, UserId},
+    ids::{ProgramId, SessionId, SetId, UserId},
 };
 
 /// A logged set (the domain `LoggedSet`), as saved and as read back.
@@ -205,13 +205,49 @@ pub async fn list_for_session(
     Ok(sets)
 }
 
+/// The user's sets of one exercise completed strictly after `after`, in sessions that were
+/// completed and run from any version of `program`; oldest first. Warm-up sets are included
+/// (`warmup` tells them apart).
+///
+/// This is the progression input (#57): the history after a training max's `set_at`, for the
+/// active program. Served by the `(user_id, exercise_id, completed_at)` index. A program that is
+/// not the user's gives no sets, like one that does not exist.
+pub async fn completed_for_exercise(
+    pool: &PgPool,
+    user: UserId,
+    program: ProgramId,
+    exercise_id: &str,
+    after: OffsetDateTime,
+) -> Result<Vec<LoggedSet>, RepoError> {
+    sqlx::query_as!(
+        SetRow,
+        "SELECT st.id, st.session_id, st.exercise_id, st.set_index, st.reps, st.weight_ng,
+                st.duration_s, st.warmup, st.completed_at
+         FROM workout_sets st
+         JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id
+         JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id
+         WHERE st.user_id = $1 AND st.exercise_id = $3 AND st.completed_at > $4
+           AND s.status = 'completed' AND v.program_id = $2
+         ORDER BY st.completed_at, st.id",
+        user.as_uuid(),
+        program.as_uuid(),
+        exercise_id,
+        after,
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(LoggedSet::try_from)
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::server::db::{
-        MIGRATOR,
+        MIGRATOR, programs,
         sessions::{self, SessionOutcome},
-        testing::{self, at, new_set, random_uuid},
+        testing::{self, at, document, new_session, new_set, random_uuid},
     };
 
     fn assert_err<T: std::fmt::Debug>(result: Result<T, RepoError>, expected: &str) {
@@ -459,5 +495,88 @@ mod tests {
             list_for_session(&pool, a, session_a).await.unwrap(),
             vec![set_a]
         );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn completed_history_of_one_exercise_across_program_versions(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (program, v1) = testing::program(&pool, user).await;
+        let v2 = programs::add_version(&pool, user, program, &document("v2"))
+            .await
+            .unwrap()
+            .1
+            .id;
+        let (_, other_version) = testing::program(&pool, user).await;
+
+        // Logs a set of `exercise` at `minute` in a new session, then ends the session.
+        let log =
+            |version, exercise: &'static str, minute: i64, outcome: Option<SessionOutcome>| {
+                let pool = pool.clone();
+                async move {
+                    let session = new_session(version);
+                    sessions::start(&pool, user, &session).await.unwrap();
+                    let set = LoggedSet {
+                        exercise_id: exercise.to_owned(),
+                        completed_at: at(minute * 60),
+                        ..new_set(session.id)
+                    };
+                    upsert_idempotent(&pool, user, &set).await.unwrap();
+                    if let Some(outcome) = outcome {
+                        sessions::finish(&pool, user, session.id, outcome, at(minute * 60 + 1))
+                            .await
+                            .unwrap();
+                    }
+                    set
+                }
+            };
+        let done = Some(SessionOutcome::Completed);
+        let _before_anchor = log(v1, "back-squat", 1, done).await;
+        let at_anchor = log(v1, "back-squat", 10, done).await;
+        let from_v1 = log(v1, "back-squat", 11, done).await;
+        let from_v2 = log(v2, "back-squat", 12, done).await;
+        let _other_exercise = log(v2, "bench", 13, done).await;
+        let _other_program = log(other_version, "back-squat", 14, done).await;
+        let _abandoned = log(v2, "back-squat", 15, Some(SessionOutcome::Abandoned)).await;
+        let _skipped = log(v2, "back-squat", 16, Some(SessionOutcome::Skipped)).await;
+        let _in_progress = log(v2, "back-squat", 17, None).await;
+
+        let history = completed_for_exercise(&pool, user, program, "back-squat", at(600))
+            .await
+            .unwrap();
+        assert_eq!(history, vec![from_v1.clone(), from_v2.clone()]);
+        // Strictly after: the anchor itself is excluded, and moving it earlier includes it.
+        let history = completed_for_exercise(&pool, user, program, "back-squat", at(599))
+            .await
+            .unwrap();
+        assert_eq!(history, vec![at_anchor, from_v1, from_v2]);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn another_users_history_is_invisible(pool: PgPool) {
+        let (a, b) = testing::users_a_and_b(&pool).await;
+        let (program_a, version_a) = testing::program(&pool, a).await;
+        let session = new_session(version_a);
+        sessions::start(&pool, a, &session).await.unwrap();
+        testing::set(&pool, a, session.id).await;
+        sessions::finish(&pool, a, session.id, SessionOutcome::Completed, at(3_600))
+            .await
+            .unwrap();
+        assert_eq!(
+            completed_for_exercise(&pool, a, program_a, "back-squat", at(-1))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        for program in [program_a, ProgramId::from_uuid(random_uuid())] {
+            assert!(
+                completed_for_exercise(&pool, b, program, "back-squat", at(-1))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 }

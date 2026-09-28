@@ -114,6 +114,7 @@ pub async fn populate(pool: &PgPool, user: UserId) {
         &super::training_maxes::TrainingMax {
             exercise_id: "back-squat".to_owned(),
             weight_ng: 1,
+            set_at: at(0),
         },
     )
     .await
