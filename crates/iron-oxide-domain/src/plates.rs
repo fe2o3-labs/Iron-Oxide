@@ -41,14 +41,18 @@ pub enum PlateInventoryError {
     #[error("a plate must weigh more than zero")]
     ZeroPlate,
     /// The same plate size was listed twice.
-    #[error("plate size {} is listed more than once", .0.display_in(Unit::Kg))]
+    #[error("plate size {} kg is listed more than once", exact_kg(*.0))]
     DuplicatePlate(Weight),
     /// A plate that is neither a multiple of 0.025 kg nor of 0.125 lb.
-    #[error("plate size {} is not a multiple of 0.025 kg or 0.125 lb", .0.display_in(Unit::Kg))]
+    #[error("plate size {} kg is not a multiple of 0.025 kg or 0.125 lb", exact_kg(*.0))]
     OffGrid(Weight),
     /// More pairs of one size than [`PlateInventory::MAX_PAIRS`].
-    #[error("at most {max} pairs of a plate size are allowed")]
+    #[error("plate size {} kg has {pairs} pairs; at most {max} are allowed", exact_kg(*.plate))]
     TooManyPairs {
+        /// The plate size with too many pairs.
+        plate: Weight,
+        /// The rejected number of pairs.
+        pairs: u32,
         /// The maximum number of pairs of one size.
         max: u32,
     },
@@ -58,6 +62,19 @@ pub enum PlateInventoryError {
         /// The maximum number of distinct plate sizes.
         max: usize,
     },
+}
+
+/// A weight in kg with every significant decimal (down to the nanogram, 10⁻¹² kg), so an error
+/// message never rounds an invalid plate onto a valid one: `1.2501`, `0.000000000001`, `20`.
+fn exact_kg(weight: Weight) -> String {
+    const PER_KG: u64 = 1_000_000_000_000;
+    let nanograms = weight.as_nanograms();
+    let (whole, fraction) = (nanograms / PER_KG, nanograms % PER_KG);
+    if fraction == 0 {
+        return whole.to_string();
+    }
+    let digits = format!("{fraction:012}");
+    format!("{whole}.{}", digits.trim_end_matches('0'))
 }
 
 /// The plates a user can load: plate size → number of pairs available.
@@ -107,6 +124,8 @@ impl PlateInventory {
             }
             if entry.pairs > Self::MAX_PAIRS {
                 return Err(PlateInventoryError::TooManyPairs {
+                    plate: entry.plate,
+                    pairs: entry.pairs,
                     max: Self::MAX_PAIRS,
                 });
             }
@@ -490,8 +509,13 @@ impl GridTable {
 /// then combined: a kg side and a lb side never add up to the same total as another pair, because
 /// the smallest weight that is on both grids is over 1 000 000 kg.
 ///
-/// So the work is at most 16 sizes × 40 001 grid steps × 51 pair counts (about 33 million simple
-/// steps) and 16 × 40 001 bytes of table, whatever the plate sizes, pair counts and target.
+/// So, whatever the plate sizes, pair counts and target, the work is at most:
+///
+/// - Tables: 16 sizes × 40 001 grid steps × 51 pair counts (about 33 million simple steps; the
+///   real worst case is about 32.5 million).
+/// - Combine: at most 40 001 kg sides, each with one binary search over at most 17 638 lb sides.
+/// - Memory: 16 × 40 001 one-byte back-pointers, two `u16` plate-count rows per grid and one
+///   `u64` list of reachable sides per grid: about 1.4 MB in total.
 #[must_use]
 pub fn calculate_plates(target: Weight, bar: Weight, inventory: &PlateInventory) -> PlateResult {
     search(target, bar, inventory).0
@@ -639,6 +663,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, PlateInventoryError::DuplicatePlate(kg(20.0)));
         assert_eq!(err.to_string(), "plate size 20 kg is listed more than once");
+        let err = PlateInventory::new([stock(lb(45.0), 1), stock(lb(45.0), 1)]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "plate size 20.41165665 kg is listed more than once"
+        );
         // 10 lb and 4.5359237 kg are the same plate.
         assert_eq!(
             PlateInventory::new([stock(lb(10.0), 1), stock(kg(4.535_923_7), 1)]).unwrap_err(),
@@ -1044,9 +1073,23 @@ mod tests {
             let err = PlateInventory::new([stock(plate, 1)]).unwrap_err();
             assert_eq!(err, PlateInventoryError::OffGrid(plate));
         }
+        // The message shows the exact value, never a rounded one that looks valid.
+        let message = |plate: Weight| PlateInventoryError::OffGrid(plate).to_string();
+        let suffix = "kg is not a multiple of 0.025 kg or 0.125 lb";
+        assert_eq!(message(kg(0.01)), format!("plate size 0.01 {suffix}"));
+        assert_eq!(message(kg(1.2501)), format!("plate size 1.2501 {suffix}"));
+        assert_eq!(message(kg(20.001)), format!("plate size 20.001 {suffix}"));
+        assert_eq!(message(kg(2.4999)), format!("plate size 2.4999 {suffix}"));
+        assert_eq!(message(kg(0.001)), format!("plate size 0.001 {suffix}"));
         assert_eq!(
-            PlateInventoryError::OffGrid(kg(0.01)).to_string(),
-            "plate size 0.01 kg is not a multiple of 0.025 kg or 0.125 lb"
+            message(Weight::from_nanograms(1).unwrap()),
+            format!("plate size 0.000000000001 {suffix}")
+        );
+        let err = serde_json::from_str::<PlateInventory>(r#"[{"plate":1.2501,"pairs":1}]"#);
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("plate size 1.2501 kg")
         );
     }
 
@@ -1054,10 +1097,17 @@ mod tests {
     fn inventory_caps_pairs_per_size() {
         assert!(PlateInventory::new([stock(kg(20.0), 50)]).is_ok());
         let err = PlateInventory::new([stock(kg(20.0), 51)]).unwrap_err();
-        assert_eq!(err, PlateInventoryError::TooManyPairs { max: 50 });
+        assert_eq!(
+            err,
+            PlateInventoryError::TooManyPairs {
+                plate: kg(20.0),
+                pairs: 51,
+                max: 50
+            }
+        );
         assert_eq!(
             err.to_string(),
-            "at most 50 pairs of a plate size are allowed"
+            "plate size 20 kg has 51 pairs; at most 50 are allowed"
         );
         assert!(PlateInventory::new([stock(kg(20.0), u32::MAX)]).is_err());
     }
@@ -1132,6 +1182,36 @@ mod tests {
     }
 
     #[test]
+    fn tie_break_prefers_heavy_plates_with_many_small_ones_available() {
+        // 31 kg per side in four plates: 25 + 2 + 2 + 2 and 15 + 15 + 0.5 + 0.5 both work; the one
+        // with the heaviest plate wins.
+        let inv = inventory(&[(kg(25.0), 1), (kg(15.0), 2), (kg(2.0), 3), (kg(0.5), 2)]);
+        let result = calculate_plates(kg(82.0), kg(20.0), &inv);
+        assert_eq!(
+            plates_of(result.exact().unwrap()),
+            vec![(kg(25.0), 1), (kg(2.0), 3)]
+        );
+    }
+
+    #[test]
+    fn target_one_nanogram_short_of_a_loadout() {
+        let inv = inventory(&[(kg(20.0), 1)]);
+        let target = Weight::from_nanograms(kg(60.0).as_nanograms() - 1).unwrap();
+        let result = calculate_plates(target, kg(20.0), &inv);
+        assert_eq!(result.below().unwrap().total(), kg(20.0));
+        assert_eq!(result.above().unwrap().total(), kg(60.0));
+    }
+
+    #[test]
+    fn above_may_land_exactly_on_the_weight_cap() {
+        let inv = inventory(&[(kg(1000.0), 1)]);
+        let target = Weight::from_nanograms(Weight::MAX.as_nanograms() - 1).unwrap();
+        let result = calculate_plates(target, Weight::ZERO, &inv);
+        assert_eq!(result.below().unwrap().total(), Weight::ZERO);
+        assert_eq!(result.above().unwrap().total(), Weight::MAX);
+    }
+
+    #[test]
     fn worst_case_under_the_limits_stays_small() {
         // 16 sizes on the finest grid with the most pairs and the heaviest target: every table
         // has its full width.
@@ -1142,6 +1222,16 @@ mod tests {
         .unwrap();
         let (result, stats) = search(Weight::MAX, Weight::ZERO, &inv);
         assert_eq!(stats.cells, MAX_CELLS);
+        // Every cell tries 0 ..= min(50, side / size) pairs; the counter must match exactly.
+        let expected_steps: u64 = (1..=16_u64)
+            .map(|size| {
+                (0..=40_000_u64)
+                    .map(|side| (side / size).min(50) + 1)
+                    .sum::<u64>()
+            })
+            .sum();
+        assert_eq!(stats.steps, expected_steps);
+        assert_eq!(stats.steps, 32_467_416);
         assert_bounded(stats);
         // 50 pairs each of 0.025 .. 0.4 kg: 50 × 3.4 kg = 170 kg per side.
         assert_eq!(result.below().unwrap().total(), kg(340.0));
