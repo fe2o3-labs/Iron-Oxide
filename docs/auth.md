@@ -39,6 +39,10 @@ to another user:
 - `sessions`: see [Sessions](#sessions).
 - `auth_ceremonies`: see [Ceremony state](#ceremony-state).
 
+Row ids, user ids included, are UUIDv7 (#65). Nothing secret or shown to an authenticator is:
+session ids, WebAuthn user handles, and Google's `state`, nonce and PKCE verifier are
+cryptographically random.
+
 An account always keeps at least one way in. Removing a passkey or unlinking Google is refused when
 it is the last one. The check locks the user row (`SELECT … FOR UPDATE`), so two concurrent
 removals cannot both pass.
@@ -52,8 +56,11 @@ Touch ID, device PIN).
 
 **Sign-up** (`passkey_sign_up_begin` → `navigator.credentials.create()` → `passkey_sign_up_finish`):
 
-1. Begin draws a new random user id and uses it as the WebAuthn user handle. The optional name
-   given by the user labels the account in the passkey manager.
+1. Begin draws the new user's id (UUIDv7) and a separate WebAuthn **user handle**: a random
+   UUIDv4 from the OS CSPRNG, kept in `webauthn_user_handles`, one per user and the same for all
+   their passkeys. The handle is never the user id: authenticators store it, and a UUIDv7 would
+   tell them when the account was created. The optional name given by the user labels the
+   account in the passkey manager.
 2. The creation options require a discoverable ("resident") credential and user verification.
    `webauthn-rs` leaves `residentKey` unset, so we set it to `required` before sending.
 3. Finish verifies the attestation: challenge, origin, RP ID hash and the UV flag. It rejects a
@@ -126,8 +133,12 @@ This is the authorization code flow with PKCE (S256), `state` and `nonce`. It as
    the session owning that `state` to redeem: the attacker would have been signed in as the
    victim. `state` is not a secret of the victim's browser; it is only a secret of whoever
    started the flow. With the standard flow the victim's browser holds no ceremony for that
-   `state`, the callback shows an error, and the code is never usable by the attacker, who never
-   sees it (and could not redeem it without Google redirecting to them). Tested by
+   `state`, the callback shows an error, and the attacker never sees the code. The callback also
+   **deletes the attacker's ceremony** (found by its `state`, which only its creator and this
+   browser know), so the flow can never complete: without that, a code leaking later by another
+   channel (history sync, a screenshot of the URL, a proxy log) could still be redeemed by the
+   attacker, who holds the matching PKCE verifier. PKCE does not protect a flow the attacker
+   started; this deletion does. Tested by
    `a_forwarded_sign_in_url_cannot_sign_the_attacker_in_as_the_victim` and
    `a_forwarded_link_url_cannot_bind_the_victims_google_to_the_attacker`.
 3. Finishing takes the ceremony whose `state` matches (checked again in constant time). It then exchanges the code
@@ -234,17 +245,18 @@ server-side: which check failed, and database errors.
 | **Forged callback cancelling a flow** (cross-site navigation to the callback) | The ceremony is consumed only when its own `state` comes back, `?error=` included | `a_forged_callback_cannot_cancel_a_flow_in_progress`, `googles_error_with_the_right_state_ends_the_flow` |
 | **Challenge / ceremony replay** | Ceremony consumed with `DELETE … RETURNING`, 5–10 min TTL, bound to the session (and user); WebAuthn signs the challenge; signature counter checked | `a_replayed_sign_in_is_rejected`, `two_concurrent_finishes_of_one_ceremony_cannot_both_succeed`, `concurrent_google_finishes_of_one_ceremony_cannot_both_succeed`, `a_sign_up_ceremony_is_single_use`, `a_google_ceremony_is_single_use`, `an_expired_ceremony_is_rejected` |
 | **Passkey without user verification** | UV required at registration and sign-in | `user_verification_is_required` |
+| **Account creation time leaking to authenticators** | The WebAuthn user handle is a random UUIDv4 per user, not the (UUIDv7) user id | `the_webauthn_user_handle_is_random_stable_and_not_the_user_id` |
 | **Credential/user mismatch** (assertion with another user's handle) | Lookup by credential id *and* user handle | `a_user_handle_pointing_at_another_account_is_rejected` |
 | **Account linking hijack** | Linked by `sub` only, never email; `(provider, subject)` unique; linking refuses a `sub` owned by another account; link ceremonies bound to the initiating user | `linking_cannot_take_over_another_accounts_google`, `a_link_ceremony_cannot_be_finished_by_another_user`, `google_sign_in_creates_then_finds_the_account_by_sub` |
 | **Token substitution** (ID token for another client, issuer or user) | `aud` = exactly our client id (and `azp` if present), `iss` = Google, RS256 signature against Google's JWKS (no HMAC algorithms), `nonce` bound to the ceremony, `exp`/`iat`; code bound to our PKCE verifier | `google_rejects_a_token_for_another_client`, `…_shared_with_another_audience`, `…_from_another_issuer`, `…_signed_with_an_unknown_key`, `google_rejects_an_hs256_token_keyed_with_the_client_secret`, `…_an_expired_token`, `google_rejects_a_nonce_mismatch`, `google_rejects_a_code_bound_to_another_pkce_challenge` |
-| **Authorization code interception** (logs, referrer, history) | PKCE; `Referrer-Policy: no-referrer`, `no-store`; the code is never put in a page nor stored | `google_rejects_a_code_bound_to_another_pkce_challenge`, `google::tests` |
+| **Authorization code interception** (logs, referrer, history) | Our flows: PKCE (the verifier never leaves the server). A flow an attacker started and forwarded: its ceremony is deleted when the victim's callback arrives, so a later leak of that code is useless. `Referrer-Policy: no-referrer`, `no-store`; the code is never put in a page nor stored | `google_rejects_a_code_bound_to_another_pkce_challenge`, `a_forwarded_sign_in_url_cannot_sign_the_attacker_in_as_the_victim`, `google::tests` |
 | **Open redirect** | No return-URL parameter anywhere; the callback only ever goes to `/`; the Google redirect URL is fixed by config and validated | `config::tests::google_redirect_url_must_be_the_app_callback` |
 | **XSS via the callback page** | Query data JSON-escaped for `<script>` and HTML-escaped; CSP allows only the page's own script by hash | `google::tests::callback_page_is_locked_down`, `script_safe_json_cannot_close_the_script_element` |
 | **Locking yourself out** | Last sign-in method cannot be removed (row lock against races) | `add_list_and_remove_passkeys_but_never_the_last_way_in`, `google_as_the_only_method_cannot_be_unlinked` |
 | **Deleted user keeps access** | Sessions, identities and ceremonies cascade from `users`; a deleted session is never resurrected | `deleting_a_user_deletes_their_auth_rows`, `saving_a_deleted_session_does_not_resurrect_it` |
-| **Secrets in logs** | `secrecy` wrappers; generic client errors; `webauthn_rs_core`/`webauthn_rs` capped at `info` whatever `RUST_LOG` says (they log credential ids and public keys at `debug`, challenges and registrations at `trace`) | `a_nasty_database_password_never_reaches_the_logs`, `error::tests`, `logging::tests` |
+| **Secrets in logs** | `secrecy` wrappers; generic client errors; a per-event filter drops every `webauthn_rs*` event below `info`, after and independently of `RUST_LOG` (they log credential ids and public keys at `debug`, challenges and registrations at `trace`) | `a_nasty_database_password_never_reaches_the_logs`, `error::tests`, `logging::tests` |
 | **Credential stuffing / password spraying** | **Not applicable**: there are no passwords. Passkeys are phishing-resistant and origin-bound | — |
-| **Brute force / resource exhaustion** on the begin endpoints | A new begin deletes the ceremony it replaces (one row per kind per session); ceremonies and signed-out sessions are short-lived and cleaned up; per-IP and per-user rate limits come with #23 (the begin/finish functions and the callback are the places to limit). New cookie-less sessions are still one row each until #23 | `a_new_begin_replaces_the_previous_ceremony_row` |
+| **Brute force / resource exhaustion** on the begin endpoints | A new begin deletes the ceremony it replaces (one row per kind per session for sequential requests; concurrent begins on one cookie can each leave a row until cleanup); ceremonies and signed-out sessions are short-lived and cleaned up; per-IP and per-user rate limits come with #23 (the begin/finish functions and the callback are the places to limit). New cookie-less sessions are still one row each until #23 | `a_new_begin_replaces_the_previous_ceremony_row` |
 | **Credential id existence oracle** | **Accepted.** `credential_id` is unique across all accounts, so registering an id that exists gets 409. The WebAuthn spec says a relying party should reject a credential id already registered to any user; ids are random, chosen by the authenticator, and only ever sent to their owner (in `excludeCredentials`) | `add_list_and_remove_passkeys_but_never_the_last_way_in` |
 
 ## Creating the Google OAuth client
