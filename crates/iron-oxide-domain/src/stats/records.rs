@@ -127,6 +127,9 @@ impl ExerciseRecords {
     /// The PRs that `session` (the sets of this exercise in one new session) sets against the
     /// recorded history. The session itself is not recorded.
     ///
+    /// [`PerformedSet`] carries no exercise, so this cannot tell exercises apart: split the
+    /// session's sets by exercise first and pass only this exercise's sets.
+    ///
     /// Rules:
     /// - No PR is reported while the history is empty: the first session sets the baseline.
     /// - [`PrKind::HeaviestWeight`]: the session's top set is strictly heavier than anything before.
@@ -134,9 +137,15 @@ impl ExerciseRecords {
     /// - [`PrKind::BestE1rm`]: the session's best estimate is strictly higher than the best before.
     ///   At most one, and none if the history has no estimate to beat.
     /// - [`PrKind::RepsAtWeight`]: a set has more reps than ever done at its weight or heavier. A set
-    ///   heavier than anything before is a weight PR, not a rep PR. When one session set beats
-    ///   another on both weight and reps, only the better one is reported, so `100 kg × 8` hides
-    ///   `95 kg × 8` and `100 kg × 7`.
+    ///   heavier than anything before is never a rep PR. Rep PRs are only compared with each
+    ///   other: when one rep PR beats another on both weight and reps, only the better one is
+    ///   reported, so `100 kg × 8` hides `95 kg × 8` and `100 kg × 7`. A weight PR hides no rep PR:
+    ///   with history `100 × 5`, the session `105 × 6, 100 × 6` reports the weight PR `105 × 6` and
+    ///   the rep PR `100 × 6`.
+    ///
+    /// A set heavier than anything before that is not the session's top set gets no event of its
+    /// own: with history `100 × 5`, the session `110 × 3, 105 × 5` reports `110 × 3` as the weight
+    /// PR, and `105 × 5` only through the e1RM PR it sets.
     ///
     /// Events come in that order; rep PRs from heaviest to lightest.
     #[must_use]
@@ -445,6 +454,54 @@ mod tests {
                 lift: lift(100.0, 6),
                 previous: reps(5),
             }]
+        );
+    }
+
+    #[test]
+    fn best_reps_at_a_weight_survive_a_later_lower_rep_set() {
+        let records =
+            ExerciseRecords::from_history([work(100.0, 8), work(100.0, 5)], E1rmFormula::Epley);
+        assert_eq!(records.max_reps_at_least(kg(100.0)), Some(reps(8)));
+        assert_eq!(records.prs(&squat(), [work(100.0, 6)]), []);
+    }
+
+    #[test]
+    fn a_weight_pr_does_not_hide_a_rep_pr() {
+        assert_eq!(
+            kinds([work(100.0, 5)], [work(105.0, 6), work(100.0, 6)]),
+            [
+                PrKind::HeaviestWeight {
+                    lift: lift(105.0, 6),
+                    previous: kg(100.0),
+                },
+                PrKind::BestE1rm {
+                    e1rm: estimate(105.0, 6),
+                    lift: lift(105.0, 6),
+                    previous: estimate(100.0, 5),
+                },
+                PrKind::RepsAtWeight {
+                    lift: lift(100.0, 6),
+                    previous: reps(5),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_heavier_set_below_the_top_set_has_no_event_of_its_own() {
+        assert_eq!(
+            kinds([work(100.0, 5)], [work(110.0, 3), work(105.0, 5)]),
+            [
+                PrKind::HeaviestWeight {
+                    lift: lift(110.0, 3),
+                    previous: kg(100.0),
+                },
+                PrKind::BestE1rm {
+                    e1rm: estimate(105.0, 5),
+                    lift: lift(105.0, 5),
+                    previous: estimate(100.0, 5),
+                },
+            ]
         );
     }
 
