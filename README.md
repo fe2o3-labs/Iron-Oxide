@@ -45,7 +45,12 @@ the pinned toolchain and the wasm target on first use.
 unstable browser APIs behind this cfg, and the rest timer needs one of them: the
 [Screen Wake Lock API](https://developer.mozilla.org/docs/Web/API/Screen_Wake_Lock_API), which keeps
 the phone screen on during a session. The app refuses to compile for wasm without it, so a build
-that bypasses the config (for example, one that sets `RUSTFLAGS`, which overrides it) fails loudly.
+that bypasses the config fails loudly.
+
+> **`RUSTFLAGS` replaces `.cargo/config.toml`'s `rustflags`; it does not add to them.** If you set
+> `RUSTFLAGS` (or `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS`) for a build that includes the
+> wasm client, for example in a Dockerfile or a CI step, it must also contain
+> `--cfg=web_sys_unstable_apis`.
 
 ## Install the Dioxus CLI
 
