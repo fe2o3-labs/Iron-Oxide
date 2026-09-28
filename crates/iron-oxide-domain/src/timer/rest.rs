@@ -58,12 +58,6 @@ impl RestTimer {
         self.0.thresholds()
     }
 
-    /// The latest instant alerts were computed up to.
-    #[must_use]
-    pub fn observed_until(&self) -> Timestamp {
-        self.0.observed_until
-    }
-
     /// Time left at `now`, zero once the rest is over.
     #[must_use]
     pub fn remaining(&self, now: Timestamp) -> Duration {
@@ -76,13 +70,14 @@ impl RestTimer {
         self.0.is_finished(now)
     }
 
-    /// Adds `by` to the rest (the `+15s` button).
+    /// Adds `by` to the rest (the `+15s` button). Like every adjustment, it re-arms the alerts
+    /// at `now`: whatever the new end already reaches at `now` is marked announced, silently.
     ///
     /// On a rest that is already over, the new rest lasts `by` from `now`. Thresholds the new end
     /// puts back ahead are re-armed: `+15s` with 8 seconds left warns again at 10 seconds.
     pub fn add(&mut self, now: Timestamp, by: Duration) {
         self.0.ends_at = self.0.ends_at.max(now).saturating_add(by);
-        self.0.settle(now);
+        self.0.arm(now);
     }
 
     /// Removes `by` from the rest (the `-15s` button), never ending it before `now`.
@@ -94,18 +89,21 @@ impl RestTimer {
         if self.0.ends_at > now {
             self.0.ends_at = self.0.ends_at.saturating_sub(by).max(now);
         }
-        self.0.settle(now);
+        self.0.clamp_start();
+        self.0.arm(now);
     }
 
     /// Ends the rest at `now` without raising [`TimerAlert::Finished`]. A rest that is already
     /// over keeps its end instant.
     pub fn skip(&mut self, now: Timestamp) {
         self.0.ends_at = self.0.ends_at.min(now);
-        self.0.settle(now);
+        self.0.clamp_start();
+        self.0.arm(now);
     }
 
     /// The alert crossed between `previous` (excluded) and `now` (included), if any, for the
-    /// current end instant. Pure: prefer [`observe`](Self::observe), which remembers `previous`.
+    /// current end instant. Pure and stateless: it ignores what was already announced, so prefer
+    /// [`observe`](Self::observe) to drive the UI.
     ///
     /// Returns `None` when `now` is not after `previous`. When both thresholds are crossed, only
     /// [`TimerAlert::Finished`] is returned.
@@ -114,8 +112,8 @@ impl RestTimer {
         self.0.alert_between(previous, now)
     }
 
-    /// The alert to raise now, if any, given everything observed so far. Call it on every UI
-    /// tick and when the page becomes visible again.
+    /// The alert to raise now, if any, given what the current arming already announced. Call it
+    /// on every UI tick and when the page becomes visible again.
     pub fn observe(&mut self, now: Timestamp) -> Option<TimerAlert> {
         self.0.observe(now)
     }
@@ -154,7 +152,6 @@ mod tests {
         assert_eq!(timer.started_at(), at(0));
         assert_eq!(timer.ends_at(), at(90_000));
         assert_eq!(timer.total(), secs(90));
-        assert_eq!(timer.observed_until(), at(0));
         assert_eq!(timer.thresholds(), AlertThresholds::default());
         assert_eq!(timer.remaining(at(0)), secs(90));
         assert!(!timer.is_finished(at(0)));
@@ -307,7 +304,6 @@ mod tests {
         assert_eq!(timer.observe(at(85_000)), Some(TimerAlert::Warning));
         // The clock jumps back 10 seconds, above the threshold again, then forward.
         assert_eq!(timer.observe(at(75_000)), None);
-        assert_eq!(timer.observed_until(), at(85_000));
         assert_eq!(timer.remaining(at(75_000)), secs(15));
         assert_eq!(timer.observe(at(86_000)), None);
         assert_eq!(timer.observe(at(90_000)), Some(TimerAlert::Finished));
@@ -319,7 +315,6 @@ mod tests {
     fn a_clock_skew_before_the_start_is_harmless() {
         let mut timer = rest(90);
         assert_eq!(timer.observe(at(-60_000)), None);
-        assert_eq!(timer.observed_until(), at(0));
         assert_eq!(
             observe_all(&mut timer, &[80_000, 90_000]),
             vec![
@@ -616,21 +611,135 @@ mod tests {
         let mut timer = rest(90);
         timer.skip(at(120_000));
         assert_eq!(timer.ends_at(), at(90_000));
-        assert_eq!(timer.observed_until(), at(120_000));
         assert_eq!(timer.observe(at(121_000)), None);
     }
 
     #[test]
-    fn adjustments_during_clock_skew_do_not_panic_or_fire() {
+    fn adjustments_during_clock_skew_arm_at_their_own_now() {
         let mut timer = rest(90);
         assert_eq!(timer.observe(at(85_000)), Some(TimerAlert::Warning));
         timer.skip(at(50_000)); // The clock went back 35 seconds.
         assert_eq!(timer.ends_at(), at(50_000));
-        assert_eq!(timer.observed_until(), at(85_000));
         assert_eq!(observe_all(&mut timer, &[60_000, 90_000]), vec![]);
-        timer.add(at(40_000), ADJUSTMENT_STEP);
-        timer.subtract(at(30_000), ADJUSTMENT_STEP);
-        assert_eq!(observe_all(&mut timer, &[100_000]), vec![]);
+        timer.add(at(40_000), ADJUSTMENT_STEP); // Back 50 seconds: ends at 65s, 25s left.
+        assert_eq!(timer.ends_at(), at(65_000));
+        timer.subtract(at(30_000), ADJUSTMENT_STEP); // Back again: ends at 50s, 20s left.
+        assert_eq!(timer.ends_at(), at(50_000));
+        // The rest armed by the lifter still warns and finishes once time passes its end.
+        assert_eq!(
+            observe_all(&mut timer, &[30_000, 40_000, 45_000, 50_000, 100_000]),
+            vec![
+                (40_000, TimerAlert::Warning),
+                (50_000, TimerAlert::Finished)
+            ]
+        );
+    }
+
+    #[test]
+    fn subtract_after_a_backward_clock_step_still_finishes() {
+        let mut timer = RestTimer::start(at(0), secs(60));
+        assert_eq!(timer.observe(at(50_000)), Some(TimerAlert::Warning)); // 10s left.
+        timer.subtract(at(30_000), ADJUSTMENT_STEP); // The clock stepped back 20s, then -15s.
+        assert_eq!(timer.ends_at(), at(45_000)); // 15s left on screen.
+        let alerts: Vec<TimerAlert> = (30_001..=200_000)
+            .step_by(1_000)
+            .filter_map(|t| timer.observe(at(t)))
+            .collect();
+        assert_eq!(alerts, vec![TimerAlert::Warning, TimerAlert::Finished]);
+    }
+
+    #[test]
+    fn add_after_a_backward_clock_step_rearms() {
+        let mut timer = RestTimer::start(at(0), secs(60));
+        assert_eq!(timer.observe(at(60_000)), Some(TimerAlert::Finished));
+        assert_eq!(timer.observe(at(100_000)), None);
+        timer.add(at(70_000), ADJUSTMENT_STEP); // The clock stepped back 30s, then +15s.
+        assert_eq!(timer.ends_at(), at(85_000));
+        let alerts: Vec<TimerAlert> = (70_001..=200_000)
+            .step_by(500)
+            .filter_map(|t| timer.observe(at(t)))
+            .collect();
+        assert_eq!(alerts, vec![TimerAlert::Warning, TimerAlert::Finished]);
+    }
+
+    #[test]
+    fn add_never_alerts_with_a_threshold_above_the_step() {
+        let mut timer = RestTimer::start_with_thresholds(
+            at(0),
+            secs(30),
+            AlertThresholds::warning_before(secs(20)),
+        );
+        assert_eq!(timer.observe(at(1_000)), None);
+        timer.add(at(100_000), ADJUSTMENT_STEP); // 15s from now, already inside the 20s warning.
+        assert_eq!(timer.observe(at(100_000)), None);
+        assert_eq!(timer.observe(at(115_000)), Some(TimerAlert::Finished));
+    }
+
+    #[test]
+    fn subtract_never_alerts_with_a_threshold_above_the_result() {
+        let mut timer = RestTimer::start_with_thresholds(
+            at(0),
+            secs(60),
+            AlertThresholds::warning_before(secs(30)),
+        );
+        timer.subtract(at(10_000), secs(25)); // 25s left: inside the 30s warning.
+        assert_eq!(timer.observe(at(10_000)), None);
+        assert_eq!(timer.observe(at(20_000)), None);
+        assert_eq!(timer.observe(at(35_000)), Some(TimerAlert::Finished));
+    }
+
+    #[test]
+    fn skip_then_a_backward_clock_step_stays_silent() {
+        let mut timer = rest(90);
+        timer.skip(at(50_000));
+        assert_eq!(
+            observe_all(&mut timer, &[20_000, 49_999, 50_000, 120_000]),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn subtract_to_now_then_a_backward_clock_step_stays_silent() {
+        let mut timer = rest(90);
+        timer.subtract(at(80_000), ADJUSTMENT_STEP);
+        assert_eq!(timer.ends_at(), at(80_000));
+        assert_eq!(
+            observe_all(&mut timer, &[50_000, 75_000, 80_000, 120_000]),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn finished_then_a_backward_clock_step_does_not_finish_twice() {
+        let mut timer = rest(90);
+        assert_eq!(timer.observe(at(95_000)), Some(TimerAlert::Finished));
+        assert_eq!(
+            observe_all(&mut timer, &[60_000, 85_000, 90_000, 100_000]),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn a_clock_running_ahead_fires_early_but_once() {
+        let mut timer = rest(90);
+        // The clock was 30 minutes ahead, then corrected: the screen counts down again, silently.
+        assert_eq!(timer.observe(at(1_800_000)), Some(TimerAlert::Finished));
+        assert_eq!(timer.remaining(at(20_000)), secs(70));
+        assert_eq!(observe_all(&mut timer, &[20_000, 80_000, 90_000]), vec![]);
+    }
+
+    #[test]
+    fn skip_and_subtract_before_the_start_keep_the_start_before_the_end() {
+        let mut timer = rest(90);
+        timer.skip(at(-5_000));
+        assert_eq!(timer.ends_at(), at(-5_000));
+        assert_eq!(timer.started_at(), at(-5_000));
+        assert_eq!(timer.total(), Duration::ZERO);
+
+        let mut timer = rest(90);
+        timer.subtract(at(-5_000), secs(120));
+        assert_eq!(timer.ends_at(), at(-5_000));
+        assert_eq!(timer.started_at(), at(-5_000));
     }
 
     #[test]
@@ -648,7 +757,6 @@ mod tests {
         assert_eq!(timer.alert_between(at(80_000), at(80_000)), None);
         assert_eq!(timer.alert_between(at(90_000), at(80_000)), None);
         assert_eq!(timer.alert_between(at(90_000), at(100_000)), None);
-        assert_eq!(timer.observed_until(), at(0));
     }
 
     #[test]
@@ -659,9 +767,8 @@ mod tests {
         assert_eq!(
             json,
             format!(
-                r#"{{"started_at":{START},"ends_at":{},"observed_until":{},"warning_before_ms":10000}}"#,
-                START + 90_000,
-                START + 81_000
+                r#"{{"started_at":{START},"ends_at":{},"warning_before_ms":10000,"announced":"warning"}}"#,
+                START + 90_000
             )
         );
         let mut restored: RestTimer = serde_json::from_str(&json).unwrap();
@@ -669,5 +776,41 @@ mod tests {
         // A reload does not warn again.
         assert_eq!(restored.observe(at(82_000)), None);
         assert_eq!(restored.observe(at(90_000)), Some(TimerAlert::Finished));
+    }
+
+    #[test]
+    fn a_reload_after_the_clock_stepped_back_still_finishes() {
+        let mut timer = rest(90);
+        assert_eq!(timer.observe(at(85_000)), Some(TimerAlert::Warning));
+        let json = serde_json::to_string(&timer).unwrap();
+        let mut restored: RestTimer = serde_json::from_str(&json).unwrap();
+        // Reloaded on a clock 40 seconds behind: nothing again until the end, which still fires.
+        assert_eq!(
+            observe_all(&mut restored, &[45_000, 60_000, 85_000, 89_999]),
+            vec![]
+        );
+        assert_eq!(restored.observe(at(90_000)), Some(TimerAlert::Finished));
+    }
+
+    #[test]
+    fn deserialization_validates_the_timer() {
+        let parse = |json: &str| serde_json::from_str::<RestTimer>(json);
+        let ok =
+            r#"{"started_at":0,"ends_at":90000,"warning_before_ms":null,"announced":"nothing"}"#;
+        assert_eq!(
+            parse(ok).unwrap().ends_at(),
+            Timestamp::from_epoch_millis(90_000)
+        );
+        assert!(parse(ok).unwrap().thresholds().warning().is_none());
+        let backwards = r#"{"started_at":90001,"ends_at":90000,"warning_before_ms":10000,"announced":"nothing"}"#;
+        assert!(
+            parse(backwards)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot end before it starts")
+        );
+        let unknown =
+            r#"{"started_at":0,"ends_at":90000,"warning_before_ms":10000,"announced":"maybe"}"#;
+        assert!(parse(unknown).is_err());
     }
 }

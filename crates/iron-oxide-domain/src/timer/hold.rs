@@ -54,12 +54,6 @@ impl HoldTimer {
         self.0.thresholds()
     }
 
-    /// The latest instant alerts were computed up to.
-    #[must_use]
-    pub fn observed_until(&self) -> Timestamp {
-        self.0.observed_until
-    }
-
     /// Time held at `now`, not capped at the target (holding longer counts). Zero before the start.
     #[must_use]
     pub fn elapsed(&self, now: Timestamp) -> Duration {
@@ -78,14 +72,14 @@ impl HoldTimer {
         self.0.is_finished(now)
     }
 
-    /// The alert crossed between `previous` (excluded) and `now` (included), if any. Pure: prefer
-    /// [`observe`](Self::observe), which remembers `previous`.
+    /// The alert crossed between `previous` (excluded) and `now` (included), if any. Pure and
+    /// stateless: it ignores what was already announced, so prefer [`observe`](Self::observe).
     #[must_use]
     pub fn alert_between(&self, previous: Timestamp, now: Timestamp) -> Option<TimerAlert> {
         self.0.alert_between(previous, now)
     }
 
-    /// The alert to raise now, if any, given everything observed so far.
+    /// The alert to raise now, if any, given what was already announced.
     pub fn observe(&mut self, now: Timestamp) -> Option<TimerAlert> {
         self.0.observe(now)
     }
@@ -110,7 +104,6 @@ mod tests {
         assert_eq!(hold.ends_at(), at(60_000));
         assert_eq!(hold.target(), secs(60));
         assert_eq!(hold.thresholds(), AlertThresholds::default());
-        assert_eq!(hold.observed_until(), at(0));
         assert_eq!(hold.elapsed(at(0)), Duration::ZERO);
         assert_eq!(hold.remaining(at(0)), secs(60));
         assert_eq!(hold.elapsed(at(25_000)), secs(25));
@@ -179,7 +172,6 @@ mod tests {
             Some(TimerAlert::Finished)
         );
         assert_eq!(hold.alert_between(at(60_000), at(0)), None);
-        assert_eq!(hold.observed_until(), at(0));
     }
 
     #[test]

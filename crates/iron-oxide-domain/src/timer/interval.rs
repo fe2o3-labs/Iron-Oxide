@@ -158,14 +158,44 @@ pub enum IntervalEvent {
 
 /// Runs an [`IntervalPlan`] from a start instant.
 ///
-/// Phase changes follow the rules of the [module documentation](super): each is raised once, a
-/// gap over several phases raises only the phase the timer is in now, and clock skew raises
-/// nothing.
+/// Phase changes follow the rules of the [module documentation](super): the timer remembers the
+/// latest phase it announced, so each phase is raised at most once, a gap over several phases
+/// raises only the phase the timer is in now, and a clock stepping back raises nothing again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "IntervalTimerRepr")]
 pub struct IntervalTimer {
     plan: IntervalPlan,
     started_at: Timestamp,
-    observed_until: Timestamp,
+    /// The latest phase announced (see [`IntervalPlan::done_index`]). At most the done index.
+    announced_phase: u64,
+}
+
+/// The serialized shape of an [`IntervalTimer`], validated on the way in.
+#[derive(Deserialize)]
+struct IntervalTimerRepr {
+    plan: IntervalPlan,
+    started_at: Timestamp,
+    announced_phase: u64,
+}
+
+/// Why a persisted interval timer is rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the announced phase is past the end of the interval plan")]
+struct AnnouncedPastTheEnd;
+
+impl TryFrom<IntervalTimerRepr> for IntervalTimer {
+    type Error = AnnouncedPastTheEnd;
+
+    fn try_from(repr: IntervalTimerRepr) -> Result<Self, Self::Error> {
+        if repr.announced_phase > repr.plan.done_index() {
+            return Err(AnnouncedPastTheEnd);
+        }
+        Ok(Self {
+            plan: repr.plan,
+            started_at: repr.started_at,
+            announced_phase: repr.announced_phase,
+        })
+    }
 }
 
 /// A phase number (see [`IntervalPlan::done_index`]) and the time left in it.
@@ -181,7 +211,7 @@ impl IntervalTimer {
         Self {
             plan,
             started_at: now,
-            observed_until: now,
+            announced_phase: 0,
         }
     }
 
@@ -201,12 +231,6 @@ impl IntervalTimer {
     #[must_use]
     pub fn ends_at(&self) -> Timestamp {
         self.started_at.saturating_add_millis(self.plan.total_ms())
-    }
-
-    /// The latest instant events were computed up to.
-    #[must_use]
-    pub fn observed_until(&self) -> Timestamp {
-        self.observed_until
     }
 
     /// Whether every round is done at `now`.
@@ -234,8 +258,8 @@ impl IntervalTimer {
         }
     }
 
-    /// The phase entered between `previous` (excluded) and `now` (included), if any. Pure:
-    /// prefer [`observe`](Self::observe), which remembers `previous`.
+    /// The phase entered between `previous` (excluded) and `now` (included), if any. Pure and
+    /// stateless: it ignores what was already announced, so prefer [`observe`](Self::observe).
     ///
     /// Returns `None` when `now` is not after `previous`. When several phases were entered, only
     /// the latest one is returned.
@@ -248,18 +272,26 @@ impl IntervalTimer {
         if index <= self.position(previous).index {
             return None;
         }
-        Some(match self.phase_of(index) {
+        Some(self.event_for(index))
+    }
+
+    /// The phase change to announce now, if any: the phase the timer is in at `now`, if it is
+    /// past the latest phase already announced.
+    pub fn observe(&mut self, now: Timestamp) -> Option<IntervalEvent> {
+        let index = self.position(now).index;
+        if index <= self.announced_phase {
+            return None;
+        }
+        self.announced_phase = index;
+        Some(self.event_for(index))
+    }
+
+    fn event_for(&self, index: u64) -> IntervalEvent {
+        match self.phase_of(index) {
             (IntervalPhase::Work, round) => IntervalEvent::WorkStarted { round },
             (IntervalPhase::Rest, round) => IntervalEvent::RestStarted { round },
             (IntervalPhase::Done, _) => IntervalEvent::Completed,
-        })
-    }
-
-    /// The phase change to announce now, if any, given everything observed so far.
-    pub fn observe(&mut self, now: Timestamp) -> Option<IntervalEvent> {
-        let previous = self.observed_until;
-        self.observed_until = previous.max(now);
-        self.event_between(previous, now)
+        }
     }
 
     fn position(&self, at: Timestamp) -> Position {
@@ -430,7 +462,6 @@ mod tests {
         );
         assert_eq!(timer.started_at(), at(0));
         assert_eq!(timer.ends_at(), at(120_000));
-        assert_eq!(timer.observed_until(), at(0));
         assert_eq!(timer.remaining(at(0)), secs(120));
         assert_eq!(timer.remaining(at(100_000)), secs(20));
         assert_eq!(timer.remaining(at(200_000)), Duration::ZERO);
@@ -530,7 +561,6 @@ mod tests {
             Some(IntervalEvent::WorkStarted { round: 2 })
         );
         assert_eq!(timer.observe(at(20_000)), None);
-        assert_eq!(timer.observed_until(), at(46_000));
         assert_eq!(timer.observe(at(31_000)), None);
         assert_eq!(timer.observe(at(47_000)), None);
         assert_eq!(
@@ -572,7 +602,6 @@ mod tests {
         assert_eq!(timer.event_between(at(30_000), at(30_000)), None);
         assert_eq!(timer.event_between(at(50_000), at(40_000)), None);
         assert_eq!(timer.event_between(at(-10_000), at(0)), None);
-        assert_eq!(timer.observed_until(), at(0));
     }
 
     #[test]
@@ -585,7 +614,7 @@ mod tests {
         let json = serde_json::to_string(&timer).unwrap();
         assert_eq!(
             json,
-            r#"{"plan":{"work_ms":30000,"rest_ms":15000,"rounds":3},"started_at":1700000000000,"observed_until":1700000031000}"#
+            r#"{"plan":{"work_ms":30000,"rest_ms":15000,"rounds":3},"started_at":1700000000000,"announced_phase":1}"#
         );
         let mut restored: IntervalTimer = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, timer);
@@ -621,5 +650,39 @@ mod tests {
                 .to_string()
                 .contains("too long")
         );
+    }
+
+    #[test]
+    fn a_reload_after_the_clock_stepped_back_still_completes() {
+        let mut timer = treadmill();
+        assert_eq!(
+            timer.observe(at(80_000)),
+            Some(IntervalEvent::RestStarted { round: 2 })
+        );
+        let json = serde_json::to_string(&timer).unwrap();
+        let mut restored: IntervalTimer = serde_json::from_str(&json).unwrap();
+        // Reloaded on a clock a minute behind: phases already announced stay silent.
+        assert_eq!(
+            observe_all(
+                &mut restored,
+                &[20_000, 30_000, 45_000, 75_000, 90_000, 120_000]
+            ),
+            vec![
+                (90_000, IntervalEvent::WorkStarted { round: 3 }),
+                (120_000, IntervalEvent::Completed)
+            ]
+        );
+    }
+
+    #[test]
+    fn deserialization_rejects_an_announced_phase_past_the_end() {
+        let timer = |announced: u64| {
+            serde_json::from_str::<IntervalTimer>(&format!(
+                r#"{{"plan":{{"work_ms":30000,"rest_ms":15000,"rounds":3}},"started_at":0,"announced_phase":{announced}}}"#
+            ))
+        };
+        let mut done = timer(5).unwrap();
+        assert_eq!(done.observe(at(1_000_000)), None);
+        assert!(timer(6).unwrap_err().to_string().contains("past the end"));
     }
 }
