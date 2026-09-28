@@ -23,15 +23,15 @@ env:
 
 jobs:
   # The repo is public and built in the open: a leaked secret must fail CI.
-  # Runs on every push and PR and scans the full git history, not only the diff.
-  # The gitleaks binary is used directly (checksum-verified) because `gitleaks/gitleaks-action`
+  # Runs on every push and PR and scans the branch's full git history, not only the diff.
+  # The gitleaks binary is used directly because `gitleaks/gitleaks-action`
   # requires a paid license for organisation-owned repositories.
   gitleaks:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest
     env:
+      # renovate: datasource=github-releases depName=gitleaks/gitleaks extractVersion=^v(?<version>.+)$
       GITLEAKS_VERSION: 8.30.1
-      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -39,13 +39,41 @@ jobs:
           persist-credentials: false
       - name: Install gitleaks
         run: |
+          # Verified against the checksums published with the release.
+          cd "$RUNNER_TEMP"
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
           archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o "$RUNNER_TEMP/$archive" \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
-          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
-          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
-      - name: Scan git history
-        run: '"$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 .'
+          curl -sSfLO "$base/$archive"
+          curl -sSfLO "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep " ${archive}\$" "gitleaks_${GITLEAKS_VERSION}_checksums.txt" | sha256sum --check --strict
+          tar -xzf "$archive" gitleaks
+      - name: Scan the new commits
+        # PR: the PR's own commits (base..head). Push to main: the pushed range. Manual run: the
+        # whole history of the checked-out branch. The weekly full-history scan of main is in
+        # secret-scan.yml. Never the gitleaks default (`git log --all`), which would scan every
+        # branch fetched by `fetch-depth: 0` and fail this run for someone else's commit.
+        # Known false positives: see "Secrets" in SECURITY.md (`gitleaks:allow`, `.gitleaksignore`).
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          case "$EVENT" in
+            pull_request)
+              range="${PR_BASE_SHA}..${PR_HEAD_SHA}" ;;
+            push)
+              if git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+                range="${PUSH_BEFORE}..${GITHUB_SHA}"
+              else
+                # New branch or force push: the previous tip is unknown, scan everything.
+                range="HEAD"
+              fi ;;
+            *)
+              range="HEAD" ;;
+          esac
+          echo "Scanning commits: $range"
+          "$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 --log-opts="--no-merges $range" .
 
   # The Rust jobs below are skipped until a root `Cargo.toml` exists (it lands with #2).
   detect:
@@ -171,9 +199,9 @@ jobs:
     if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     env:
-      # Must match the `dioxus` version pinned in Cargo.toml.
+      # Must match the `dioxus` crate version in Cargo.toml (Renovate bumps both in one PR).
+      # renovate: datasource=crate depName=dioxus-cli
       DX_VERSION: 0.7.10
-      DX_SHA256: 4363e4ed2a3f1eb7f4d38d2d59aed59ce43271c44c16b425e92c89a64761fbe7
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -183,11 +211,14 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install dx (Dioxus CLI)
         run: |
+          # Official prebuilt binary, verified against the checksum published with the release.
+          cd "$RUNNER_TEMP"
+          base="https://github.com/DioxusLabs/dioxus/releases/download/v${DX_VERSION}"
           archive="dx-x86_64-unknown-linux-gnu.tar.gz"
-          curl -sSfL -o "$RUNNER_TEMP/$archive" \
-            "https://github.com/DioxusLabs/dioxus/releases/download/v${DX_VERSION}/${archive}"
-          echo "${DX_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
-          tar -xzf "$RUNNER_TEMP/$archive" -C "$HOME/.cargo/bin" dx
+          curl -sSfLO "$base/$archive"
+          curl -sSfLO "$base/dx-x86_64-unknown-linux-gnu.sha256"
+          grep " ${archive}\$" dx-x86_64-unknown-linux-gnu.sha256 | sha256sum --check --strict
+          tar -xzf "$archive" -C "$HOME/.cargo/bin" dx
           dx --version
       - name: dx bundle --web --release
         run: dx bundle --web --release -p iron-oxide-app
@@ -205,6 +236,16 @@ jobs:
           test "$(curl -sSf http://127.0.0.1:8080/healthz)" = "ok"
           curl -sSf http://127.0.0.1:8080/ | grep -q "Iron Oxide"
           curl -sSf http://127.0.0.1:8080/api/server-time | grep -Eq '^[0-9]+$'
+          # The wasm client that hydrates the page is served: the JS loader referenced by the page
+          # and every .wasm file of the bundle (with the MIME type browsers require).
+          js=$(curl -sSf http://127.0.0.1:8080/ | grep -oE 'src="[^"]*\.js"' | head -1 | cut -d'"' -f2)
+          test -n "$js"
+          curl -sSf -o /dev/null "http://127.0.0.1:8080${js}"
+          wasm_files=$(find public -name '*.wasm')
+          test -n "$wasm_files"
+          for f in $wasm_files; do
+            curl -sSf -o /dev/null -w '%{content_type}\n' "http://127.0.0.1:8080/${f#public/}" | grep -q '^application/wasm'
+          done
       - name: Server log
         if: always()
         run: cat "$RUNNER_TEMP/server.log" || true
