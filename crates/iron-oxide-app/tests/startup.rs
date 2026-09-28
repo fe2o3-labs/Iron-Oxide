@@ -73,10 +73,14 @@ fn invalid_values_are_reported_without_echoing_them() {
 }
 
 #[test]
-fn a_raw_slash_in_the_database_password_is_rejected_without_leaking_it() {
+fn a_split_database_password_is_rejected_without_leaking_it() {
     for url in [
         "postgres://leakprobe:/SECRETxyz@127.0.0.1:1/leakdb",
         "postgres://leakprobe:2024/SECRETxyz@127.0.0.1:1/leakdb",
+        "postgres://iron_oxide:12?host=SECRETxyz@127.0.0.1:1/iron_oxide",
+        "postgres://iron_oxide:?dbname=SECRETxyz@127.0.0.1:1/iron_oxide",
+        "postgres://iron_oxide:12?channel_binding=SECRETxyz@127.0.0.1:1/iron_oxide",
+        "postgres://iron_oxide:12/iron_oxide?host=SECRETxyz@127.0.0.1:1/x",
     ] {
         let output = run_server(
             "slash",
