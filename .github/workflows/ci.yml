@@ -86,24 +86,11 @@ jobs:
           echo "Scanning commits: $range"
           "$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 --log-opts="--remerge-diff $range" .
 
-  # The Rust jobs below are skipped until a root `Cargo.toml` exists (it lands with #2).
-  detect:
-    name: Detect Rust workspace
-    runs-on: ubuntu-latest
-    outputs:
-      rust: ${{ steps.check.outputs.rust }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - id: check
-        run: |
-          if [ -f Cargo.toml ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi
+  # Rust jobs: they always run (no skip gate). A skipped required check counts as passing, so a gate
+  # could let a PR merge without any Rust check.
 
   fmt:
     name: rustfmt
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -115,8 +102,6 @@ jobs:
 
   clippy:
     name: clippy
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -125,12 +110,15 @@ jobs:
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: clippy (no features)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: clippy (app, server)
+        run: cargo clippy -p iron-oxide-app --all-targets --features server --locked -- -D warnings
+      - name: clippy (app, web on wasm32)
+        run: cargo clippy -p iron-oxide-app --target wasm32-unknown-unknown --features web --locked -- -D warnings
 
   test:
     name: Unit tests
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -140,14 +128,17 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Tests that need Postgres are `#[ignore = "needs Postgres"]` and run in the integration job.
-      - run: cargo test --workspace --locked
+      - name: Test the workspace (no features)
+        run: cargo test --workspace --locked
+      - name: Test the app with the server feature
+        run: cargo test -p iron-oxide-app --features server --locked
+      - name: Domain crate builds and tests with plain cargo
+        run: cargo test -p iron-oxide-domain --locked
 
   # Builds the whole workspace with SQLX_OFFLINE=true (set globally above), so a query whose
   # `.sqlx/` metadata is missing or stale fails CI without needing a database.
   sqlx-offline:
     name: sqlx offline build
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -160,8 +151,6 @@ jobs:
 
   integration:
     name: Integration tests (Postgres)
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -196,8 +185,6 @@ jobs:
   # the page, a server function round-trip and /healthz over HTTP.
   dx-bundle:
     name: dx bundle + smoke test
-    needs: detect
-    if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     env:
       # Must match the `dioxus` crate version in Cargo.toml (Renovate bumps both in one PR).

@@ -1,0 +1,4 @@
+# `web-sys` only exposes unstable browser APIs, such as the Screen Wake Lock API used by the rest
+# timer, when compiled with this cfg. It only applies to the browser (wasm) build.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]
