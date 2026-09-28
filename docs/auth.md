@@ -87,28 +87,32 @@ This is the authorization code flow with PKCE (S256), `state` and `nonce`. It as
 `openid` scope, so we never receive an email or a name. Accounts are linked by the ID token's
 `sub` claim only, never by email.
 
-1. `google_begin(intent)` is a `POST`, so the CSRF check applies. It discovers Google's endpoints,
+1. `google_begin(intent, popup)` is a `POST`, so the CSRF check applies. It discovers Google's endpoints,
    stores a ceremony holding a random `state`, `nonce` and PKCE verifier, and returns the
    authorization URL. The client opens it:
    - **in a popup** (`window.open`) opened synchronously in the tap handler, which iOS requires
      for an installed PWA. The popup is opened blank first, then pointed at Google once the URL
      comes back;
    - **in the current window**, if popups are blocked (a full redirect).
-2. Google redirects to `GET /auth/google/callback?code=…&state=…`:
+2. Google redirects to `GET /auth/google/callback?code=…&state=…`. Google's pages send
+   `Cross-Origin-Opener-Policy: same-origin`, so by then the popup has lost its `window.opener`
+   in most browsers; nothing relies on it.
    - If the request carries the session that started the flow (a full redirect, or a popup that
      shares the app's cookies), the callback finishes the flow itself and rotates the session.
-     The page then posts `{"type":"done"}` to the opener and closes, or redirects to `/` if there
-     is no opener.
-   - Otherwise the popup has its own cookie jar, which can happen for an iOS standalone PWA.
-     The page then posts `{"type":"code","code":…,"state":…}` to the opener, and the opener calls
-     `google_finish(code, state)` in its own session. The code is useless to anyone else: it
-     needs the PKCE verifier, which never leaves the server.
-   - The page posts with `postMessage(message, <our origin>)`, so only a window on our origin can
-     receive it. It also posts on a same-origin `BroadcastChannel`. The opener ignores messages
-     from any other origin.
+     In a popup, the page announces `{"type":"done"}` on a same-origin `BroadcastChannel` (and to
+     `window.opener` with `postMessage(…, <our origin>)` if it still has one) and closes itself.
+     After a full redirect it goes back to `/`.
+   - Otherwise the popup has its own cookie jar, which can happen in an installed iOS web app.
+     The callback finds the ceremony by the SHA-256 of `state` (stored at begin) and leaves the
+     code on it (first writer wins), then closes. The app, which polls `google_finish()` every
+     2 s while it waits (timers pause in the background, so it also checks right after coming
+     back), redeems the code in its own session. The code is useless to anyone else: it needs the
+     PKCE verifier, which never leaves the server; and only the browser that went to Google
+     knows `state`.
+   - The app ignores messages from any other origin.
    - The page is sent with `Cache-Control: no-store`, `Referrer-Policy: no-referrer` (its URL
      holds the code) and a CSP that only allows its own inline script (by hash). It cannot be
-     framed, and data from the query string is escaped.
+     framed, never echoes the code, and data it shows is escaped.
 3. Finishing takes the ceremony and compares `state` in constant time. It then exchanges the code
    together with the PKCE verifier, over an HTTP client that follows no redirects. It verifies the
    ID token:
@@ -213,7 +217,7 @@ server-side: which check failed, and database errors.
 | **Credential/user mismatch** (assertion with another user's handle) | Lookup by credential id *and* user handle | `a_user_handle_pointing_at_another_account_is_rejected` |
 | **Account linking hijack** | Linked by `sub` only, never email; `(provider, subject)` unique; linking refuses a `sub` owned by another account; link ceremonies bound to the initiating user | `linking_cannot_take_over_another_accounts_google`, `a_link_ceremony_cannot_be_finished_by_another_user`, `google_sign_in_creates_then_finds_the_account_by_sub` |
 | **Token substitution** (ID token for another client, issuer or user) | `aud` = exactly our client id (and `azp` if present), `iss` = Google, RS256 signature against Google's JWKS (no HMAC algorithms), `nonce` bound to the ceremony, `exp`/`iat`; code bound to our PKCE verifier | `google_rejects_a_token_for_another_client`, `…_shared_with_another_audience`, `…_from_another_issuer`, `…_signed_with_an_unknown_key`, `google_rejects_an_hs256_token_keyed_with_the_client_secret`, `…_an_expired_token`, `google_rejects_a_nonce_mismatch`, `google_rejects_a_code_bound_to_another_pkce_challenge` |
-| **Authorization code interception** (popup relay, logs, referrer) | PKCE; `Referrer-Policy: no-referrer`, `no-store`; `postMessage` restricted to our origin | `a_popup_without_the_session_hands_the_code_to_the_opener`, `google::tests` |
+| **Authorization code interception or injection** (popup relay, logs, referrer) | PKCE; `Referrer-Policy: no-referrer`, `no-store`; the code is never put in a page; a relayed code only attaches to the live ceremony whose `state` it carries, once | `a_popup_without_the_session_relays_the_code_to_the_app`, `a_relayed_code_needs_a_live_ceremony_with_that_state`, `google::tests` |
 | **Open redirect** | No return-URL parameter anywhere; the callback only ever goes to `/`; the Google redirect URL is fixed by config and validated | `config::tests::google_redirect_url_must_be_the_app_callback` |
 | **XSS via the callback page** | Query data JSON-escaped for `<script>` and HTML-escaped; CSP allows only the page's own script by hash | `google::tests::callback_page_is_locked_down`, `script_safe_json_cannot_close_the_script_element` |
 | **Locking yourself out** | Last sign-in method cannot be removed (row lock against races) | `add_list_and_remove_passkeys_but_never_the_last_way_in`, `google_as_the_only_method_cannot_be_unlinked` |
