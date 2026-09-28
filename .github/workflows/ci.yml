@@ -128,6 +128,8 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check --workspace --all-targets --locked
+      # The sqlx queries live behind the app's `server` feature.
+      - run: cargo check -p iron-oxide-app --all-targets --features server --locked
 
   integration:
     name: Integration tests (Postgres)
@@ -136,7 +138,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        # Same image as docker-compose.yml and the Neon major version.
+        image: postgres:18.6-alpine
         # Throwaway credentials for an ephemeral CI container; not a secret.
         env:
           POSTGRES_USER: iron_oxide
@@ -145,12 +148,14 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U iron_oxide -d iron_oxide_test"
+          --health-cmd "pg_isready -h 127.0.0.1 -U iron_oxide -d iron_oxide_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
       DATABASE_URL: postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide_test
+      # Must match the `sqlx` version in Cargo.toml (held back on 0.8, see there).
+      SQLX_CLI_VERSION: 0.8.6
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -158,10 +163,24 @@ jobs:
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # Once migrations exist (#4), add `cargo sqlx prepare --workspace --check` here, after
-      # running the migrations against this database.
+      - name: Install sqlx-cli
+        run: |
+          if ! sqlx --version 2>/dev/null | grep -q "$SQLX_CLI_VERSION"; then
+            cargo install sqlx-cli --version "$SQLX_CLI_VERSION" --locked \
+              --no-default-features --features postgres,rustls
+          fi
+      - name: Apply the migrations
+        run: sqlx migrate run --source crates/iron-oxide-app/migrations
+      # Fails if `.sqlx/` is missing a query or holds a stale one: re-run `cargo sqlx prepare`.
+      - name: Check the committed sqlx query data
+        env:
+          SQLX_OFFLINE: "false"
+        run: cargo sqlx prepare --workspace --check -- --all-targets --features iron-oxide-app/server
+      # Each `sqlx::test` gets its own fresh database on this server.
       - name: Run the tests that need Postgres
-        run: cargo test --workspace --locked -- --ignored
+        run: |
+          cargo test --workspace --locked -- --ignored
+          cargo test -p iron-oxide-app --features server --locked -- --ignored
 
   # Builds the release bundle exactly as the Dockerfile (#7) will, then runs the server and checks
   # the page, a server function round-trip and /healthz over HTTP.
@@ -170,6 +189,22 @@ jobs:
     needs: detect
     if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
+    # The server connects to Postgres and applies the migrations at startup.
+    services:
+      postgres:
+        image: postgres:18.6-alpine
+        # Throwaway credentials for an ephemeral CI container; not a secret.
+        env:
+          POSTGRES_USER: iron_oxide
+          POSTGRES_PASSWORD: iron_oxide
+          POSTGRES_DB: iron_oxide
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U iron_oxide -d iron_oxide"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       # Must match the `dioxus` version pinned in Cargo.toml.
       DX_VERSION: 0.7.10
@@ -197,7 +232,7 @@ jobs:
           ls -la "$bundle"
           cd "$bundle"
           IP=127.0.0.1 PORT=8080 APP_BASE_URL=http://127.0.0.1:8080 \
-            DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide_test \
+            DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide \
             ./server > "$RUNNER_TEMP/server.log" 2>&1 &
           for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
@@ -207,6 +242,8 @@ jobs:
           test "$(curl -sSf http://127.0.0.1:8080/healthz)" = "ok"
           curl -sSf http://127.0.0.1:8080/ | grep -q "Iron Oxide"
           curl -sSf http://127.0.0.1:8080/api/server-time | grep -Eq '^[0-9]+$'
+          # The startup migrations ran.
+          test "$(PGPASSWORD=iron_oxide psql -h localhost -U iron_oxide -d iron_oxide -tAc "SELECT to_regclass('users')")" = "users"
       - name: Server log
         if: always()
         run: cat "$RUNNER_TEMP/server.log" || true

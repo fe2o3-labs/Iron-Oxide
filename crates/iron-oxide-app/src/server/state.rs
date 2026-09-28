@@ -5,13 +5,14 @@
 //! server-only argument after the route; the client-side signature does not change:
 //!
 //! ```rust,ignore
-//! use dioxus::fullstack::extract::Extension; // or dioxus::server::axum::Extension
-//! use crate::server::AppState;
+//! // Server-only imports: the client build has no `server` module and no axum.
+//! #[cfg(feature = "server")]
+//! use {crate::server::AppState, dioxus::server::axum::Extension};
 //!
 //! #[get("/api/me", state: Extension<AppState>)]
 //! pub async fn me() -> Result<Profile, ServerFnError> {
-//!     let pool = &state.db;
-//!     // ...
+//!     let pool: &sqlx::PgPool = &state.db;
+//!     // ... query with `pool`, scoped to the signed-in user.
 //! }
 //! ```
 //!
@@ -20,7 +21,12 @@
 
 use std::sync::Arc;
 
-use super::config::Config;
+use sqlx::PgPool;
+
+use super::{
+    config::Config,
+    db::{self, DbError, RetryPolicy},
+};
 
 /// Everything the server shares between requests. Cheap to clone.
 #[derive(Debug, Clone)]
@@ -28,10 +34,16 @@ pub struct AppState {
     /// The validated configuration, loaded once at startup.
     #[allow(dead_code, reason = "read by the server functions of #5 and later")]
     pub config: Arc<Config>,
+    /// The Postgres connection pool.
+    pub db: PgPool,
 }
 
 impl AppState {
-    pub fn new(config: Arc<Config>) -> Self {
-        Self { config }
+    /// Connects to Postgres (retrying while a cold Neon compute wakes up) and applies the
+    /// pending migrations.
+    pub async fn init(config: Arc<Config>) -> Result<Self, DbError> {
+        let db = db::connect(&config.database_url, RetryPolicy::STARTUP).await?;
+        db::migrate(&db).await?;
+        Ok(Self { config, db })
     }
 }

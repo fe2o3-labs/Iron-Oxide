@@ -9,6 +9,9 @@ A strength-training PWA written in Rust with [Dioxus](https://dioxuslabs.com) fu
 |---|---|
 | `crates/iron-oxide-domain` | Pure domain logic. No Dioxus, web-sys or sqlx dependencies; tests run with plain `cargo test -p iron-oxide-domain`. |
 | `crates/iron-oxide-app` | The Dioxus fullstack app. The `web` feature builds the browser client (wasm32); the `server` feature builds the axum server (SSR, server functions, `/healthz`). |
+| `crates/iron-oxide-app/migrations` | SQL migrations, embedded in the server and applied at startup. |
+| `.sqlx/` | Offline query metadata for the sqlx macros (see "Database"). |
+| `docker-compose.yml` | Local Postgres for development and tests. |
 
 ## Pinned versions
 
@@ -74,16 +77,104 @@ of them is an error. Every value is validated at startup. If anything is missing
 server prints one line per problem, naming the variable (never its value), and exits with status 1.
 Secrets are redacted from `Debug` output and logs.
 
+## Database
+
+Postgres 18 (the same major version as the Neon project) runs locally with Docker Compose
+(Compose 2.23 or newer):
+
+```sh
+docker compose up -d --wait   # dev DB `iron_oxide` and test DB `iron_oxide_test`, on localhost:5433
+docker compose down           # stop (add -v to delete the data)
+```
+
+It listens on port 5433 so it does not clash with a local Postgres on 5432; set
+`IRON_OXIDE_PG_PORT` to use another port (and change `DATABASE_URL` to match).
+
+### Migrations
+
+Migrations live in `crates/iron-oxide-app/migrations/` and are embedded in the server binary
+(`sqlx::migrate!()`). The server applies any pending ones at startup, before serving requests;
+there is no separate migration step to run on deploy.
+
+The CLI is only needed to add migrations or refresh the query data below. Install the version that
+matches the `sqlx` crate:
+
+```sh
+cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features postgres,rustls
+sqlx migrate add <name> --source crates/iron-oxide-app/migrations
+sqlx migrate run --source crates/iron-oxide-app/migrations   # optional: the server does it too
+```
+
+### Offline query data (`.sqlx/`)
+
+`sqlx::query!` macros check queries against a real database at compile time. So that CI, the
+Docker build and anyone without a running database can still compile, the query metadata is
+committed in `.sqlx/`, and CI builds with `SQLX_OFFLINE=true`. After adding or changing a query,
+with the compose database up and migrated:
+
+```sh
+cargo sqlx prepare --workspace -- --all-targets --features iron-oxide-app/server
+git add .sqlx
+```
+
+CI fails if `.sqlx/` is missing a query or holds a stale one. To compile locally without a
+database, set `SQLX_OFFLINE=true`.
+
+### Tests that need Postgres
+
+They are marked `#[ignore = "needs Postgres"]`, so plain `cargo test` skips them. Run them against
+the compose test database; each `#[sqlx::test]` creates, and then drops, its own database:
+
+```sh
+DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
+  cargo test -p iron-oxide-app --features server -- --ignored
+```
+
+### Neon (production)
+
+- Use the **direct** endpoint for `DATABASE_URL`: the host **without** `-pooler` (decision #39).
+  The startup migrations hold a session-level advisory lock, which Neon's transaction-mode pooler
+  (PgBouncer) cannot keep across transactions. The app's own pool is small (5 connections), so it
+  does not need Neon's pooler.
+- Keep `?sslmode=require` (or `verify-full`). sqlx ignores Neon's `channel_binding=require`
+  parameter with a warning; drop it from the URL to silence it.
+- The Neon project must run the same Postgres major version as `docker-compose.yml` and CI (18).
+- Pool settings follow Neon's advice: at most 5 connections, none kept while idle, idle
+  connections closed after 2 minutes, every connection recycled after 5 minutes, and the first
+  connection retried with backoff (up to 6 attempts) while a suspended compute wakes up.
+- `/healthz` runs `SELECT 1`. Anything that polls it keeps the Neon compute awake, so point a
+  frequent platform probe at it only if you accept that cost.
+
 ## Develop
 
 ```sh
-cp .env.example .env    # once
+docker compose up -d --wait   # once per session
+cp .env.example .env          # once
 dx serve --web -p iron-oxide-app
 ```
 
 This builds the client and the server, and serves the app with hot reload on http://127.0.0.1:8080.
 The page has a button that calls the `server_time` server function (`GET /api/server-time`).
-The health check is at `GET /healthz`.
+The health check is at `GET /healthz`: `200 ok` when Postgres answers, `503` otherwise.
+
+### Shared server state in server functions
+
+At startup the server loads the config, connects to Postgres and applies the migrations, then
+attaches an `AppState` (config and connection pool) to every request as an axum `Extension`.
+A server function takes it as an extra, server-only argument after the route:
+
+```rust
+#[cfg(feature = "server")]
+use {crate::server::AppState, dioxus::server::axum::Extension};
+
+#[get("/api/me", state: Extension<AppState>)]
+pub async fn me() -> Result<Profile, ServerFnError> {
+    let pool: &sqlx::PgPool = &state.db;
+    // ... query with `pool`, scoped to the signed-in user.
+}
+```
+
+`State<AppState>` does not work there, because Dioxus uses the axum router state for itself.
 
 Checks run by CI:
 
@@ -94,6 +185,10 @@ cargo clippy -p iron-oxide-app --all-targets --features server -- -D warnings
 cargo clippy -p iron-oxide-app --target wasm32-unknown-unknown --features web -- -D warnings
 cargo test --workspace
 cargo test -p iron-oxide-app --features server
+SQLX_OFFLINE=true cargo check -p iron-oxide-app --all-targets --features server
+# with Postgres (see "Database"):
+cargo sqlx prepare --workspace --check -- --all-targets --features iron-oxide-app/server
+cargo test -p iron-oxide-app --features server -- --ignored
 ```
 
 `clippy::unwrap_used`, `clippy::expect_used` and `clippy::panic` are denied workspace-wide, but
