@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT exercise_id, weight_ng FROM training_maxes\n         WHERE user_id = $1 ORDER BY exercise_id",
+  "query": "SELECT exercise_id, weight_ng, set_at FROM training_maxes\n         WHERE user_id = $1 ORDER BY exercise_id",
   "describe": {
     "columns": [
       {
@@ -12,6 +12,11 @@
         "ordinal": 1,
         "name": "weight_ng",
         "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "set_at",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
@@ -21,8 +26,9 @@
     },
     "nullable": [
       false,
+      false,
       false
     ]
   },
-  "hash": "b6ba08b6a74f062345ee91d8bd63ffe9d423a78d11211dc8dbea1ba28548f0f2"
+  "hash": "b42d96692428a5b061a65d722941ff480905c4deaf39f4c1712619dcdf75ed33"
 }

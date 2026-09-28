@@ -43,7 +43,7 @@ erDiagram
         uuid user_id PK "FK users"
         text exercise_id PK "slug"
         bigint weight_ng
-        timestamptz updated_at
+        timestamptz set_at "progression anchor"
     }
     programs {
         uuid id PK
@@ -98,7 +98,7 @@ with the sign-in `sessions` table.
 | Table | Holds | Notes |
 |---|---|---|
 | `user_settings` | Unit, bar weight, plate inventory, default rest, sound | One row per user, created by the first save. Until then the repository returns `UserSettings::defaults()`, which a test keeps equal to the column defaults. |
-| `training_maxes` | One training max per user and exercise | Per user, not per program (#56). A table rather than a jsonb map, so the weight range and the slug are checked. |
+| `training_maxes` | One training max per user and exercise, with `set_at` | Per user, not per program (#56). A table rather than a jsonb map, so the weight range and the slug are checked. `set_at` is when the lifter entered it: the progression engine (#57) replays the completed sets after it, so the engine's result is never stored back without moving `set_at` (the repository writes both together). |
 | `programs` | A program's header | `user_id` is NULL only for built-ins (`CHECK (user_id IS NOT NULL OR source_builtin_id IS NOT NULL)`); one row per built-in id (partial unique index). A copy of a built-in keeps its `source_builtin_id`. Programs are archived, not deleted, so old sessions stay linked. |
 | `program_versions` | Immutable program documents | `version` is 1, 2, ... per program. A trigger rejects every `UPDATE`; there is no update path in the repository. Rows are only deleted by cascade (program or user deleted). |
 | `active_program` | The program a user trains with | Composite FK to `programs (id, user_id)`: only one of the user's own programs (never a built-in; copy it first). |
@@ -163,7 +163,8 @@ types mirror them field for field, and switch to them once they are merged.
   "not one of yours") also map to `NotFound`. Error messages never include ids, values or
   database error text.
 - **Idempotent writes on client ids** (`sessions::start`, `sets::upsert_idempotent`):
-  `INSERT ... ON CONFLICT (id) DO NOTHING`, then, if nothing was inserted, compare with the
+  `INSERT ... ON CONFLICT DO NOTHING` (no conflict target for sessions, whose id is in two unique
+  indexes, so a concurrent duplicate is skipped rather than raised), then, if nothing was inserted, compare with the
   caller's own row only (`WHERE id = $id AND user_id = $user`):
   - same id and same content: `Change::Unchanged` (one row, safe under concurrent retries);
   - same id and different content: `RepoError::Conflict`;
@@ -182,7 +183,7 @@ types mirror them field for field, and switch to them once they are merged.
 | `programs` | `seed_builtins`, `list_builtins`, `copy_builtin`, `create`, `get`, `list`, `rename`, `set_archived`, `add_version` (a retried identical upload is a no-op), `list_versions`, `get_version`, `latest_version` |
 | `active_program` | `get`, `set`, `clear` |
 | `sessions` | `start` (idempotent), `finish` (idempotent), `get`, `get_in_progress`, `list` (history pages by `(started_at, id)`, optionally for one program) |
-| `sets` | `upsert_idempotent`, `list_for_session` |
+| `sets` | `upsert_idempotent`, `list_for_session`, `completed_for_exercise` (sets of one exercise after a time, in completed sessions of any version of a program: the progression input of #57, served by the `(user_id, exercise_id, completed_at)` index) |
 
 Rules that span rows and are checked by the domain (`SessionLog`, #54) before a write, not by the
 database: a set completed before its session started or after it ended.
