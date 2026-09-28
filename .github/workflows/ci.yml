@@ -239,7 +239,8 @@ jobs:
           tar -xzf "$archive" -C "$HOME/.cargo/bin" dx
           dx --version
       # `make smoke` builds the bundle (`make build`), then scripts/smoke-test.sh runs the server
-      # against this database and checks it over HTTP.
+      # against this database, with local sign-in settings (a random session key per run, a
+      # placeholder Google client), and checks it over HTTP.
       - name: dx bundle --web --release + smoke test
         env:
           SMOKE_DATABASE_URL: postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM auth_ceremonies WHERE expires_at <= now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "8f6ed7ce5512700e81cdd9f90f01f326ab39703d56a2945c2d6858a3716fa5cb"
+}

@@ -58,10 +58,19 @@ jobs:
         run: |
           # On failure, print both containers' logs right here (cleanup happens in the last step).
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then docker logs iron-oxide || true; docker logs postgres || true; fi' EXIT
+          # Sign-in settings as for local development (#5): a random session key per run (never
+          # committed) and a placeholder Google client (Google is never called here).
+          SESSION_KEY="$(openssl rand 64 | base64 -w0)"
+          export SESSION_KEY
           docker run --detach --init --name iron-oxide --network iron-oxide-ci \
             --publish 8080:8080 \
-            --env APP_BASE_URL=http://127.0.0.1:8080 \
+            --env APP_BASE_URL=http://localhost:8080 \
             --env DATABASE_URL=postgres://iron_oxide:iron_oxide@postgres:5432/iron_oxide \
+            --env WEBAUTHN_RP_ID=localhost --env WEBAUTHN_ORIGIN=http://localhost:8080 \
+            --env GOOGLE_CLIENT_ID=placeholder.apps.googleusercontent.com \
+            --env GOOGLE_CLIENT_SECRET=placeholder \
+            --env GOOGLE_REDIRECT_URL=http://localhost:8080/auth/google/callback \
+            --env SESSION_KEY \
             iron-oxide:ci
           for _ in $(seq 1 60); do
             curl -sf http://127.0.0.1:8080/healthz > /dev/null && break

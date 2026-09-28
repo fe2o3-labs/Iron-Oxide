@@ -135,4 +135,25 @@ pub async fn populate(pool: &PgPool, user: UserId) {
     let session = new_session(version);
     sessions::start(pool, user, &session).await.unwrap();
     set(pool, user, session.id).await;
+    populate_auth(pool, user).await;
+}
+
+/// Sign-in rows (#5) for `user`, one in each auth table, with raw SQL (the auth code writes them
+/// through WebAuthn and OIDC ceremonies).
+async fn populate_auth(pool: &PgPool, user: UserId) {
+    let id = user.as_uuid();
+    for sql in [
+        "INSERT INTO webauthn_user_handles (user_id, user_handle) VALUES ($1, gen_random_uuid())",
+        "INSERT INTO passkeys (user_id, credential_id, passkey, backup_eligible, backup_state,
+                               nickname)
+         VALUES ($1, uuid_send($1), '{}', false, false, 'test')",
+        "INSERT INTO oauth_identities (user_id, provider, subject) VALUES ($1, 'google', $1::text)",
+        "INSERT INTO sessions (id_hash, user_id, data, expires_at)
+         VALUES (decode(md5($1::text) || md5(reverse($1::text)), 'hex'), $1, '{}',
+                 now() + interval '1 day')",
+        "INSERT INTO auth_ceremonies (id, kind, user_id, state, expires_at)
+         VALUES (uuidv7(), 'passkey_add', $1, '{}', now() + interval '5 minutes')",
+    ] {
+        sqlx::query(sql).bind(id).execute(pool).await.unwrap();
+    }
 }

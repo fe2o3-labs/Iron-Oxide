@@ -143,6 +143,20 @@ const UNIQUE_KEYS_WITHOUT_OWNER: &[&str] = &[
     "programs_builtin_key",
     // Version numbers are assigned by the server, within one program (checked as the caller's).
     "program_versions_program_id_version_key",
+    // Sign-in (#5). Row ids from uuidv7() or the server; session keys are hashes of random ids;
+    // WebAuthn user handles are random, drawn by the server.
+    "passkeys_pkey",
+    "oauth_identities_pkey",
+    "sessions_pkey",
+    "auth_ceremonies_pkey",
+    "webauthn_user_handles_user_handle_key",
+    // A credential can belong to one account only (WebAuthn: reject a credential id already
+    // registered to any user). The 409 this can reveal was accepted: ids are random and never
+    // shown to other users (docs/auth.md, threat model).
+    "passkeys_credential_id_key",
+    // One account per Google identity: linking by `sub` must be global. The subject comes from a
+    // verified ID token, not from the client.
+    "oauth_identities_provider_subject_key",
 ];
 
 #[sqlx::test(migrator = "MIGRATOR")]

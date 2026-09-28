@@ -171,14 +171,20 @@ setup: ## Check and install the pinned toolchain, dx and sqlx-cli (DRY_RUN=1: on
 		WASM_TARGET='$(WASM_TARGET)' CARGO_BIN='$(CARGO_BIN)' DRY_RUN='$(DRY_RUN)' scripts/setup.sh
 DRY_RUN ?= 0
 
-env: ## Create .env from .env.example if missing (PRESET=localhost|lan|tailscale: phone presets)
+# A `SESSION_KEY=replace-me` line gets a freshly generated key (never printed).
+env: ## Create .env from .env.example if missing, with a new SESSION_KEY (PRESET=localhost|lan|tailscale)
 	$(Q)src=.env$(if $(PRESET),.$(PRESET)).example; \
 	$(call need-file,$$src,$(if $(PRESET),#62)); \
 	if [ -e .env ] && [ "$(FORCE)" != 1 ]; then \
 		$(if $(PRESET),echo "make $@: .env exists. FORCE=1 replaces it (the old one is kept as .env.bak)." >&2; exit 1,echo ".env exists: kept as it is."); \
 	else \
 		if [ -e .env ]; then mv .env .env.bak; echo "Previous .env moved to .env.bak."; fi; \
-		cp "$$src" .env; echo "Created .env from $$src. Fill in its placeholders; never commit it."; \
+		umask 077; \
+		SESSION_KEY="$$(openssl rand 64 | openssl base64 -A)" \
+			awk '$$0 == "SESSION_KEY=replace-me" { print "SESSION_KEY=" ENVIRON["SESSION_KEY"]; next } { print }' \
+			"$$src" >.env; \
+		echo "Created .env from $$src, with a generated SESSION_KEY. Fill in the other placeholders"; \
+		echo "(the Google client: see docs/auth.md); never commit it."; \
 	fi
 FORCE ?= 0
 PRESET ?=
@@ -194,7 +200,7 @@ versions: ## Show the pinned versions and the installed ones
 dev: ## Start Postgres, apply the migrations and run `dx serve` with hot reload
 	$(Q)$(MAKE) env db-up migrate
 	$(Q)$(need-dx)
-	$(Q)$(call step,dx serve on http://127.0.0.1:$(APP_PORT))
+	$(Q)$(call step,dx serve: open http://localhost:$(APP_PORT) (passkeys need localhost$(comma) not 127.0.0.1))
 	$(Q)SQLX_OFFLINE=false $(DX) serve --web -p $(APP) --port $(APP_PORT) $(DX_ARGS)
 
 run: dev ## Same as dev
@@ -341,12 +347,18 @@ docker-build: ## Build the production Docker image (IMAGE=iron-oxide)
 	$(Q)$(need-docker)
 	$(Q)docker build -t $(IMAGE) $(DOCKER_BUILD_ARGS) .
 
+# Local sign-in settings: a random session key per run and a placeholder Google client.
 docker-run: db-up ## Run the Docker image against the local Postgres, on DOCKER_PORT
-	$(Q)$(call step,$(IMAGE) on http://127.0.0.1:$(DOCKER_PORT))
+	$(Q)$(call step,$(IMAGE) on http://localhost:$(DOCKER_PORT))
 	$(Q)DATABASE_URL="$$(printf '%s' "$$SMOKE_DATABASE_URL" | sed 's/@localhost:/@host.docker.internal:/')" \
+		SESSION_KEY="$$(openssl rand 64 | openssl base64 -A)" \
 		docker run --rm --init -p 127.0.0.1:$(DOCKER_PORT):8080 \
 		--add-host=host.docker.internal:host-gateway \
 		-e APP_BASE_URL=http://localhost:$(DOCKER_PORT) -e DATABASE_URL \
+		-e WEBAUTHN_RP_ID=localhost -e WEBAUTHN_ORIGIN=http://localhost:$(DOCKER_PORT) \
+		-e GOOGLE_CLIENT_ID=placeholder.apps.googleusercontent.com -e GOOGLE_CLIENT_SECRET=placeholder \
+		-e GOOGLE_REDIRECT_URL=http://localhost:$(DOCKER_PORT)/auth/google/callback \
+		-e SESSION_KEY \
 		$(IMAGE)
 
 # Deploys only what CI has seen: a clean checkout of `main` at exactly `origin/main`, whose CI run

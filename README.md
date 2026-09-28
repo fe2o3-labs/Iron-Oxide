@@ -21,7 +21,7 @@ A strength-training PWA written in Rust with [Dioxus](https://dioxuslabs.com) fu
 
 ```sh
 make setup   # pinned Rust toolchain + wasm target, dx, sqlx-cli; lists anything else missing (Docker...)
-make dev     # .env, local Postgres, migrations, then hot reload on http://127.0.0.1:8080
+make dev     # .env, local Postgres, migrations, then hot reload on http://localhost:8080
 make check   # everything CI runs, before pushing
 ```
 
@@ -33,7 +33,7 @@ echoes them (database URLs are passed through the environment, so they never sho
 Setup
   help             List the targets
   setup            Check and install the pinned toolchain, dx and sqlx-cli (DRY_RUN=1: only check)
-  env              Create .env from .env.example if missing (PRESET=localhost|lan|tailscale: phone presets)
+  env              Create .env from .env.example if missing, with a new SESSION_KEY (PRESET=localhost|lan|tailscale)
   versions         Show the pinned versions and the installed ones
 
 Dev
@@ -146,7 +146,8 @@ that bypasses the config fails loudly.
 
 The server reads its configuration from environment variables at startup
 (`crates/iron-oxide-app/src/server/config.rs`). For local development, `make env` copies the
-template `.env.example` to `.env` if there is none yet (`make dev` does it too).
+template `.env.example` to `.env` if there is none yet (`make dev` does it too), with a freshly
+generated `SESSION_KEY`; fill in the Google client (see [docs/auth.md](docs/auth.md)).
 
 `.env` is git-ignored and optional, and only read from the working directory (not its parents);
 real environment variables take precedence over it. A malformed `.env` stops the server with the
@@ -169,16 +170,18 @@ host), stops the server with "unsupported parameter".
 | Variable | Required | What |
 |---|---|---|
 | `DATABASE_URL` | yes | Postgres connection URL (secret: it embeds the password) |
-| `APP_BASE_URL` | yes | Public URL of the app, e.g. `http://localhost:8080` |
+| `APP_BASE_URL` | yes | Public URL of the app, e.g. `http://localhost:8080`. `https://` required, except on `localhost`/`127.0.0.1` |
 | `IP`, `PORT` | no | Bind address, default `127.0.0.1:8080`. `dx serve` sets them itself |
 | `RUST_LOG` | no | Log filter, e.g. `info,sqlx=warn` |
 | `SHUTDOWN_GRACE_SECS` | no | Time in-flight requests get after a shutdown signal, 1 to 300, default 20. Keep it below the platform's kill timeout |
-| `WEBAUTHN_RP_ID`, `WEBAUTHN_ORIGIN` | with sign-in | Passkeys: our domain and exact origin |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URL` | with sign-in | Sign in with Google |
-| `SESSION_KEY` | with sign-in | Session cookie key, ≥ 64 random bytes in base64: `openssl rand 64 \| openssl base64 -A` |
+| `WEBAUTHN_RP_ID` | yes | Passkeys: our domain, e.g. `iron-oxyde.com` (`localhost` locally) |
+| `WEBAUTHN_ORIGIN` | yes | Passkeys: the origin of `APP_BASE_URL` (must be equal) |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | yes | Sign in with Google: the OAuth client (secret) |
+| `GOOGLE_REDIRECT_URL` | yes | `APP_BASE_URL`'s origin + `/auth/google/callback` (must be equal) |
+| `SESSION_KEY` | yes | Session cookie signing key (secret), ≥ 64 random bytes in base64: `openssl rand 64 \| openssl base64 -A` |
 
-The six sign-in variables are optional until sign-in lands (#5), but all-or-nothing: setting some
-of them is an error. Every value is validated at startup. If anything is missing or invalid, the
+Sign-in (passkeys, Google, sessions) is described in [docs/auth.md](docs/auth.md), including how to
+create the Google OAuth client. Every value is validated at startup. If anything is missing or invalid, the
 server prints one line per problem, naming the variable (never its value), and exits with status 1.
 Secrets are redacted from `Debug` output and logs.
 
@@ -270,7 +273,7 @@ make dev
 
 This creates `.env` if needed, starts Postgres, applies the migrations, then runs
 `dx serve --web -p iron-oxide-app`: it builds the client and the server, and serves the app with
-hot reload on http://127.0.0.1:8080.
+hot reload on http://localhost:8080 (use `localhost`, not `127.0.0.1`: passkeys are bound to it).
 The page has a button that calls the `server_time` server function (`GET /api/server-time`).
 Probes:
 
@@ -304,6 +307,25 @@ pub async fn me() -> Result<Profile, ServerFnError> {
 ```
 
 `State<AppState>` does not work there, because Dioxus uses the axum router state for itself.
+
+### The signed-in user in server functions
+
+Take the server-only `AuthUser` argument: it reads the user from the server-side session and
+rejects the call with `401` when signed out, before the body runs. Never accept a user id from the
+client. Functions that change state must be `#[post]` (the CSRF check covers every non-`GET`).
+
+```rust
+#[cfg(feature = "server")]
+use {crate::server::{AppState, auth::AuthUser}, dioxus::server::axum::Extension};
+
+#[post("/api/sets", state: Extension<AppState>, user: AuthUser)]
+pub async fn save_set(set: NewSet) -> Result<(), ServerFnError> {
+    let user_id = user.user_id(); // scope every query by it
+    // ...
+}
+```
+
+On the client, `crate::auth::api::is_unauthorized(&error)` tells a 401 apart from other errors.
 
 ### Checks
 
@@ -339,7 +361,7 @@ The app is an installable Progressive Web App.
 
 `dx` copies `public/` unchanged to the root of the site. The service worker is only registered in
 release builds, because `dx serve` rebuilds constantly and serves an unhashed `/wasm/` folder. To test
-the PWA locally, run `make run-release` and open http://127.0.0.1:8080. Chrome and
+the PWA locally, run `make run-release` and open http://localhost:8080. Chrome and
 Safari treat `localhost`/`127.0.0.1` as a secure context, so no HTTPS is needed.
 
 The page registers the worker as `/sw.js?build=<id>`, where the id is derived from the hashed asset
@@ -381,12 +403,15 @@ IP=0.0.0.0 PORT=8080 DATABASE_URL=... APP_BASE_URL=... target/dx/iron-oxide-app/
 
 ```sh
 make docker-build       # the production image, tagged iron-oxide
-make docker-run         # run it on http://127.0.0.1:8080 against the local Postgres
+make docker-run         # run it on http://localhost:8080 against the local Postgres (local sign-in settings)
 make deploy CONFIRM=1   # manual redeploy of origin/main (see below)
 make logs               # fly logs
 ```
 
-Pushes to `main` deploy through GitHub Actions. `make deploy` is for a manual redeploy: it only
+The production configuration, including the six sign-in variables, lives in Fly secrets; they must
+all be set before deploying, or the new machines refuse to start (see
+[docs/operations/deploy.md](docs/operations/deploy.md)). Pushes to `main` deploy through GitHub
+Actions. `make deploy` is for a manual redeploy: it only
 runs on a clean `main` at exactly `origin/main` (it fetches first) whose CI run passed (checked
 with `gh`), runs `make check` including the secret scan, checks the checkout again, then runs
 `fly deploy` from a pristine `git archive` of that commit in a temporary directory, so no local

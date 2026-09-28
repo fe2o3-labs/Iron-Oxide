@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM auth_ceremonies\n         WHERE kind IN ('google_sign_in', 'google_link') AND state ->> 'state' = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a38fb7931dbeaea8d95e568a07702c7c5f5eb0168463aa6ce0bd5ecf5540fce0"
+}

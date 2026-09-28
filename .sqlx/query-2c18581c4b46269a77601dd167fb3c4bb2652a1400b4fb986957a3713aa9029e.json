@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO webauthn_user_handles (user_id, user_handle) VALUES ($1, $2)\n         ON CONFLICT (user_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2c18581c4b46269a77601dd167fb3c4bb2652a1400b4fb986957a3713aa9029e"
+}
