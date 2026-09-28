@@ -1,3 +1,7 @@
+# Known gitleaks false positives, one fingerprint per line: <commit>:<file>:<rule-id>:<line>.
+# Every entry needs a comment line above it saying what it is and why it is not a secret.
+# Prefer an inline `gitleaks:allow` comment on the line itself when you can edit the source.
+
 # False positive: a fake password ("hunter2-in-a-bad-url") in a unit test checking that config
 # errors never echo DATABASE_URL. The fixture was renamed in a later commit; history is kept.
 a49bcc2f7b61137b7921d1ef11e18b5b6b0e66dc:crates/iron-oxide-app/src/server/config.rs:generic-api-key:636
