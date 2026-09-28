@@ -26,7 +26,9 @@ Code map:
 
 A `users` row holds no identifier from outside: no email, no Google subject. Identities live in
 their own tables, all `ON DELETE CASCADE` from `users`, so deleting a user (#22) removes their
-passkeys, Google link, sessions and in-flight ceremonies:
+passkeys, Google link, sessions and in-flight ceremonies. As for every user-owned table (#17),
+`user_id` is indexed and a trigger (`forbid_owner_change`) forbids changing it, so no row can move
+to another user:
 
 - `passkeys`: one row per WebAuthn credential. `credential_id` is unique across all users. The
   serialized `webauthn_rs::Passkey` (public key, algorithm, signature counter, backup flags) is the

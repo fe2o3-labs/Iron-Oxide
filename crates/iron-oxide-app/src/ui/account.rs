@@ -7,7 +7,6 @@
 
 use std::rc::Rc;
 
-use dioxus::fullstack::RequestError;
 use dioxus::prelude::*;
 
 use super::CallFailure;
@@ -63,7 +62,7 @@ enum Failure {
 /// Whether the server says we are not signed in. The 401 can arrive as a decoded server error or
 /// as a bare HTTP status, depending on where the request was rejected.
 fn is_signed_out_error(error: &ServerFnError) -> bool {
-    is_unauthorized(error) || matches!(error, ServerFnError::Request(RequestError::Status(_, 401)))
+    is_unauthorized(error)
 }
 
 /// The text shown for a failed server call. The sign-in server functions only put messages
@@ -264,7 +263,11 @@ pub fn Account() -> Element {
 /// Handles one Google callback message, if this window is waiting for one.
 async fn handle_google_message(auth: Auth, message: GoogleCallbackMessage) {
     let Some(intent) = auth.google.peek().as_ref().copied() else {
-        // Not ours, or the copy of a message already handled.
+        // Not waiting (already handled, or the user pressed Cancel). A late `done` still means
+        // the session changed server-side: reload so the panel matches it.
+        if message == GoogleCallbackMessage::Done && auth.busy.peek().is_none() {
+            auth.load().await;
+        }
         return;
     };
     auth.end_google();
@@ -671,6 +674,7 @@ fn PasskeyRow(auth: Auth, passkey: PasskeyInfo, last_method: bool) -> Element {
 mod tests {
     use super::*;
     use crate::auth::types::UserId;
+    use dioxus::fullstack::RequestError;
 
     fn me() -> Me {
         Me {

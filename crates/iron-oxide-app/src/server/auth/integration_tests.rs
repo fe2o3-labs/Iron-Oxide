@@ -1080,3 +1080,41 @@ async fn cleanup_deletes_expired_sessions_and_ceremonies(db: PgPool) {
     assert_eq!(deleted, 3, "two sessions and one ceremony");
     assert_eq!(session_rows(&db).await, 0);
 }
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn auth_rows_never_change_owner(db: PgPool) {
+    let app = TestApp::new(db.clone()).await;
+    let mut browser = app.browser();
+    let (me1, _) = sign_up(&mut browser, &mut Passkey::new(), "a").await;
+    google_sign_in_or_link(&app, &mut browser, "Link", "sub-owner")
+        .await
+        .unwrap();
+    let _: CreationChallengeResponse = browser.call(ADD_BEGIN, json!({})).await.unwrap();
+    let other: uuid::Uuid = sqlx::query_scalar("INSERT INTO users DEFAULT VALUES RETURNING id")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    for table in [
+        "passkeys",
+        "oauth_identities",
+        "sessions",
+        "auth_ceremonies",
+    ] {
+        let error = sqlx::query(&format!(
+            "UPDATE {table} SET user_id = $2 WHERE user_id = $1"
+        ))
+        .bind(me1.user_id.as_uuid())
+        .bind(other)
+        .execute(&db)
+        .await
+        .unwrap_err();
+        let db_error = error.as_database_error().unwrap();
+        assert_eq!(
+            db_error.code().as_deref(),
+            Some("23000"),
+            "{table}: {error}"
+        );
+    }
+    me(&mut browser).await.unwrap();
+}

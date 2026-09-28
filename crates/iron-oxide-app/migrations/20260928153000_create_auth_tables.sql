@@ -1,6 +1,22 @@
 -- Sign-in (#5): passkeys, Google identities, server-side sessions and one-time ceremony state.
 -- Every row that belongs to a user is deleted with the user (ON DELETE CASCADE, #22).
 -- See docs/auth.md for the design.
+--
+-- Like every user-owned table (#17): `user_id` cascades from `users`, is indexed, and never
+-- changes once written (trigger `forbid_owner_change`).
+
+-- Rejects any change of `user_id`: a row never moves to another user. Same definition as in the
+-- training schema migration (#17); `OR REPLACE` so either migration can come first.
+CREATE OR REPLACE FUNCTION forbid_owner_change() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.user_id IS DISTINCT FROM OLD.user_id THEN
+        RAISE EXCEPTION 'the owner of a % row cannot change', TG_TABLE_NAME
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
 
 -- WebAuthn credentials (passkeys). A user may have several.
 CREATE TABLE passkeys (
@@ -21,6 +37,8 @@ CREATE TABLE passkeys (
 );
 
 CREATE INDEX passkeys_user_id_idx ON passkeys (user_id);
+CREATE TRIGGER passkeys_owner BEFORE UPDATE OF user_id ON passkeys
+    FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
 
 -- External identities (Sign in with Google). Linked by the provider's stable subject (`sub`),
 -- never by email.
@@ -39,10 +57,14 @@ CREATE TABLE oauth_identities (
     UNIQUE (user_id, provider)
 );
 
+CREATE TRIGGER oauth_identities_owner BEFORE UPDATE OF user_id ON oauth_identities
+    FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
+
 -- Server-side sessions (tower-sessions, through our own store in server/auth/session.rs).
 -- The cookie holds a random session ID; only its SHA-256 is stored here, so a copy of this table
--- cannot be replayed as cookies. `user_id` is set once signed in, so deleting the user deletes
--- their sessions and "sign out everywhere" is one DELETE.
+-- cannot be replayed as cookies. `user_id` is written once, when the signed-in session is created
+-- (sign-in always starts a new row), so deleting the user deletes their sessions and "sign out
+-- everywhere" is one DELETE. NULL for a signed-out session holding a ceremony.
 CREATE TABLE sessions (
     id_hash    bytea       PRIMARY KEY CHECK (octet_length(id_hash) = 32),
     user_id    uuid        REFERENCES users (id) ON DELETE CASCADE,
@@ -53,7 +75,9 @@ CREATE TABLE sessions (
 );
 
 CREATE INDEX sessions_expires_at_idx ON sessions (expires_at);
-CREATE INDEX sessions_user_id_idx ON sessions (user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX sessions_user_id_idx ON sessions (user_id);
+CREATE TRIGGER sessions_owner BEFORE UPDATE OF user_id ON sessions
+    FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
 
 -- In-flight sign-in ceremonies: the WebAuthn challenge state, or the Google state, nonce and PKCE
 -- verifier. Short-lived and single-use: consumed with DELETE ... RETURNING, so two concurrent
@@ -78,3 +102,6 @@ CREATE TABLE auth_ceremonies (
 );
 
 CREATE INDEX auth_ceremonies_expires_at_idx ON auth_ceremonies (expires_at);
+CREATE INDEX auth_ceremonies_user_id_idx ON auth_ceremonies (user_id);
+CREATE TRIGGER auth_ceremonies_owner BEFORE UPDATE OF user_id ON auth_ceremonies
+    FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();

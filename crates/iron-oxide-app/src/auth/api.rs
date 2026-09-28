@@ -19,10 +19,15 @@ use super::types::{GoogleIntent, Me, PasskeyId};
 #[cfg(feature = "server")]
 use crate::server::auth::{AuthContext, AuthUser, google, passkeys};
 
-/// Whether a server function failed because the user is not signed in (HTTP 401).
+/// Whether a server function failed because the user is not signed in (HTTP 401). The 401 can
+/// arrive as a decoded server error or as a bare HTTP status, depending on the client path.
 #[must_use]
 pub fn is_unauthorized(error: &ServerFnError) -> bool {
-    matches!(error, ServerFnError::ServerError { code: 401, .. })
+    matches!(
+        error,
+        ServerFnError::ServerError { code: 401, .. }
+            | ServerFnError::Request(dioxus::fullstack::RequestError::Status(_, 401))
+    )
 }
 
 /// The signed-in user. Fails with 401 when signed out.
@@ -126,5 +131,13 @@ mod tests {
         assert!(!is_unauthorized(&error(403)));
         assert!(!is_unauthorized(&error(500)));
         assert!(!is_unauthorized(&ServerFnError::new("x")));
+        let status = |code| {
+            ServerFnError::Request(dioxus::fullstack::RequestError::Status(
+                "x".to_owned(),
+                code,
+            ))
+        };
+        assert!(is_unauthorized(&status(401)));
+        assert!(!is_unauthorized(&status(500)));
     }
 }

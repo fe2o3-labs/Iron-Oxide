@@ -209,17 +209,17 @@ impl SessionStore for PgSessionStore {
         ))
     }
 
-    /// Updates an existing, unexpired session. Never inserts: a session deleted meanwhile (sign
+    /// Updates an existing, unexpired session. Never changes its `user_id` (set when the row is
+    /// created: sign-in always creates a new session). Never inserts: a session deleted meanwhile (sign
     /// out in another tab, account deletion, expiry) must stay deleted, not be resurrected by a
     /// request that loaded it earlier.
     async fn save(&self, record: &Record) -> session_store::Result<()> {
         let data = encode(record)?;
         let updated = sqlx::query!(
             "UPDATE sessions
-             SET user_id = $2, data = $3, expires_at = $4, updated_at = now()
+             SET data = $2, expires_at = $3, updated_at = now()
              WHERE id_hash = $1 AND expires_at > now()",
             id_hash(&record.id),
-            record_user(record),
             data,
             record.expiry_date,
         )
