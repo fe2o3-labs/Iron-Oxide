@@ -6,11 +6,15 @@
 //! nothing, so hammering a limit does not push it further away.
 //!
 //! A key whose TAT is in the past has a full bucket, exactly like a key never seen: forgetting it
-//! loses nothing. Memory is bounded by count, not by time: when a new key arrives and the table
-//! holds [`KeyedLimiter::capacity`] keys, the full-bucket keys are dropped first, then (if that
-//! freed too little) the keys closest to a full bucket. Keys that are being limited are the last
-//! to go. Each such sweep frees at least an eighth of the table, so its cost is amortised over
-//! many inserts and a flood of new keys cannot turn it into a CPU sink.
+//! loses nothing, and those are the only keys ever forgotten. Memory is bounded by count, not by
+//! time: the table holds at most [`KeyedLimiter::capacity`] keys. When a new key arrives and the
+//! table is full, the full-bucket keys are dropped. If none are, no key is evicted (evicting a key
+//! that is being limited would hand it a fresh burst, so cycling through more keys than the table
+//! holds would have no limit at all) and the new key gets the limiter's [`WhenFull`] policy.
+//!
+//! The sweep scans the table, so it only runs when it can free something: while the table is
+//! full, the limiter remembers the earliest moment any stored key refills and does not sweep
+//! before it. A flood of new keys therefore cannot turn the sweep into a CPU sink.
 
 use std::{
     collections::HashMap,
@@ -90,22 +94,44 @@ pub struct Limited {
 /// The default number of keys a limiter remembers.
 pub const DEFAULT_CAPACITY: usize = 50_000;
 
+/// What happens to a new key when the table is full and no stored key has refilled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhenFull {
+    /// Refuse it (fail closed), until the earliest stored key refills.
+    Refuse,
+    /// Let the request through without tracking the key (fail open), and log it.
+    Allow,
+}
+
 /// A per-key rate limit. Cheap to share behind an `Arc`.
 #[derive(Debug)]
 pub struct KeyedLimiter<K> {
     quota: Quota,
     capacity: usize,
-    tats: Mutex<HashMap<K, Instant>>,
+    when_full: WhenFull,
+    table: Mutex<Table<K>>,
+}
+
+#[derive(Debug)]
+struct Table<K> {
+    tats: HashMap<K, Instant>,
+    /// Set while the table is full of keys that have not refilled: the earliest TAT among them.
+    /// Stored TATs only grow and nothing is inserted while full, so no key refills before it.
+    full_until: Option<Instant>,
 }
 
 impl<K: Hash + Eq + Copy> KeyedLimiter<K> {
     /// A limiter remembering at most `capacity` keys (at least 1).
     #[must_use]
-    pub fn new(quota: Quota, capacity: usize) -> Self {
+    pub fn new(quota: Quota, capacity: usize, when_full: WhenFull) -> Self {
         Self {
             quota,
             capacity: capacity.max(1),
-            tats: Mutex::new(HashMap::new()),
+            when_full,
+            table: Mutex::new(Table {
+                tats: HashMap::new(),
+                full_until: None,
+            }),
         }
     }
 
@@ -120,14 +146,15 @@ impl<K: Hash + Eq + Copy> KeyedLimiter<K> {
     #[cfg(test)]
     #[must_use]
     pub fn len(&self) -> usize {
-        self.lock().len()
+        self.lock().tats.len()
     }
 
     /// Counts one request from `key` at `now`.
     pub fn check(&self, key: K, now: Instant) -> Result<(), Limited> {
         let quota = self.quota;
-        let mut tats = self.lock();
-        let tat = tats.get(&key).copied().unwrap_or(now).max(now);
+        let mut table = self.lock();
+        let stored = table.tats.get(&key).copied();
+        let tat = stored.unwrap_or(now).max(now);
         let next = tat + quota.period;
         let ahead = next.saturating_duration_since(now);
         if ahead > quota.tolerance() {
@@ -135,38 +162,48 @@ impl<K: Hash + Eq + Copy> KeyedLimiter<K> {
                 retry_after: ahead - quota.tolerance(),
             });
         }
-        if !tats.contains_key(&key) && tats.len() >= self.capacity {
-            Self::make_room(&mut tats, self.capacity, now);
+        if stored.is_none()
+            && table.tats.len() >= self.capacity
+            && let Some(full_until) = self.make_room(&mut table, now)
+        {
+            return match self.when_full {
+                WhenFull::Refuse => Err(Limited {
+                    retry_after: full_until.saturating_duration_since(now),
+                }),
+                WhenFull::Allow => Ok(()),
+            };
         }
-        tats.insert(key, next);
+        table.tats.insert(key, next);
         Ok(())
     }
 
-    /// Frees at least an eighth of the table (and at least one slot).
-    fn make_room(tats: &mut HashMap<K, Instant>, capacity: usize, now: Instant) {
+    /// Drops the keys whose bucket has refilled. Returns `None` if there is room now, else the
+    /// earliest moment a stored key refills.
+    fn make_room(&self, table: &mut Table<K>, now: Instant) -> Option<Instant> {
+        if let Some(full_until) = table.full_until
+            && now < full_until
+        {
+            return Some(full_until);
+        }
         // Full buckets carry no state.
-        tats.retain(|_, tat| *tat > now);
-        let target = capacity - (capacity / 8).max(1);
-        if tats.len() <= target {
-            return;
+        table.tats.retain(|_, tat| *tat > now);
+        if table.tats.len() < self.capacity {
+            table.full_until = None;
+            return None;
         }
-        let excess = tats.len() - target;
-        let mut by_tat: Vec<(K, Instant)> = tats.iter().map(|(key, tat)| (*key, *tat)).collect();
-        // The `excess` keys closest to a full bucket, in no particular order.
-        by_tat.select_nth_unstable_by_key(excess - 1, |(_, tat)| *tat);
-        for (key, _) in &by_tat[..excess] {
-            tats.remove(key);
-        }
+        let earliest = table.tats.values().min().copied().unwrap_or(now);
+        table.full_until = Some(earliest);
         dioxus::logger::tracing::warn!(
-            capacity,
-            evicted = excess,
-            "rate limiter table full: forgot the least limited keys"
+            capacity = self.capacity,
+            policy = ?self.when_full,
+            "rate limiter table full of limited keys: new keys are refused or let through untracked"
         );
+        Some(earliest)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<K, Instant>> {
-        // The map stays consistent even if a holder panicked: every update is one insert.
-        self.tats.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> std::sync::MutexGuard<'_, Table<K>> {
+        // The table stays consistent even if a holder panicked: every update is one statement.
+        self.table.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -201,7 +238,7 @@ mod tests {
 
     #[test]
     fn a_burst_is_allowed_then_the_next_request_is_limited() {
-        let limiter = KeyedLimiter::new(quota(3, 10 * SEC), 10);
+        let limiter = KeyedLimiter::new(quota(3, 10 * SEC), 10, WhenFull::Refuse);
         let now = Instant::now();
         for _ in 0..3 {
             assert_eq!(limiter.check(1, now), Ok(()));
@@ -216,7 +253,7 @@ mod tests {
 
     #[test]
     fn the_bucket_refills_one_request_per_period() {
-        let limiter = KeyedLimiter::new(quota(2, 10 * SEC), 10);
+        let limiter = KeyedLimiter::new(quota(2, 10 * SEC), 10, WhenFull::Refuse);
         let start = Instant::now();
         limiter.check(1, start).unwrap();
         limiter.check(1, start).unwrap();
@@ -234,7 +271,7 @@ mod tests {
 
     #[test]
     fn refused_requests_do_not_push_the_limit_further() {
-        let limiter = KeyedLimiter::new(quota(1, 10 * SEC), 10);
+        let limiter = KeyedLimiter::new(quota(1, 10 * SEC), 10, WhenFull::Refuse);
         let start = Instant::now();
         limiter.check(1, start).unwrap();
         for i in 1..10 {
@@ -245,7 +282,7 @@ mod tests {
 
     #[test]
     fn keys_are_independent() {
-        let limiter = KeyedLimiter::new(quota(1, 60 * SEC), 10);
+        let limiter = KeyedLimiter::new(quota(1, 60 * SEC), 10, WhenFull::Refuse);
         let now = Instant::now();
         assert_eq!(limiter.check("a", now), Ok(()));
         assert!(limiter.check("a", now).is_err());
@@ -254,18 +291,20 @@ mod tests {
 
     #[test]
     fn the_table_never_holds_more_than_its_capacity() {
-        let limiter = KeyedLimiter::new(quota(5, 60 * SEC), 64);
-        let now = Instant::now();
-        for key in 0..10_000_u32 {
-            assert_eq!(limiter.check(key, now), Ok(()), "a new key is allowed");
-            assert!(limiter.len() <= 64);
+        for when_full in [WhenFull::Refuse, WhenFull::Allow] {
+            let limiter = KeyedLimiter::new(quota(5, 60 * SEC), 64, when_full);
+            let now = Instant::now();
+            for key in 0..10_000_u32 {
+                let _ = limiter.check(key, now);
+                assert!(limiter.len() <= 64);
+            }
+            assert_eq!(limiter.len(), 64);
         }
-        assert!(limiter.len() > 64 - 64 / 8 - 1);
     }
 
     #[test]
-    fn full_buckets_are_forgotten_first() {
-        let limiter = KeyedLimiter::new(quota(1, 10 * SEC), 8);
+    fn full_buckets_are_forgotten_to_make_room() {
+        let limiter = KeyedLimiter::new(quota(1, 10 * SEC), 8, WhenFull::Refuse);
         let start = Instant::now();
         for key in 0..8_u32 {
             limiter.check(key, start).unwrap();
@@ -281,29 +320,84 @@ mod tests {
         );
     }
 
+    /// The reviewer's key-cycling attack: more drained keys than the table holds, clock frozen.
+    /// Evicting limited keys would hand them fresh bursts round after round.
     #[test]
-    fn when_every_key_is_limited_the_least_limited_go_first() {
-        let limiter = KeyedLimiter::new(quota(1, 100 * SEC), 8);
+    fn cycling_through_more_keys_than_the_table_holds_gains_nothing() {
+        for when_full in [WhenFull::Refuse, WhenFull::Allow] {
+            let limiter = KeyedLimiter::new(quota(5, 12 * 60 * SEC), 64, when_full);
+            let now = Instant::now();
+            let mut allowed_per_key = [0_u32; 80];
+            for _round in 0..100 {
+                for key in 0..80_u32 {
+                    for _ in 0..5 {
+                        if limiter.check(key, now).is_ok() {
+                            allowed_per_key[key as usize] += 1;
+                        }
+                    }
+                }
+            }
+            // The 64 keys that got in used their burst once, and never got another.
+            assert!(
+                allowed_per_key[..64].iter().all(|n| *n == 5),
+                "{when_full:?}"
+            );
+            let late: u32 = allowed_per_key[64..].iter().sum();
+            match when_full {
+                // Fail closed: the keys that found the table full got nothing.
+                WhenFull::Refuse => assert_eq!(late, 0),
+                // Fail open: they went through untracked, and no tracked key was reset.
+                WhenFull::Allow => assert_eq!(late, 16 * 5 * 100),
+            }
+        }
+    }
+
+    #[test]
+    fn a_full_table_refuses_new_keys_until_a_stored_key_refills() {
+        let limiter = KeyedLimiter::new(quota(1, 100 * SEC), 8, WhenFull::Refuse);
         let start = Instant::now();
         // Keys 0..8 are limited, key k until start + k s + 100 s.
         for key in 0..8_u32 {
             limiter.check(key, start + SEC * key).unwrap();
         }
         let now = start + 8 * SEC;
-        limiter.check(100, now).unwrap();
-        assert!(limiter.len() <= 8);
-        // Key 0 (the closest to refilled) was forgotten; the most limited key was kept.
-        assert_eq!(limiter.check(0, now), Ok(()));
-        assert!(limiter.check(7, now).is_err());
+        let refused = limiter.check(100, now).unwrap_err();
+        assert_eq!(refused.retry_after, 92 * SEC, "until key 0 refills");
+        // Every stored key is still limited: none was evicted.
+        for key in 0..8_u32 {
+            assert!(limiter.check(key, now).is_err(), "key {key}");
+        }
+        assert!(limiter.check(100, start + 99 * SEC).is_err());
+        // Key 0 refills at start + 100 s: its slot goes to the new key.
+        assert_eq!(limiter.check(100, start + 100 * SEC), Ok(()));
+        assert_eq!(limiter.len(), 8);
+        assert!(limiter.check(1, start + 100 * SEC).is_err());
+    }
+
+    #[test]
+    fn a_full_table_lets_new_keys_through_untracked_when_failing_open() {
+        let limiter = KeyedLimiter::new(quota(1, 100 * SEC), 4, WhenFull::Allow);
+        let now = Instant::now();
+        for key in 0..4_u32 {
+            limiter.check(key, now).unwrap();
+        }
+        for _ in 0..10 {
+            assert_eq!(limiter.check(100, now), Ok(()));
+        }
+        assert_eq!(limiter.len(), 4);
+        for key in 0..4_u32 {
+            assert!(limiter.check(key, now).is_err(), "key {key} stays limited");
+        }
     }
 
     #[test]
     fn a_capacity_of_zero_is_one() {
-        let limiter = KeyedLimiter::new(quota(1, SEC), 0);
+        let limiter = KeyedLimiter::new(quota(1, SEC), 0, WhenFull::Refuse);
         assert_eq!(limiter.capacity(), 1);
         let now = Instant::now();
         limiter.check(1, now).unwrap();
-        limiter.check(2, now).unwrap();
+        assert!(limiter.check(2, now).is_err());
+        assert_eq!(limiter.check(2, now + SEC), Ok(()));
         assert_eq!(limiter.len(), 1);
     }
 

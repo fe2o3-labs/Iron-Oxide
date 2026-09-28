@@ -9,7 +9,9 @@
 //! `X-Forwarded-For` is never read.
 //!
 //! IPv6 clients are keyed by their `/64`: one host usually gets a whole `/64` and could otherwise
-//! rotate through addresses to escape its limit (and fill the limiter's table).
+//! rotate through addresses to escape its limit (and fill the limiter's table). A `/48` (one site,
+//! 65,536 `/64`s) is cheap to get too, so the sign-in groups also limit each IPv6 `/48` as a whole
+//! ([`ClientKey::ipv6_site`]).
 
 use std::{
     fmt,
@@ -104,11 +106,15 @@ fn canonical(ip: IpAddr) -> IpAddr {
     }
 }
 
-/// The per-IP rate-limit key: an IPv4 address, an IPv6 `/64`, or "unknown" (no address).
+/// The per-IP rate-limit key: an IPv4 address, an IPv6 `/64` or `/48`, or "unknown" (no
+/// address).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClientKey {
     V4(Ipv4Addr),
+    /// The first 64 bits.
     V6Net(u64),
+    /// The first 48 bits, for the aggregate limit.
+    V6Site(u64),
     Unknown,
 }
 
@@ -119,6 +125,15 @@ impl ClientKey {
             Some(IpAddr::V4(ip)) => Self::V4(ip),
             Some(IpAddr::V6(ip)) => Self::V6Net(v6_net(ip)),
             None => Self::Unknown,
+        }
+    }
+
+    /// For an IPv6 `/64`, the `/48` it belongs to; `None` for anything else.
+    #[must_use]
+    pub fn ipv6_site(self) -> Option<Self> {
+        match self {
+            Self::V6Net(net) => Some(Self::V6Site(net >> 16)),
+            Self::V4(_) | Self::V6Site(_) | Self::Unknown => None,
         }
     }
 }
@@ -256,6 +271,23 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, other);
         assert_eq!(a, ClientKey::V6Net(0x2001_0db8_0001_0002));
+    }
+
+    #[test]
+    fn ipv6_sites_are_the_48_and_only_for_ipv6() {
+        let a = ClientKey::of(Some(ip("2001:db8:1:2::1")));
+        let same_site = ClientKey::of(Some(ip("2001:db8:1:ffff::1")));
+        let other_site = ClientKey::of(Some(ip("2001:db8:2:2::1")));
+        assert_eq!(a.ipv6_site(), Some(ClientKey::V6Site(0x2001_0db8_0001)));
+        assert_eq!(a.ipv6_site(), same_site.ipv6_site());
+        assert_ne!(a.ipv6_site(), other_site.ipv6_site());
+        assert_eq!(ClientKey::of(Some(ip(PUBLIC))).ipv6_site(), None);
+        assert_eq!(
+            ClientKey::of(Some(ip("::ffff:203.0.113.9"))).ipv6_site(),
+            None
+        );
+        assert_eq!(ClientKey::Unknown.ipv6_site(), None);
+        assert_eq!(ClientKey::V6Site(1).ipv6_site(), None);
     }
 
     #[test]

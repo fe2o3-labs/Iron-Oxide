@@ -37,7 +37,7 @@ use dioxus::logger::tracing;
 use dioxus::server::axum::{
     body::Body,
     extract::{ConnectInfo, Request, State},
-    http::{HeaderValue, Method, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -47,12 +47,14 @@ use tower_sessions::Session;
 pub use self::client_ip::ClientIpSource;
 use self::{
     client_ip::{ClientKey, client_ip},
-    limiter::{DEFAULT_CAPACITY, KeyedLimiter, Limited, Quota, retry_after_secs},
+    limiter::{DEFAULT_CAPACITY, KeyedLimiter, Limited, Quota, WhenFull, retry_after_secs},
 };
 use super::{auth::session::keys, config::GOOGLE_CALLBACK_PATH};
 use crate::{auth::types::UserId, rate_limit::RETRY_AFTER_SECS};
 
 const MINUTE: Duration = Duration::from_secs(60);
+/// The header name, lowercase (not in `http::header` in the version axum uses).
+const SEC_FETCH_DEST: &str = "sec-fetch-dest";
 
 /// A family of routes sharing limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -141,11 +143,16 @@ pub fn classify(method: &Method, path: &str) -> Option<RouteGroup> {
     )
 }
 
-/// One group's limits: per client IP, and per signed-in user. `None` is unlimited.
+/// One group's limits: per client IP (an IPv4 address or an IPv6 `/64`), per IPv6 `/48`, and
+/// per signed-in user. `None` is unlimited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupLimits {
     pub per_ip: Option<Quota>,
+    /// An aggregate over each IPv6 `/48`, checked before `per_ip`: one site holds 65,536 `/64`s.
+    pub per_ipv6_48: Option<Quota>,
     pub per_user: Option<Quota>,
+    /// What a new key gets when a limiter's table is full of limited keys.
+    pub when_full: WhenFull,
 }
 
 /// Every group's limits, and how many keys each limiter remembers.
@@ -180,31 +187,48 @@ impl Default for Limits {
         const WRITE_PER_IP: Quota = Quota::per(600, MINUTE);
         // One user: a long workout's sets in one burst, then 2 per second.
         const WRITE_PER_USER: Quota = Quota::per(120, MINUTE);
+        // One IPv6 site (`/48`): four `/64`s' worth of sign-ins.
+        const SIGN_IN_PER_IPV6_48: Quota = Quota::per(120, MINUTE);
+        // The sign-in groups create session and ceremony rows: when a table is full of limited
+        // keys, a new key is refused rather than let through untracked. The other groups need a
+        // signed-in session (or do nothing without one), so they fail open.
         Self {
             auth_begin: GroupLimits {
                 per_ip: Some(SIGN_IN_PER_IP),
+                per_ipv6_48: Some(SIGN_IN_PER_IPV6_48),
                 per_user: Some(ACCOUNT_PER_USER),
+                when_full: WhenFull::Refuse,
             },
             auth_finish: GroupLimits {
                 per_ip: Some(SIGN_IN_PER_IP),
+                per_ipv6_48: Some(SIGN_IN_PER_IPV6_48),
                 per_user: Some(ACCOUNT_PER_USER),
+                when_full: WhenFull::Refuse,
             },
             // Per IP only: the per-user layer does not wrap this route (see `server::router`).
             google_callback: GroupLimits {
                 per_ip: Some(SIGN_IN_PER_IP),
+                per_ipv6_48: Some(SIGN_IN_PER_IPV6_48),
                 per_user: None,
+                when_full: WhenFull::Refuse,
             },
             session: GroupLimits {
                 per_ip: Some(SESSION_PER_IP),
+                per_ipv6_48: None,
                 per_user: None,
+                when_full: WhenFull::Allow,
             },
             account: GroupLimits {
                 per_ip: Some(ACCOUNT_PER_IP),
+                per_ipv6_48: None,
                 per_user: Some(ACCOUNT_PER_USER),
+                when_full: WhenFull::Allow,
             },
             write: GroupLimits {
                 per_ip: Some(WRITE_PER_IP),
+                per_ipv6_48: None,
                 per_user: Some(WRITE_PER_USER),
+                when_full: WhenFull::Allow,
             },
             capacity: DEFAULT_CAPACITY,
         }
@@ -247,6 +271,7 @@ struct Inner {
 #[derive(Debug)]
 struct GroupLimiters {
     per_ip: Option<KeyedLimiter<ClientKey>>,
+    per_ipv6_48: Option<KeyedLimiter<ClientKey>>,
     per_user: Option<KeyedLimiter<UserId>>,
 }
 
@@ -256,13 +281,13 @@ impl RateLimiter {
         let limits = &config.limits;
         let groups = RouteGroup::ALL.map(|group| {
             let quotas = limits.group(group);
+            let limiter = |quota| KeyedLimiter::new(quota, limits.capacity, quotas.when_full);
             GroupLimiters {
-                per_ip: quotas
-                    .per_ip
-                    .map(|quota| KeyedLimiter::new(quota, limits.capacity)),
+                per_ip: quotas.per_ip.map(limiter),
+                per_ipv6_48: quotas.per_ipv6_48.map(limiter),
                 per_user: quotas
                     .per_user
-                    .map(|quota| KeyedLimiter::new(quota, limits.capacity)),
+                    .map(|quota| KeyedLimiter::new(quota, limits.capacity, quotas.when_full)),
             }
         });
         Self {
@@ -294,18 +319,43 @@ pub async fn per_ip(State(limiter): State<RateLimiter>, request: Request, next: 
     let Some(group) = classify(request.method(), request.uri().path()) else {
         return next.run(request).await;
     };
-    let Some(ip_limiter) = &limiter.group(group).per_ip else {
-        return next.run(request).await;
-    };
+    if group == RouteGroup::GoogleCallback && !is_a_navigation(request.headers()) {
+        // Google sends the browser here as a top-level navigation. Anything else (an `<img>` or
+        // a `fetch` from another site) is refused before it counts against the IP's limit.
+        tracing::debug!("Google callback refused: not a document navigation");
+        return (StatusCode::FORBIDDEN, "Not a navigation.").into_response();
+    }
+    let limiters = limiter.group(group);
     let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| addr.ip());
     let key = ClientKey::of(client_ip(limiter.inner.client_ip, peer, request.headers()));
-    match ip_limiter.check(key, Instant::now()) {
+    let now = Instant::now();
+    // The `/48` first: a site over its aggregate adds no `/64` to the per-IP table, so one site
+    // cannot fill that table with limited keys and lock new clients out.
+    let checked = match (&limiters.per_ipv6_48, key.ipv6_site()) {
+        (Some(per_site), Some(site)) => per_site.check(site, now),
+        _ => Ok(()),
+    }
+    .and_then(|()| {
+        limiters
+            .per_ip
+            .as_ref()
+            .map_or(Ok(()), |per_ip| per_ip.check(key, now))
+    });
+    match checked {
         Ok(()) => next.run(request).await,
         Err(limited) => too_many_requests(group, "ip", request.uri().path(), limited),
     }
+}
+
+/// Whether the browser says this is a top-level page load: `Sec-Fetch-Dest` is `document`, or
+/// absent (older browsers do not send it).
+fn is_a_navigation(headers: &HeaderMap) -> bool {
+    headers
+        .get(SEC_FETCH_DEST)
+        .is_none_or(|dest| dest.as_bytes() == b"document")
 }
 
 /// The per-user middleware. Install it inside the session layer (see `server::router`).
@@ -468,6 +518,21 @@ mod tests {
         assert!(limits.session.per_user.is_none());
         assert!(limits.google_callback.per_user.is_none());
         assert_eq!(limits.capacity, DEFAULT_CAPACITY);
+        // The groups that create rows fail closed and cap each IPv6 `/48`.
+        for group in [
+            RouteGroup::AuthBegin,
+            RouteGroup::AuthFinish,
+            RouteGroup::GoogleCallback,
+        ] {
+            let group = limits.group(group);
+            assert_eq!(group.when_full, WhenFull::Refuse);
+            assert!(group.per_ipv6_48.is_some());
+        }
+        for group in [RouteGroup::Session, RouteGroup::Account, RouteGroup::Write] {
+            let group = limits.group(group);
+            assert_eq!(group.when_full, WhenFull::Allow);
+            assert!(group.per_ipv6_48.is_none());
+        }
     }
 
     #[test]

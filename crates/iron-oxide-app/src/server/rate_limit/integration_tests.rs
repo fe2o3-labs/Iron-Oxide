@@ -23,7 +23,9 @@ use tower::ServiceExt;
 
 use super::{
     ClientIpSource, GroupLimits, Limits, ROUTES, RateLimitConfig, RateLimiter, RouteGroup,
-    client_ip::FLY_CLIENT_IP, limiter::Quota, per_ip,
+    client_ip::FLY_CLIENT_IP,
+    limiter::{Quota, WhenFull},
+    per_ip,
 };
 use crate::server::{
     auth::test_support::{Browser, Passkey, TestApp},
@@ -39,6 +41,7 @@ const REMOVE: &str = "/api/auth/passkey/remove";
 const ME: &str = "/api/auth/me";
 
 const HOUR: Duration = Duration::from_secs(3600);
+const MINUTE: Duration = Duration::from_secs(60);
 
 fn quota(burst: u32, period: Duration) -> Quota {
     Quota::new(NonZeroU32::new(burst).unwrap(), period).unwrap()
@@ -48,7 +51,9 @@ fn quota(burst: u32, period: Duration) -> Quota {
 fn generous() -> Limits {
     let wide = GroupLimits {
         per_ip: Some(quota(10_000, Duration::from_millis(1))),
+        per_ipv6_48: None,
         per_user: Some(quota(10_000, Duration::from_millis(1))),
+        when_full: WhenFull::Refuse,
     };
     Limits {
         auth_begin: wide,
@@ -77,6 +82,7 @@ fn stub(limiter: RateLimiter) -> Router {
         .route(SIGN_IN_BEGIN, post(|| async { "begun" }))
         .route("/api/sets", post(|| async { "saved" }))
         .route("/healthz", get(|| async { "ok" }))
+        .route(GOOGLE_CALLBACK_PATH, get(|| async { "callback page" }))
         .layer(from_fn_with_state(limiter, per_ip))
 }
 
@@ -303,43 +309,39 @@ async fn requests_without_connection_info_share_one_bucket() {
 #[tokio::test]
 async fn memory_stays_bounded_under_many_client_ips() {
     let mut limits = begin_limit(1, HOUR);
+    limits.write.per_ip = Some(quota(1, HOUR));
+    limits.write.when_full = WhenFull::Allow;
     limits.capacity = 100;
     let limiter = RateLimiter::new(&config(ClientIpSource::Peer, limits));
     let app = stub(limiter.clone());
-    for i in 0..5_000_u32 {
+    let v4 = |i: u32| {
         let [_, _, a, b] = (0x0a00_0000 + i).to_be_bytes();
-        let peer = IpAddr::from([198, 18, a, b]);
-        let response = send(&app, Method::POST, SIGN_IN_BEGIN, Some(peer), &[]).await;
-        assert_eq!(response.status(), StatusCode::OK, "a new client is served");
-        assert!(limiter.ip_keys(RouteGroup::AuthBegin) <= 100);
-    }
-    // IPv6 clients each with their own /64.
-    for i in 0..5_000_u128 {
-        let peer = IpAddr::from((0x2001_0db8_u128 << 96 | i << 64).to_be_bytes());
-        send(&app, Method::POST, SIGN_IN_BEGIN, Some(peer), &[]).await;
-        assert!(limiter.ip_keys(RouteGroup::AuthBegin) <= 100);
-    }
-    // The client that is limited the most when the table fills up stays limited.
-    let limiter = RateLimiter::new(&config(ClientIpSource::Peer, {
-        let mut limits = begin_limit(2, HOUR);
-        limits.capacity = 100;
-        limits
-    }));
-    let app = stub(limiter.clone());
-    for _ in 0..2 {
-        assert_eq!(begin(&app, "203.0.113.1", &[]).await, StatusCode::OK);
-    }
-    for i in 0..200_u8 {
-        assert_eq!(
-            begin(&app, &format!("198.18.0.{i}"), &[]).await,
+        IpAddr::from([198, 18, a, b])
+    };
+    let v6 = |i: u128| IpAddr::from((0x2001_0db8_u128 << 96 | i << 64).to_be_bytes());
+    let peers = (0..5_000).map(v4).chain((0..5_000).map(v6));
+    for (i, peer) in peers.enumerate() {
+        let begin = send(&app, Method::POST, SIGN_IN_BEGIN, Some(peer), &[]).await;
+        let write = send(&app, Method::POST, "/api/sets", Some(peer), &[]).await;
+        // The first 100 clients fit; then the sign-in group fails closed, the write group open.
+        let expected = if i < 100 {
             StatusCode::OK
-        );
+        } else {
+            StatusCode::TOO_MANY_REQUESTS
+        };
+        assert_eq!(begin.status(), expected, "client {i}");
+        assert_eq!(write.status(), StatusCode::OK, "client {i}");
         assert!(limiter.ip_keys(RouteGroup::AuthBegin) <= 100);
+        assert!(limiter.ip_keys(RouteGroup::Write) <= 100);
     }
-    assert_eq!(
-        begin(&app, "203.0.113.1", &[]).await,
-        StatusCode::TOO_MANY_REQUESTS
-    );
+    // The clients in the tables are all still limited: none was evicted.
+    for i in 0..100 {
+        let peer = Some(v4(i));
+        let begin = send(&app, Method::POST, SIGN_IN_BEGIN, peer, &[]).await;
+        assert_eq!(begin.status(), StatusCode::TOO_MANY_REQUESTS, "client {i}");
+        let write = send(&app, Method::POST, "/api/sets", peer, &[]).await;
+        assert_eq!(write.status(), StatusCode::TOO_MANY_REQUESTS, "client {i}");
+    }
 }
 
 #[tokio::test]
@@ -576,14 +578,15 @@ async fn cross_site_requests_cannot_use_up_a_shared_ips_limits() {
             .status();
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
-    // It can load the Google callback as often as it likes (a cross-site GET, e.g. an <img>):
-    // that uses up the callback's own bucket only.
-    for _ in 0..10 {
-        attacker.get(GOOGLE_CALLBACK_PATH).await;
+    // It can load the Google callback as an <img> as often as it likes: that is refused before
+    // it counts.
+    attacker
+        .headers
+        .push(("sec-fetch-dest", "image".to_owned()));
+    for _ in 0..50 {
+        let (status, _, _) = attacker.get(GOOGLE_CALLBACK_PATH).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
-    let (status, headers, _) = attacker.get(GOOGLE_CALLBACK_PATH).await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert!(headers.contains_key(header::RETRY_AFTER));
     // Someone else on the same IP still reaches the sign-in functions (the unreachable database
     // then fails them, but they are not rate limited).
     let mut neighbour = app.browser();
@@ -596,4 +599,127 @@ async fn cross_site_requests_cannot_use_up_a_shared_ips_limits() {
     let finish = "/api/auth/passkey/sign-in/finish";
     let status = post_raw(&mut neighbour, finish, json!({})).await.status();
     assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+    // And Google can still send them back: a navigation, with the callback's bucket untouched.
+    neighbour
+        .headers
+        .push(("sec-fetch-dest", "document".to_owned()));
+    for _ in 0..3 {
+        let (status, _, _) = neighbour.get(GOOGLE_CALLBACK_PATH).await;
+        assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_ne!(status, StatusCode::FORBIDDEN);
+    }
+}
+
+fn callback_limit(burst: u32) -> Limits {
+    let mut limits = generous();
+    limits.google_callback.per_ip = Some(quota(burst, HOUR));
+    limits
+}
+
+#[tokio::test]
+async fn the_callback_only_counts_navigations() {
+    let app = stub(RateLimiter::new(&config(
+        ClientIpSource::Peer,
+        callback_limit(2),
+    )));
+    let peer = Some(ip("203.0.113.1"));
+    let get = |dest: Option<&'static str>| {
+        let headers: Vec<(&'static str, &str)> =
+            dest.map(|d| ("sec-fetch-dest", d)).into_iter().collect();
+        let app = app.clone();
+        async move {
+            send(&app, Method::GET, GOOGLE_CALLBACK_PATH, peer, &headers)
+                .await
+                .status()
+        }
+    };
+    for dest in ["image", "script", "empty", "iframe", "style", "DOCUMENT"] {
+        for _ in 0..20 {
+            assert_eq!(get(Some(dest)).await, StatusCode::FORBIDDEN, "{dest}");
+        }
+    }
+    // Navigations (or browsers that do not say) are counted, and the bucket was left full.
+    assert_eq!(get(Some("document")).await, StatusCode::OK);
+    assert_eq!(get(None).await, StatusCode::OK);
+    assert_eq!(get(Some("document")).await, StatusCode::TOO_MANY_REQUESTS);
+    // Other routes do not care about the header.
+    let begin = send(
+        &app,
+        Method::POST,
+        SIGN_IN_BEGIN,
+        peer,
+        &[("sec-fetch-dest", "empty")],
+    )
+    .await;
+    assert_eq!(begin.status(), StatusCode::OK);
+}
+
+/// The review's key-cycling attack through the real middleware: more drained clients than the
+/// table holds, clock frozen (no refill), counting requests. Evicting limited clients would give
+/// them fresh bursts every round; the sign-in groups refuse new clients instead.
+#[tokio::test(start_paused = true)]
+async fn cycling_through_more_clients_than_the_table_holds_gains_nothing() {
+    // The production begin quota: 30 at once, then one every 2 s.
+    let mut limits = generous();
+    limits.auth_begin.per_ip = Some(Quota::per(30, MINUTE));
+    limits.capacity = 100;
+    let limiter = RateLimiter::new(&config(ClientIpSource::Peer, limits));
+    let app = stub(limiter.clone());
+    let mut allowed = 0;
+    for _round in 0..20 {
+        for client in 0..120_u8 {
+            let peer = format!("198.18.1.{client}");
+            for _ in 0..30 {
+                if begin(&app, &peer, &[]).await == StatusCode::OK {
+                    allowed += 1;
+                }
+            }
+        }
+    }
+    // 100 clients got their burst once; the 20 who found the table full were refused.
+    assert_eq!(allowed, 100 * 30);
+    assert_eq!(limiter.ip_keys(RouteGroup::AuthBegin), 100);
+    // Once the first client refills, a slot frees up for a new one.
+    assert_eq!(
+        begin(&app, "198.18.2.1", &[]).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    tokio::time::advance(MINUTE + Duration::from_secs(1)).await;
+    assert_eq!(begin(&app, "198.18.2.1", &[]).await, StatusCode::OK);
+}
+
+/// The same attack from inside one IPv6 `/48`, with the production sign-in limits: the `/48`
+/// aggregate caps the whole site, whatever the number of `/64`s.
+#[tokio::test(start_paused = true)]
+async fn one_ipv6_48_cannot_multiply_its_sign_in_limit() {
+    let limits = Limits {
+        capacity: 100,
+        ..Limits::default()
+    };
+    let site_burst = 120;
+    let limiter = RateLimiter::new(&config(ClientIpSource::Peer, limits));
+    let app = stub(limiter.clone());
+    let mut allowed = 0;
+    for _round in 0..20 {
+        for net in 0..120_u16 {
+            let peer = format!("2001:db8:1:{net:x}::1");
+            for _ in 0..30 {
+                if begin(&app, &peer, &[]).await == StatusCode::OK {
+                    allowed += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(allowed, site_burst);
+    // Only the few `/64`s that got through are in the per-IP table.
+    assert_eq!(limiter.ip_keys(RouteGroup::AuthBegin), 4);
+    // Another site is not affected.
+    assert_eq!(begin(&app, "2001:db8:2::1", &[]).await, StatusCode::OK);
+    // IPv4 clients have no aggregate.
+    for i in 0..10_u8 {
+        assert_eq!(
+            begin(&app, &format!("203.0.113.{i}"), &[]).await,
+            StatusCode::OK
+        );
+    }
 }
