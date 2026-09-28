@@ -24,6 +24,7 @@ tracing-subscriber = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
 
