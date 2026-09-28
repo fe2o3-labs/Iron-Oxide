@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.table_name AS \"table_name!\" FROM information_schema.columns c\n           JOIN information_schema.tables t USING (table_schema, table_name)\n           WHERE c.table_schema = 'public' AND c.column_name = 'user_id'\n             AND t.table_type = 'BASE TABLE'\n           ORDER BY c.table_name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "table_name!",
+        "type_info": "Name"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4be4b298847cba069a99ed17704d57db11518b2858cdf4ca2e08d3875ed912b1"
+}

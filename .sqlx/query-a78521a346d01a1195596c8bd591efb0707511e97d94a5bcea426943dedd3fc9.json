@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT idx_cls.relname AS \"index!\", tbl.relname AS \"table!\",\n                  EXISTS (\n                      SELECT 1 FROM pg_attribute att\n                      WHERE att.attrelid = tbl.oid AND att.attname = 'user_id'\n                        AND att.attnum = ANY (idx.indkey::smallint[])\n                  ) AS \"has_user_id!\"\n           FROM pg_index idx\n           JOIN pg_class idx_cls ON idx_cls.oid = idx.indexrelid\n           JOIN pg_class tbl ON tbl.oid = idx.indrelid\n           JOIN pg_namespace ns ON ns.oid = tbl.relnamespace\n           WHERE ns.nspname = 'public' AND idx.indisunique\n             AND EXISTS (\n                 SELECT 1 FROM pg_attribute att\n                 WHERE att.attrelid = tbl.oid AND att.attname = 'user_id' AND NOT att.attisdropped\n             )\n           ORDER BY 2, 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "index!",
+        "type_info": "Name"
+      },
+      {
+        "ordinal": 1,
+        "name": "table!",
+        "type_info": "Name"
+      },
+      {
+        "ordinal": 2,
+        "name": "has_user_id!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "a78521a346d01a1195596c8bd591efb0707511e97d94a5bcea426943dedd3fc9"
+}

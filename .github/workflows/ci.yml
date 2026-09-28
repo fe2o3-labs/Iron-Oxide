@@ -186,7 +186,8 @@ jobs:
           fi
       # Applies the migrations, checks the committed `.sqlx/` query data (fails if it is missing a
       # query or holds a stale one: re-run `make sqlx-prepare`), then runs the tests that need
-      # Postgres. Each `sqlx::test` gets its own fresh database on this server.
+      # Postgres (each `sqlx::test` gets its own fresh database on this server), and fails if any
+      # of them silently did not run (scripts/check-postgres-tests.sh).
       - name: Postgres tests and sqlx query data
         run: make test-db
 

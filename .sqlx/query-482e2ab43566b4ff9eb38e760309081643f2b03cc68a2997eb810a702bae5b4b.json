@@ -1,0 +1,73 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT st.id, st.session_id, st.exercise_id, st.set_index, st.reps, st.weight_ng,\n                st.duration_s, st.warmup, st.completed_at\n         FROM workout_sets st\n         JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id\n         JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id\n         WHERE st.user_id = $1 AND st.exercise_id = $3 AND st.completed_at > $4\n           AND s.status = 'completed' AND v.program_id = $2\n         ORDER BY st.completed_at, st.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "session_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "exercise_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "set_index",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "reps",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "weight_ng",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "duration_s",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "warmup",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "482e2ab43566b4ff9eb38e760309081643f2b03cc68a2997eb810a702bae5b4b"
+}

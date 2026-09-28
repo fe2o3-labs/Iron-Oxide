@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT document = $2 AS \"same!\" FROM program_versions\n               WHERE program_id = $1 ORDER BY version DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "same!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "eecb5a79fd24b3b19bf2033b09e6336cd69527e40f60fc37acfa3b5c28ac192f"
+}

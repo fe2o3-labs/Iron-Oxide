@@ -101,10 +101,18 @@ export IRON_OXIDE_PG_PORT := $(PG_PORT)
 COMPOSE = docker compose -p $(COMPOSE_PROJECT)
 # Throwaway local credentials from docker-compose.yml, not a secret.
 LOCAL_PG = postgres://iron_oxide:iron_oxide@localhost:$(PG_PORT)
-# Database of `test-db`. When set from outside (CI's Postgres service), no compose database is started.
+# Database of `test-db` and of `smoke`/`docker-run`. When one is given from outside (CI's Postgres
+# service), no compose database is started for it. The decision is taken by the top-level make and
+# passed down, because exported variables look "given from outside" to a sub-make.
+ifndef IRON_OXIDE_START_TEST_DB
+export IRON_OXIDE_START_TEST_DB := $(if $(filter undefined,$(origin TEST_DATABASE_URL)),1,0)
+endif
+ifndef IRON_OXIDE_START_SMOKE_DB
+export IRON_OXIDE_START_SMOKE_DB := $(if $(filter undefined,$(origin SMOKE_DATABASE_URL)),1,0)
+endif
 TEST_DATABASE_URL ?= $(LOCAL_PG)/iron_oxide_test
 export TEST_DATABASE_URL
-# Database of `smoke` and `docker-run` (the server applies the migrations itself at startup).
+# The server applies the migrations itself at startup.
 SMOKE_DATABASE_URL ?= $(LOCAL_PG)/iron_oxide
 export SMOKE_DATABASE_URL
 # Database for `db-psql`.
@@ -251,7 +259,7 @@ endif
 
 test-db: ## Run the Postgres tests and check .sqlx/ (starts the compose database if needed)
 	$(Q)$(need-sqlx)
-ifeq ($(origin TEST_DATABASE_URL),file)
+ifeq ($(IRON_OXIDE_START_TEST_DB),1)
 	$(Q)$(MAKE) db-up
 endif
 	$(Q)$(call step,sqlx migrate run (test database))
@@ -261,7 +269,11 @@ endif
 		$(CARGO) sqlx prepare --workspace --check -- --all-targets --features $(APP)/server
 	$(Q)$(call step,cargo test -- --ignored (tests that need Postgres))
 	$(Q)DATABASE_URL="$$TEST_DATABASE_URL" $(CARGO) test --workspace $(LOCKED) -- --ignored
-	$(Q)DATABASE_URL="$$TEST_DATABASE_URL" $(CARGO) test -p $(APP) --features server $(LOCKED) -- --ignored
+	$(Q)log="$$(mktemp)"; trap 'rm -f "$$log"' EXIT; \
+		DATABASE_URL="$$TEST_DATABASE_URL" $(CARGO) test -p $(APP) --features server $(LOCKED) -- --ignored 2>&1 \
+		| tee "$$log"; \
+		$(call step,every Postgres test ran); \
+		scripts/check-postgres-tests.sh "$$log"
 
 test-all: test test-db ## Run all the tests
 
@@ -288,7 +300,7 @@ sqlx-check: ## Build with SQLX_OFFLINE=true: fails if .sqlx/ is missing a query
 
 smoke: ## Build the release bundle, run it against Postgres and check it over HTTP
 	$(Q)$(call need-cmd,psql,brew install libpq (the smoke test checks the migrations ran))
-ifeq ($(origin SMOKE_DATABASE_URL),file)
+ifeq ($(IRON_OXIDE_START_SMOKE_DB),1)
 	$(Q)$(MAKE) db-up
 endif
 	$(Q)$(MAKE) build

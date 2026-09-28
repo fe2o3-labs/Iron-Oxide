@@ -194,6 +194,9 @@ another port, and `COMPOSE_PROJECT` another compose project (an independent data
 `DATABASE_URL` in `.env` to match for `dev` and `migrate`. The make targets only ever delete the
 data of their own compose project.
 
+The schema, the repository layer and how users' data is kept apart are described in
+[`docs/database.md`](docs/database.md).
+
 ### Migrations
 
 Migrations live in `crates/iron-oxide-app/migrations/` and are embedded in the server binary
@@ -230,9 +233,10 @@ or build with `SQLX_OFFLINE=true`.
 
 They are marked `#[ignore = "needs Postgres"]`, so `make test` and plain `cargo test` skip them.
 `make test-db` starts the compose database, applies the migrations to `iron_oxide_test`, checks
-`.sqlx/`, then runs them; each `#[sqlx::test]` creates, and then drops, its own database.
-`make test-all` runs both. To use another database, set `TEST_DATABASE_URL` (as CI does): no
-compose database is started then.
+`.sqlx/`, then runs them; each `#[sqlx::test]` creates, and then drops, its own database (see
+"Tests" in [`docs/database.md`](docs/database.md)). It then fails if any of them silently did not
+run (`scripts/check-postgres-tests.sh`). `make test-all` runs both. To use another database, set
+`TEST_DATABASE_URL` (as CI does): no compose database is started then.
 
 ### Neon (production)
 
