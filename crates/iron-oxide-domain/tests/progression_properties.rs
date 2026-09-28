@@ -8,8 +8,8 @@ use iron_oxide_domain::program::{
     WarmupSet, Work,
 };
 use iron_oxide_domain::progression::{
-    ChangeKind, NextTargets, PastSession, ProgressionSettings, SetGoal, TargetSource, WorkingSet,
-    next_targets,
+    ChangeKind, ExerciseTargets, NextTargets, PastSession, Prescription, ProgressionSettings,
+    SessionVerdict, SetGoal, TargetSource, WorkingSet, next_targets,
 };
 use iron_oxide_domain::{ExerciseId, Percent, Reps, Rounding, Seconds, Unit, Weight};
 use proptest::prelude::*;
@@ -122,24 +122,79 @@ fn exercise() -> impl Strategy<Value = Exercise> {
         )
 }
 
-fn history() -> impl Strategy<Value = Vec<PastSession>> {
+/// Another day's (or version's) prescription: other sets, reps and load, or timed work.
+fn other_prescription() -> impl Strategy<Value = Prescription> {
+    prop_oneof![
+        8 => (1_u16..=6, rep_target(), prop_oneof![
+            percent_up_to(20_000).prop_map(Load::PercentOfTrainingMax),
+            (positive_weight(), unit()).prop_map(|(w, u)| Load::Weight(UnitWeight::from_weight(w, u))),
+        ])
+            .prop_map(|(sets, reps, load)| Prescription {
+                work: Work::Reps { sets, reps },
+                load: Some(load),
+            }),
+        1 => Just(Prescription {
+            work: Work::Hold { sets: 3, seconds: Seconds::new(30) },
+            load: None,
+        }),
+    ]
+}
+
+/// Past sessions, each with the planned exercise's prescription (`None`) or another one.
+type RawHistory = Vec<(Option<Prescription>, Vec<WorkingSet>)>;
+
+fn history() -> impl Strategy<Value = RawHistory> {
     let set = (proptest::option::of(weight()), 0_u16..=25).prop_map(|(weight, reps)| WorkingSet {
         reps: Reps::new(reps),
         weight,
         duration: None,
     });
     proptest::collection::vec(
-        proptest::collection::vec(set, 0..8).prop_map(PastSession::new),
+        (
+            proptest::option::weighted(0.3, other_prescription()),
+            proptest::collection::vec(set, 0..8),
+        ),
         0..12,
     )
+}
+
+fn resolve(exercise: &Exercise, raw: &RawHistory) -> Vec<PastSession> {
+    raw.iter()
+        .map(|(prescription, sets)| {
+            PastSession::new(
+                prescription.unwrap_or_else(|| Prescription::of(exercise)),
+                sets.clone(),
+            )
+        })
+        .collect()
+}
+
+/// Whether a session counts for a rule: it has sets and asks for reps.
+fn counts(session: &PastSession) -> bool {
+    !session.is_empty() && matches!(session.prescription.work, Work::Reps { .. })
+}
+
+/// Any valid step: up to [`ProgressionSettings::max_step`].
+fn step() -> impl Strategy<Value = Weight> {
+    (1..=ProgressionSettings::max_step().as_nanograms())
+        .prop_map(|ng| Weight::from_nanograms(ng).unwrap())
 }
 
 fn settings() -> impl Strategy<Value = ProgressionSettings> {
     prop_oneof![
         unit().prop_map(ProgressionSettings::for_unit),
-        (unit(), positive_weight())
-            .prop_map(|(unit, step)| ProgressionSettings::new(unit, step).unwrap()),
+        (unit(), step()).prop_map(|(unit, step)| ProgressionSettings::new(unit, step).unwrap()),
+        unit().prop_map(
+            |unit| ProgressionSettings::new(unit, ProgressionSettings::max_step()).unwrap()
+        ),
     ]
+}
+
+fn ready(outcome: NextTargets) -> ExerciseTargets {
+    match outcome {
+        NextTargets::Ready(targets) => targets,
+        NextTargets::NeedsTrainingMax { .. } => panic!("a training max was given"),
+    }
 }
 
 fn on_step(weight: Weight, step: Weight) -> bool {
@@ -154,15 +209,16 @@ proptest! {
         exercise in exercise(),
         training_max in weight(),
         settings in settings(),
-        history in history(),
+        raw in history(),
     ) {
+        let history = resolve(&exercise, &raw);
         let outcome = next_targets(&exercise, Some(training_max), settings, &history);
         // Deterministic.
         prop_assert_eq!(&outcome, &next_targets(&exercise, Some(training_max), settings, &history));
         let NextTargets::Ready(targets) = outcome else {
             return Err(TestCaseError::fail("a training max was given"));
         };
-        let has_history = history.iter().any(|session| !session.is_empty());
+        let has_history = history.iter().any(counts);
         let is_training_max = exercise.progression.name() == "training_max";
         prop_assert_eq!(targets.change.is_some(), has_history);
         prop_assert_eq!(targets.last_verdict.is_some(), has_history);
@@ -241,21 +297,71 @@ proptest! {
         exercise in exercise(),
         training_max in weight(),
         settings in settings(),
-        history in history(),
+        raw in history(),
         weight in weight(),
     ) {
+        let history = resolve(&exercise, &raw);
         let before = next_targets(&exercise, Some(training_max), settings, &history);
         let NextTargets::Ready(before) = before else { unreachable!() };
         let target = before.working[0].weight.unwrap();
         // Every set lifted at the target (or the given weight for weight rules) with 0 reps.
         let lifted = if exercise.progression.name() == "training_max" { target } else { weight };
         let mut longer = history.clone();
-        longer.push(PastSession::new(vec![WorkingSet::new(lifted, Reps::ZERO); 3]));
+        longer.push(PastSession::new(
+            Prescription::of(&exercise),
+            vec![WorkingSet::new(lifted, Reps::ZERO); 3],
+        ));
         let NextTargets::Ready(after) = next_targets(&exercise, Some(training_max), settings, &longer)
         else { unreachable!() };
         prop_assert!(after.working[0].weight.unwrap() <= lifted.max(target));
         if let (Some(tm_before), Some(tm_after)) = (before.training_max, after.training_max) {
             prop_assert!(tm_after <= tm_before);
+        }
+    }
+
+    /// Past verdicts, the failure count and the training max depend only on what was prescribed
+    /// and lifted, never on today's step or unit.
+    #[test]
+    fn replay_does_not_depend_on_the_settings(
+        exercise in exercise(),
+        training_max in weight(),
+        first in settings(),
+        second in settings(),
+        raw in history(),
+    ) {
+        let history = resolve(&exercise, &raw);
+        let a = ready(next_targets(&exercise, Some(training_max), first, &history));
+        let b = ready(next_targets(&exercise, Some(training_max), second, &history));
+        prop_assert_eq!(a.last_verdict, b.last_verdict);
+        prop_assert_eq!(a.failed_sessions, b.failed_sessions);
+        prop_assert_eq!(a.training_max, b.training_max);
+        if exercise.progression.name() == "training_max" {
+            prop_assert_eq!(a.change, b.change);
+        }
+    }
+
+    /// Doing exactly what was prescribed (the target weight, every set at the top of the range)
+    /// is a success, session after session, for every rule and any settings, up to the cap.
+    #[test]
+    fn doing_the_prescription_is_a_success(
+        exercise in exercise(),
+        training_max in weight(),
+        settings in settings(),
+        sessions in 1_usize..=5,
+    ) {
+        let mut history = Vec::new();
+        for _ in 0..sessions {
+            let target = ready(next_targets(&exercise, Some(training_max), settings, &history));
+            let Work::Reps { reps, .. } = exercise.work else { unreachable!() };
+            let sets = target
+                .working
+                .iter()
+                .map(|set| WorkingSet::new(set.weight.unwrap(), reps.max()))
+                .collect();
+            history.push(PastSession::new(Prescription::of(&exercise), sets));
+            let after = ready(next_targets(&exercise, Some(training_max), settings, &history));
+            prop_assert_eq!(after.last_verdict, Some(SessionVerdict::Success));
+            prop_assert_eq!(after.failed_sessions, 0);
         }
     }
 }

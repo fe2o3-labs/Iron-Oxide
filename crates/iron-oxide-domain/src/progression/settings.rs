@@ -2,12 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Unit, ValueError, Weight};
+use crate::{Quantity, Unit, ValueError, Weight};
+
+/// [`ProgressionSettings::max_step`] in nanograms: 2.5 kg.
+const MAX_STEP_NANOGRAMS: u64 = 2_500_000_000_000;
 
 /// The unit the lifter loads in, and the step the engine rounds weights to.
 ///
 /// The step is the smallest change the lifter can load: 2.5 kg (two 1.25 kg plates) or 5 lb (two
-/// 2.5 lb plates) by default. It is never zero. The unit decides whether a weight written in the
+/// 2.5 lb plates) by default. It is never zero and never above [`max_step`](Self::max_step). The unit decides whether a weight written in the
 /// program must be converted: a program load written in the other unit is rounded to the step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "ProgressionSettingsRepr")]
@@ -35,13 +38,30 @@ impl ProgressionSettings {
     /// Loads in `unit` and rounds to `step`.
     ///
     /// # Errors
-    /// [`ValueError::ZeroIncrement`] when `step` is zero.
+    /// [`ValueError::ZeroIncrement`] when `step` is zero, and [`ValueError::TooLarge`] when it is
+    /// above [`max_step`](Self::max_step).
     pub const fn new(unit: Unit, step: Weight) -> Result<Self, ValueError> {
         if step.is_zero() {
             Err(ValueError::ZeroIncrement)
+        } else if step.as_nanograms() > MAX_STEP_NANOGRAMS {
+            Err(ValueError::TooLarge {
+                quantity: Quantity::Weight,
+                max: "2.5 kg",
+            })
         } else {
             Ok(Self { unit, step })
         }
+    }
+
+    /// The largest step: 2.5 kg, which covers both defaults (5 lb is 2.27 kg).
+    ///
+    /// The bound lets past training max sessions be judged without the current settings: any
+    /// target rounded to the nearest step is within half of it of the exact percentage, so a
+    /// fixed tolerance of half this step (see the [module documentation](super)) accepts every
+    /// target the app could have shown, whatever the settings were then or are now.
+    #[must_use]
+    pub fn max_step() -> Weight {
+        Weight::from_nanograms(MAX_STEP_NANOGRAMS).unwrap_or(Weight::MAX)
     }
 
     /// The default for a lifter who loads in `unit`: a step of 2.5 kg or 5 lb.
@@ -99,6 +119,15 @@ mod tests {
             ProgressionSettings::new(Unit::Lb, Weight::ZERO),
             Err(ValueError::ZeroIncrement)
         );
+        let max = ProgressionSettings::max_step();
+        assert_eq!(max, Weight::from_kg(2.5).unwrap());
+        assert_eq!(ProgressionSettings::new(Unit::Kg, max).unwrap().step(), max);
+        let above = Weight::from_nanograms(max.as_nanograms() + 1).unwrap();
+        assert!(matches!(
+            ProgressionSettings::new(Unit::Kg, above),
+            Err(ValueError::TooLarge { .. })
+        ));
+        assert!(ProgressionSettings::for_unit(Unit::Lb).step() <= max);
     }
 
     #[test]

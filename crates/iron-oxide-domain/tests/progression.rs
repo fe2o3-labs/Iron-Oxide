@@ -8,8 +8,8 @@ use iron_oxide_domain::program::{
     WarmupSet, Work, builtin_programs,
 };
 use iron_oxide_domain::progression::{
-    ChangeKind, ExerciseTargets, NextTargets, PastSession, ProgressionSettings, SessionVerdict,
-    SetGoal, SetTarget, TargetSource, WorkingSet, exercise_history, next_targets,
+    ChangeKind, ExerciseTargets, NextTargets, PastSession, Prescription, ProgressionSettings,
+    SessionVerdict, SetGoal, SetTarget, TargetSource, WorkingSet, exercise_history, next_targets,
 };
 use iron_oxide_domain::{
     DayId, ExerciseId, LoggedSet, Percent, ProgramVersionId, Reps, Seconds, SessionId, SessionLog,
@@ -115,7 +115,10 @@ fn bench() -> Exercise {
     )
 }
 
-fn session(weight: Weight, reps: &[u16]) -> PastSession {
+/// The working sets of one past session.
+type Sets = Vec<WorkingSet>;
+
+fn session(weight: Weight, reps: &[u16]) -> Sets {
     reps.iter()
         .map(|&r| WorkingSet::new(weight, Reps::new(r)))
         .collect()
@@ -128,8 +131,31 @@ fn ready(outcome: NextTargets) -> ExerciseTargets {
     }
 }
 
-fn targets(exercise: &Exercise, history: &[PastSession]) -> ExerciseTargets {
-    ready(next_targets(exercise, None, kg_settings(), history))
+/// Past sessions of `exercise`, all prescribed like `exercise`.
+fn history(exercise: &Exercise, sessions: &[Sets]) -> Vec<PastSession> {
+    sessions
+        .iter()
+        .map(|sets| PastSession::new(Prescription::of(exercise), sets.clone()))
+        .collect()
+}
+
+/// [`next_targets`] with sessions all prescribed like `exercise`.
+fn plan(
+    exercise: &Exercise,
+    training_max: Option<Weight>,
+    settings: ProgressionSettings,
+    sessions: &[Sets],
+) -> NextTargets {
+    next_targets(
+        exercise,
+        training_max,
+        settings,
+        &history(exercise, sessions),
+    )
+}
+
+fn targets(exercise: &Exercise, sessions: &[Sets]) -> ExerciseTargets {
+    ready(plan(exercise, None, kg_settings(), sessions))
 }
 
 /// The single working weight and reps of uniform targets.
@@ -175,7 +201,7 @@ mod add_when_top_of_range {
         assert_eq!(next.failed_sessions, 0);
         assert_eq!(next.training_max, None);
         // Sessions where the exercise was skipped are no history.
-        assert_eq!(targets(&squat(), &[PastSession::default()]), next);
+        assert_eq!(targets(&squat(), &[Sets::new()]), next);
     }
 
     #[test]
@@ -211,17 +237,17 @@ mod add_when_top_of_range {
         assert_eq!(working(&heavier).0, kg(122.5));
         // A lighter last set: the lightest working set is the base.
         let mut dropped = session(kg(100.0), &[5, 5]);
-        dropped.sets.push(WorkingSet::new(kg(90.0), Reps::new(5)));
+        dropped.push(WorkingSet::new(kg(90.0), Reps::new(5)));
         assert_eq!(working(&targets(&squat(), &[dropped])).0, kg(92.5));
     }
 
     #[test]
     fn sets_logged_without_a_weight_do_not_drop_the_base() {
         let mut slip = session(kg(100.0), &[5, 5]);
-        slip.sets.push(WorkingSet::bodyweight(Reps::new(5)));
+        slip.push(WorkingSet::bodyweight(Reps::new(5)));
         assert_eq!(working(&targets(&squat(), &[slip])).0, kg(102.5));
         // No weight at all: the program's load is the base.
-        let none = PastSession::new(vec![WorkingSet::bodyweight(Reps::new(5)); 3]);
+        let none = Sets::from(vec![WorkingSet::bodyweight(Reps::new(5)); 3]);
         assert_eq!(working(&targets(&squat(), &[none])).0, kg(102.5));
     }
 
@@ -296,13 +322,7 @@ mod add_when_top_of_range {
     #[test]
     fn skipped_sessions_do_not_break_or_extend_the_streak() {
         let fail = || session(kg(100.0), &[5, 5, 3]);
-        let history = [
-            fail(),
-            PastSession::default(),
-            fail(),
-            PastSession::default(),
-            fail(),
-        ];
+        let history = [fail(), Sets::new(), fail(), Sets::new(), fail()];
         let next = targets(&squat(), &history);
         assert!(change(&next).is_deload());
     }
@@ -354,7 +374,7 @@ mod add_when_top_of_range {
             deload_after_failures: deload(1, 10.0),
         };
         let settings = ProgressionSettings::for_unit(Unit::Lb);
-        let up = ready(next_targets(
+        let up = ready(plan(
             &press,
             None,
             settings,
@@ -363,7 +383,7 @@ mod add_when_top_of_range {
         assert_eq!(working(&up).0, lb(100.0));
         assert_eq!(describe(&up, Unit::Lb), "Squat: 95 → 100 lb");
         // 135 lb − 10 % = 121.5 lb → 120 lb.
-        let down = ready(next_targets(
+        let down = ready(plan(
             &press,
             None,
             settings,
@@ -385,7 +405,7 @@ mod add_when_top_of_range {
         assert_eq!(working(&targets(&press, &history)).0, kg(42.5));
         // With 1 kg micro-plates, exactly +1 kg.
         let fine = ProgressionSettings::new(Unit::Kg, kg(1.0)).unwrap();
-        let next = ready(next_targets(&press, None, fine, &history));
+        let next = ready(plan(&press, None, fine, &history));
         assert_eq!(working(&next).0, kg(41.0));
     }
 }
@@ -466,18 +486,13 @@ mod double_progression {
 mod training_max {
     use super::*;
 
-    fn with_tm(training_max: Weight, history: &[PastSession]) -> ExerciseTargets {
-        ready(next_targets(
-            &bench(),
-            Some(training_max),
-            kg_settings(),
-            history,
-        ))
+    fn with_tm(training_max: Weight, history: &[Sets]) -> ExerciseTargets {
+        ready(plan(&bench(), Some(training_max), kg_settings(), history))
     }
 
     #[test]
     fn needs_a_training_max() {
-        let outcome = next_targets(&bench(), None, kg_settings(), &[]);
+        let outcome = plan(&bench(), None, kg_settings(), &[]);
         assert_eq!(
             outcome,
             NextTargets::NeedsTrainingMax {
@@ -490,7 +505,7 @@ mod training_max {
         let mut no_rule = bench();
         no_rule.progression = ProgressionRule::None;
         assert!(matches!(
-            next_targets(&no_rule, None, kg_settings(), &[session(kg(80.0), &[5])]),
+            plan(&no_rule, None, kg_settings(), &[session(kg(80.0), &[5])]),
             NextTargets::NeedsTrainingMax { .. }
         ));
     }
@@ -502,7 +517,7 @@ mod training_max {
         assert_eq!(working(&next), (kg(80.0), Reps::new(5)));
         assert_eq!(next.training_max, Some(kg(100.0)));
         assert_eq!(next.change, None);
-        let outcome = next_targets(&bench(), Some(kg(100.0)), kg_settings(), &[]);
+        let outcome = plan(&bench(), Some(kg(100.0)), kg_settings(), &[]);
         assert_eq!(outcome.ready(), Some(&next));
         assert_eq!(outcome.exercise(), &bench().id);
     }
@@ -581,7 +596,7 @@ mod training_max {
     fn with_a_range_the_middle_holds() {
         let mut bench = bench();
         bench.work = range(3, 3, 5);
-        let next = ready(next_targets(
+        let next = ready(plan(
             &bench,
             Some(kg(100.0)),
             kg_settings(),
@@ -602,9 +617,9 @@ mod training_max {
         bench.load = Some(Load::PercentOfTrainingMax(pct(75.0)));
         let settings = ProgressionSettings::for_unit(Unit::Lb);
         // 75 % of 225 lb is 168.75 lb: 170 lb.
-        let first = ready(next_targets(&bench, Some(lb(225.0)), settings, &[]));
+        let first = ready(plan(&bench, Some(lb(225.0)), settings, &[]));
         assert_eq!(working(&first).0, lb(170.0));
-        let next = ready(next_targets(
+        let next = ready(plan(
             &bench,
             Some(lb(225.0)),
             settings,
@@ -635,7 +650,7 @@ mod no_rule {
         assert_eq!(first.source, TargetSource::ProgramDefault);
         assert_eq!(working(&first), (kg(40.0), Reps::new(5)));
 
-        let last = PastSession::new(vec![
+        let last = Sets::from(vec![
             WorkingSet::new(kg(42.0), Reps::new(5)),
             WorkingSet::new(kg(41.0), Reps::new(3)),
         ]);
@@ -668,7 +683,7 @@ mod no_rule {
                 })
             }
         );
-        let last = PastSession::new(
+        let last = Sets::from(
             [12, 7, 2]
                 .map(|r| WorkingSet::bodyweight(Reps::new(r)))
                 .to_vec(),
@@ -688,7 +703,7 @@ mod no_rule {
 
     #[test]
     fn a_weight_logged_on_bodyweight_work_is_kept() {
-        let last = PastSession::new(vec![WorkingSet::new(kg(10.0), Reps::new(6))]);
+        let last = Sets::from(vec![WorkingSet::new(kg(10.0), Reps::new(6))]);
         let next = targets(&pullup(), &[last]);
         assert!(next.working.iter().all(|set| set.weight == Some(kg(10.0))));
     }
@@ -697,11 +712,11 @@ mod no_rule {
     fn percent_of_training_max_without_a_rule() {
         let mut press = bench();
         press.progression = ProgressionRule::None;
-        let next = ready(next_targets(&press, Some(kg(60.0)), kg_settings(), &[]));
+        let next = ready(plan(&press, Some(kg(60.0)), kg_settings(), &[]));
         assert_eq!(next.source, TargetSource::ProgramDefault);
         assert_eq!(working(&next).0, kg(47.5), "80 % of 60 kg is 48 kg");
         assert_eq!(next.training_max, Some(kg(60.0)));
-        let later = ready(next_targets(
+        let later = ready(plan(
             &press,
             Some(kg(60.0)),
             kg_settings(),
@@ -736,7 +751,7 @@ mod timed {
         assert_eq!(first.source, TargetSource::ProgramDefault);
         assert_eq!(first.working, vec![hold; 3]);
         // A short hold last time does not shorten the target.
-        let short = PastSession::new(vec![
+        let short = Sets::from(vec![
             WorkingSet {
                 reps: Reps::new(1),
                 weight: None,
@@ -763,7 +778,7 @@ mod timed {
             ProgressionRule::None,
         );
         assert_eq!(targets(&carry, &[]).working[0].weight, Some(kg(24.0)));
-        let last = PastSession::new(vec![WorkingSet {
+        let last = Sets::from(vec![WorkingSet {
             reps: Reps::new(1),
             weight: Some(kg(32.0)),
             duration: Some(Seconds::new(40)),
@@ -793,7 +808,7 @@ mod timed {
             },
         }];
         assert_eq!(targets(&sprints, &[]).working, expected);
-        let done = PastSession::new(vec![WorkingSet {
+        let done = Sets::from(vec![WorkingSet {
             reps: Reps::new(6),
             weight: None,
             duration: Some(Seconds::new(180)),
@@ -816,7 +831,7 @@ mod timed {
                 deload_after_failures: None,
             },
         );
-        let done = PastSession::new(vec![WorkingSet {
+        let done = Sets::from(vec![WorkingSet {
             reps: Reps::new(1),
             weight: Some(kg(10.0)),
             duration: Some(Seconds::new(60)),
@@ -892,7 +907,7 @@ mod warmups {
     #[test]
     fn follow_the_training_max() {
         let bench = with_warmup(bench());
-        let next = ready(next_targets(&bench, Some(kg(100.0)), kg_settings(), &[]));
+        let next = ready(plan(&bench, Some(kg(100.0)), kg_settings(), &[]));
         assert_eq!(
             weights(&next),
             [
@@ -903,7 +918,7 @@ mod warmups {
             ]
         );
         assert!(matches!(
-            next_targets(&bench, None, kg_settings(), &[]),
+            plan(&bench, None, kg_settings(), &[]),
             NextTargets::NeedsTrainingMax { .. }
         ));
     }
@@ -912,7 +927,7 @@ mod warmups {
     fn fixed_warmups_round_to_the_step() {
         let squat = with_warmup(squat());
         let settings = ProgressionSettings::for_unit(Unit::Lb);
-        let next = ready(next_targets(&squat, None, settings, &[]));
+        let next = ready(plan(&squat, None, settings, &[]));
         // 100 kg is 220.46 lb: 220 lb, and the 20 kg bar is 45 lb.
         assert_eq!(working(&next).0, lb(220.0));
         assert_eq!(
@@ -927,7 +942,7 @@ mod warmups {
         // Rounding would make the warm-up as heavy as the working weight: kept as written.
         let mut light = with_warmup(squat.clone());
         light.load = Some(Load::Weight(unit_weight(45.0, Unit::Lb)));
-        let next = ready(next_targets(&light, None, settings, &[]));
+        let next = ready(plan(&light, None, settings, &[]));
         assert_eq!(working(&next).0, lb(45.0));
         assert_eq!(next.warmup[0].weight, Some(kg(20.0)));
     }
@@ -955,6 +970,254 @@ mod warmups {
         let next = targets(&light, &[]);
         // 95 % of 22.5 kg is 21.375 kg: 20 kg rather than 22.5 kg.
         assert_eq!(next.warmup[3].weight, Some(kg(20.0)));
+    }
+}
+
+mod review_cases {
+    use super::*;
+
+    fn with_prescription(exercise: &Exercise, sets: Sets) -> PastSession {
+        PastSession::new(Prescription::of(exercise), sets)
+    }
+
+    /// Bench on day A: 5 × 5 at 80 %; on day B: 3 × 3 at 90 %. Same rule everywhere.
+    fn bench_days() -> (Exercise, Exercise) {
+        let mut a = bench();
+        a.work = fixed(5, 5);
+        a.load = Some(Load::PercentOfTrainingMax(pct(80.0)));
+        let mut b = bench();
+        b.work = fixed(3, 3);
+        b.load = Some(Load::PercentOfTrainingMax(pct(90.0)));
+        (a, b)
+    }
+
+    #[test]
+    fn each_session_is_judged_against_its_own_day() {
+        let (day_a, day_b) = bench_days();
+        let settings = kg_settings();
+        // Alternate A, B, A, B, each done exactly as prescribed at the time.
+        let mut history: Vec<PastSession> = Vec::new();
+        for day in [&day_a, &day_b, &day_a, &day_b] {
+            let target = ready(next_targets(day, Some(kg(100.0)), settings, &history));
+            let (weight, reps) = working(&target);
+            let sets = vec![WorkingSet::new(weight, reps); target.working.len()];
+            history.push(with_prescription(day, sets));
+        }
+        let plan_a = ready(next_targets(&day_a, Some(kg(100.0)), settings, &history));
+        let plan_b = ready(next_targets(&day_b, Some(kg(100.0)), settings, &history));
+        for plan in [&plan_a, &plan_b] {
+            assert_eq!(plan.last_verdict, Some(SessionVerdict::Success));
+            assert_eq!(plan.failed_sessions, 0);
+            assert_eq!(plan.training_max, Some(kg(110.0)), "four successes");
+        }
+        assert_eq!(plan_a.change, plan_b.change, "no conflicting summaries");
+        // Each day keeps its own sets, reps and percentage.
+        assert_eq!(
+            working(&plan_a),
+            (kg(87.5), Reps::new(5)),
+            "80 % of 110 kg is 88 kg"
+        );
+        assert_eq!(plan_a.working.len(), 5);
+        assert_eq!(
+            working(&plan_b),
+            (kg(100.0), Reps::new(3)),
+            "90 % of 110 kg is 99 kg"
+        );
+        assert_eq!(plan_b.working.len(), 3);
+    }
+
+    #[test]
+    fn each_day_is_judged_on_its_own_sets_under_a_weight_rule() {
+        let day_a = squat();
+        let mut day_b = squat();
+        day_b.work = fixed(3, 3);
+        let history = [
+            with_prescription(&day_b, session(kg(100.0), &[3, 3, 3])),
+            with_prescription(&day_b, session(kg(102.5), &[3, 3, 3])),
+        ];
+        let plan_a = ready(next_targets(&day_a, None, kg_settings(), &history));
+        let plan_b = ready(next_targets(&day_b, None, kg_settings(), &history));
+        assert_eq!(working(&plan_a), (kg(105.0), Reps::new(5)));
+        assert_eq!(working(&plan_b), (kg(105.0), Reps::new(3)));
+        assert_eq!(plan_a.change, plan_b.change);
+        assert_eq!(plan_a.failed_sessions, 0);
+        // 3 sets of 3 on day A (3 × 5) is a failure, whichever day is planned.
+        let short = [with_prescription(&day_a, session(kg(100.0), &[3, 3, 3]))];
+        for day in [&day_a, &day_b] {
+            let plan = ready(next_targets(day, None, kg_settings(), &short));
+            assert_eq!(plan.last_verdict, Some(SessionVerdict::Failure));
+        }
+    }
+
+    #[test]
+    fn double_progression_reps_follow_the_planned_range() {
+        // Day A: 3 × 8–12; day B: 3 × 5–8.
+        let day_a = row();
+        let mut day_b = row();
+        day_b.work = range(3, 5, 8);
+        let history = [with_prescription(&day_a, session(kg(50.0), &[10, 10, 10]))];
+        let plan_a = ready(next_targets(&day_a, None, kg_settings(), &history));
+        let plan_b = ready(next_targets(&day_b, None, kg_settings(), &history));
+        assert_eq!(working(&plan_a), (kg(50.0), Reps::new(11)));
+        // 11 is above day B's range: its top.
+        assert_eq!(working(&plan_b), (kg(50.0), Reps::new(8)));
+        assert_eq!(plan_a.change, plan_b.change);
+        assert_eq!(describe(&plan_b, Unit::Kg), "Row: reps 10 → 11 at 50 kg");
+        // Below the range: its bottom.
+        let low = [with_prescription(&day_b, session(kg(50.0), &[5, 5, 5]))];
+        let plan_a = ready(next_targets(&day_a, None, kg_settings(), &low));
+        assert_eq!(working(&plan_a), (kg(50.0), Reps::new(8)));
+    }
+
+    #[test]
+    fn timed_prescriptions_are_left_out_of_a_rule() {
+        // An older program version had the exercise as a timed hold.
+        let mut old = squat();
+        old.work = Work::Hold {
+            sets: 3,
+            seconds: Seconds::new(30),
+        };
+        let history = [
+            with_prescription(&squat(), session(kg(100.0), &[5, 5, 5])),
+            with_prescription(&old, session(kg(100.0), &[1, 1, 1])),
+        ];
+        let plan = ready(next_targets(&squat(), None, kg_settings(), &history));
+        assert_eq!(working(&plan).0, kg(102.5));
+        assert_eq!(plan.last_verdict, Some(SessionVerdict::Success));
+        let only_old = [with_prescription(&old, session(kg(100.0), &[1, 1, 1]))];
+        let plan = ready(next_targets(&squat(), None, kg_settings(), &only_old));
+        assert_eq!(plan.source, TargetSource::ProgramDefault);
+        assert_eq!(plan.change, None);
+        let tm = ready(next_targets(
+            &bench(),
+            Some(kg(100.0)),
+            kg_settings(),
+            &only_old,
+        ));
+        assert_eq!(tm.source, TargetSource::ProgramDefault);
+        assert_eq!(tm.training_max, Some(kg(100.0)));
+    }
+
+    #[test]
+    fn past_verdicts_do_not_depend_on_todays_settings() {
+        // 3 × 5 at 65 % of a 121 kg training max: exactly 78.65 kg, shown as 77.5 kg with a
+        // 2.5 kg step, and done at 77.5 kg. Deload 10 % after one failure.
+        let mut bench = bench();
+        bench.load = Some(Load::PercentOfTrainingMax(pct(65.0)));
+        bench.progression = ProgressionRule::TrainingMax {
+            increment: unit_weight(2.5, Unit::Kg),
+            deload_after_failures: deload(1, 10.0),
+        };
+        let history = [session(kg(77.5), &[5, 5, 5])];
+        let all = [
+            kg_settings(),
+            ProgressionSettings::new(Unit::Kg, kg(1.25)).unwrap(),
+            ProgressionSettings::new(Unit::Kg, kg(1.0)).unwrap(),
+            ProgressionSettings::for_unit(Unit::Lb),
+        ];
+        for settings in all {
+            let next = ready(plan(&bench, Some(kg(121.0)), settings, &history));
+            assert_eq!(
+                next.last_verdict,
+                Some(SessionVerdict::Success),
+                "{settings:?}"
+            );
+            assert_eq!(next.training_max, Some(kg(123.5)), "{settings:?}");
+        }
+        // The deloaded training max is exact too: 10 % off 121 kg is 108.9 kg in every setting.
+        let failed = [session(kg(77.5), &[5, 5, 2])];
+        for settings in all {
+            let next = ready(plan(&bench, Some(kg(121.0)), settings, &failed));
+            assert_eq!(next.training_max, Some(kg(108.9)), "{settings:?}");
+        }
+    }
+
+    #[test]
+    fn the_prescribed_target_counts_at_the_cap() {
+        let settings = ProgressionSettings::for_unit(Unit::Lb);
+        for (percent, training_max) in [(100.0, 2_000.0), (150.0, 1_400.0), (109.32, 1_826.0)] {
+            let mut bench = bench();
+            bench.load = Some(Load::PercentOfTrainingMax(pct(percent)));
+            let first = ready(plan(&bench, Some(kg(training_max)), settings, &[]));
+            let (weight, _) = working(&first);
+            let done = [session(weight, &[5, 5, 5])];
+            let next = ready(plan(&bench, Some(kg(training_max)), settings, &done));
+            assert_eq!(
+                next.last_verdict,
+                Some(SessionVerdict::Success),
+                "{percent} % of {training_max} kg, done at {weight:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backoff_set_does_not_drag_the_next_target_down() {
+        let mut done = session(kg(100.0), &[5, 5, 5]);
+        done.push(WorkingSet::new(kg(60.0), Reps::new(10)));
+        let next = targets(&squat(), &[done]);
+        assert_eq!(working(&next).0, kg(102.5));
+        assert_eq!(describe(&next, Unit::Kg), "Squat: 100 → 102.5 kg");
+    }
+
+    #[test]
+    fn a_training_max_hold_or_success_ends_the_failure_streak() {
+        let mut bench = bench();
+        bench.work = range(3, 3, 5);
+        let fail = || session(kg(80.0), &[5, 5, 2]);
+        // Deload after 2 failures: fail, hold, fail is no deload.
+        let hold = session(kg(80.0), &[4, 4, 4]);
+        let next = ready(plan(
+            &bench,
+            Some(kg(100.0)),
+            kg_settings(),
+            &[fail(), hold, fail()],
+        ));
+        assert_eq!(next.failed_sessions, 1);
+        assert_eq!(next.training_max, Some(kg(100.0)));
+        // Fail, success, fail: no deload either.
+        let success = session(kg(80.0), &[5, 5, 5]);
+        let next = ready(plan(
+            &bench,
+            Some(kg(100.0)),
+            kg_settings(),
+            &[fail(), success, session(kg(82.5), &[5, 5, 2])],
+        ));
+        assert_eq!(next.failed_sessions, 1);
+        assert_eq!(next.training_max, Some(kg(102.5)));
+    }
+
+    #[test]
+    fn double_progression_at_the_cap_stays_at_the_top_of_the_range() {
+        let next = targets(&row(), &[session(Weight::MAX, &[12, 12, 12])]);
+        assert_eq!(working(&next), (Weight::MAX, Reps::new(12)));
+        assert_eq!(
+            change(&next),
+            ChangeKind::Unchanged {
+                weight: Weight::MAX,
+                failed_sessions: 0
+            }
+        );
+    }
+
+    #[test]
+    fn percentage_warmups_use_the_heaviest_working_set() {
+        let mut press = exercise(
+            "Press",
+            fixed(2, 5),
+            Some(Load::Weight(unit_weight(40.0, Unit::Kg))),
+            ProgressionRule::None,
+        );
+        press.warmup = vec![WarmupSet {
+            sets: 1,
+            reps: Reps::new(5),
+            load: WarmupLoad::PercentOfWorkingWeight(pct(50.0)),
+        }];
+        let last = vec![
+            WorkingSet::new(kg(60.0), Reps::new(5)),
+            WorkingSet::new(kg(40.0), Reps::new(5)),
+        ];
+        let next = targets(&press, &[last]);
+        assert_eq!(next.warmup[0].weight, Some(kg(30.0)));
     }
 }
 
@@ -1003,9 +1266,9 @@ mod history_from_logs {
             log.complete(start + 10).unwrap();
             logs.push(log);
         }
-        let history = exercise_history(&squat.id, &logs);
+        let history = exercise_history(&squat.id, &logs, |_| Some(Prescription::of(&squat)));
         assert_eq!(history.len(), 2);
-        let next = targets(&squat, &history);
+        let next = ready(next_targets(&squat, None, kg_settings(), &history));
         assert_eq!(working(&next).0, kg(105.0));
         assert_eq!(describe(&next, Unit::Kg), "Squat: 102.5 → 105 kg");
     }
@@ -1024,7 +1287,7 @@ fn every_builtin_exercise_has_loadable_targets() {
         let training_maxes = program.training_max_exercises();
         for exercise in program.exercises() {
             let training_max = training_maxes.contains(&exercise.id).then(|| kg(100.0));
-            let next = ready(next_targets(exercise, training_max, settings, &[]));
+            let next = ready(plan(exercise, training_max, settings, &[]));
             assert_eq!(next.source, TargetSource::ProgramDefault, "{}", exercise.id);
             assert_eq!(
                 next.working.len(),
@@ -1050,11 +1313,11 @@ fn every_builtin_exercise_has_loadable_targets() {
             if let (Some(working), Work::Reps { sets, reps }) = (working, exercise.work)
                 && !exercise.progression.is_none()
             {
-                let top = PastSession::new(vec![
+                let top = Sets::from(vec![
                     WorkingSet::new(working, reps.max());
                     usize::from(sets)
                 ]);
-                let after = ready(next_targets(exercise, training_max, settings, &[top]));
+                let after = ready(plan(exercise, training_max, settings, &[top]));
                 let kind = after.change.unwrap().kind;
                 assert!(kind.is_progress(), "{} in {unit}: {kind:?}", exercise.id);
                 assert!(
