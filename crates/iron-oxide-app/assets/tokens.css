@@ -1,0 +1,57 @@
+/*
+ * Iron Oxide colour tokens.
+ *
+ * Dark-first palette built for a phone in a gym: deep iron-grey surfaces,
+ * rust-orange primary, oxide-red accents, warm off-white text.
+ *
+ * Contrast (WCAG 2.x) is listed next to each foreground token as
+ * "on bg / on surface / on surface-2". AA needs 4.5:1 for body text,
+ * 3:1 for large text (>= 24px, or >= 18.66px bold) and UI component edges.
+ *
+ * Keep --io-bg in sync with `theme_color` / `background_color` in
+ * public/manifest.webmanifest and with THEME_COLOR in src/pwa.rs.
+ * Documented in docs/palette.md.
+ */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces (iron grey), darkest to lightest. */
+  --io-bg: #141619;          /* app background, manifest background/theme colour */
+  --io-surface: #1d2024;     /* cards, sheets */
+  --io-surface-2: #272b30;   /* raised elements, inputs, pressed states */
+
+  /* Borders. */
+  --io-border: #3b4047;        /* decorative dividers only (1.7:1, not for meaning) */
+  --io-border-strong: #707780; /* input and control outlines: 4.0 / 3.6 / 3.2 */
+
+  /* Text (off-white). */
+  --io-text: #f4efe8;        /* 15.9 / 14.3 / 12.5 */
+  --io-text-muted: #b9b1a7;  /* 8.6 / 7.7 / 6.7 */
+
+  /* Primary (rust orange). */
+  --io-primary: #e8703a;        /* fills and text/icons: 5.9 / 5.3 / 4.6 */
+  --io-primary-strong: #f08a4b; /* hover/pressed fill, primary text on any surface: 7.3 / 6.6 / 5.7 */
+  --io-on-primary: #141619;     /* text on primary fills: 5.9 on primary, 7.3 on primary-strong */
+
+  /* Accent (oxide red). The fill is too dark for text on dark surfaces. */
+  --io-accent: #b3362b;         /* fills only (badges, PR highlights, destructive buttons) */
+  --io-accent-strong: #8f2a21;  /* pressed accent fill */
+  --io-on-accent: #f4efe8;      /* text on accent fills: 5.3 on accent, 7.3 on accent-strong */
+  --io-accent-text: #f06a5b;    /* oxide red as text/icons: 6.0 / 5.4 / 4.7 */
+
+  /* Status. */
+  --io-danger: var(--io-accent-text); /* error text */
+  --io-success: #5fbf7f;              /* 8.0 / 7.2 / 6.3 */
+  --io-warning: #e8b04a;              /* 9.3 / 8.4 / 7.3 */
+
+  /* Focus ring: must stay visible on every surface. */
+  --io-focus: var(--io-primary-strong);
+}
+
+/* Page defaults, so the standalone app never flashes white between the splash screen and the UI. */
+html,
+body {
+  margin: 0;
+  background-color: var(--io-bg);
+  color: var(--io-text);
+}

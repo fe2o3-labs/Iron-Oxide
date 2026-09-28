@@ -2011,6 +2011,7 @@ version = "0.1.0"
 dependencies = [
  "dioxus",
  "iron-oxide-domain",
+ "serde_json",
  "tokio",
  "tower",
 ]

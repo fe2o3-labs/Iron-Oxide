@@ -11,6 +11,10 @@
 //!   increment and display helpers.
 //! - [`Reps`], [`Percent`] and [`Seconds`].
 //! - [`ValueError`] for every rejected value.
+//! - The rest timer lives in [`time`] and [`timer`].
+
+pub mod time;
+pub mod timer;
 
 mod display;
 mod duration;
