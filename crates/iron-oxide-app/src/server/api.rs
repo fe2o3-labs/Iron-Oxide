@@ -7,6 +7,7 @@
 
 pub mod error;
 pub mod errors_layer;
+pub mod programs;
 pub mod sessions;
 #[cfg(test)]
 pub(crate) mod testing;

@@ -81,7 +81,14 @@ macro_rules! domain_id {
     )+};
 }
 
-domain_id!(UserId, ProgramId, ProgramVersionId, SessionId, SetId);
+domain_id!(
+    UserId,
+    ProgramId,
+    ProgramVersionId,
+    CreationId,
+    SessionId,
+    SetId
+);
 
 /// The signed-in user (from [`AuthUser`](crate::server::auth::AuthUser)) as the repository's
 /// owner key.
