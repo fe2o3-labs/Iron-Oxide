@@ -7,6 +7,8 @@
 use dioxus::logger::tracing;
 use dioxus::prelude::ServerFnError;
 
+use crate::server::api::error::{TRANSIENT, is_transient};
+
 /// Why a sign-in operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -85,6 +87,12 @@ impl AuthError {
             ),
             Self::NotFound => (404, "Not found."),
             Self::Invalid(message) => (400, message),
+            // The session store and the database unreachable (a cold or restarting Neon
+            // compute): nothing happened, retrying is safe (#68).
+            Self::Session(tower_sessions::session::Error::Store(
+                tower_sessions::session_store::Error::Backend(_),
+            )) => (503, TRANSIENT),
+            Self::Database(error) if is_transient(error) => (503, TRANSIENT),
             Self::Database(_) | Self::Session(_) | Self::Internal(_) => {
                 (500, "Something went wrong. Please try again.")
             }
@@ -157,6 +165,21 @@ mod tests {
             assert!(!message.contains("mismatch"), "{message}");
             assert!(code == 400 || code == 500, "{code}");
         }
+    }
+
+    #[test]
+    fn an_unreachable_database_is_a_retryable_503() {
+        let backend = tower_sessions::session_store::Error::Backend("pool timed out".to_owned());
+        for error in [
+            AuthError::Session(tower_sessions::session::Error::Store(backend)),
+            AuthError::Database(sqlx::Error::PoolTimedOut),
+        ] {
+            assert_eq!(error.public(), (503, TRANSIENT));
+        }
+        assert_eq!(
+            AuthError::Database(sqlx::Error::RowNotFound).public().0,
+            500
+        );
     }
 
     #[test]

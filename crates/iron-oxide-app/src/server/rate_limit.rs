@@ -415,10 +415,17 @@ fn too_many_requests(
         wait_text(secs)
     );
     let (content_type, body) = if path.starts_with("/api/") {
+        // The `/api/` error shape (docs/api.md): the client decodes `data.ServerError` into
+        // `ServerFnError::ServerError { message, code: 429, details }`.
+        let code = StatusCode::TOO_MANY_REQUESTS.as_u16();
         let body = serde_json::json!({
             "message": message,
-            "code": StatusCode::TOO_MANY_REQUESTS.as_u16(),
-            "data": { RETRY_AFTER_SECS: secs },
+            "code": code,
+            "data": { "ServerError": {
+                "message": message,
+                "code": code,
+                "details": { RETRY_AFTER_SECS: secs },
+            } },
         });
         ("application/json", body.to_string())
     } else {
@@ -570,7 +577,11 @@ mod tests {
             serde_json::json!({
                 "message": "Too many requests. Please try again in 5 seconds.",
                 "code": 429,
-                "data": { "retry_after_secs": 5 },
+                "data": { "ServerError": {
+                    "message": "Too many requests. Please try again in 5 seconds.",
+                    "code": 429,
+                    "details": { "retry_after_secs": 5 },
+                } },
             })
         );
     }

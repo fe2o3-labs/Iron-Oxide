@@ -198,6 +198,7 @@ types mirror them field for field, and switch to them once they are merged.
 
 | Module | Functions |
 |---|---|
+| `users` | `plan` (the subscription plan, read on every gated call), `lock_plan` (the same with `FOR UPDATE`: the serialisation point of quota checks), `unarchived_programs` (what the custom program quota counts); see docs/billing.md |
 | `settings` | `get` (defaults when never saved), `save` |
 | `training_maxes` | `list`, `set`, `delete` |
 | `programs` | `seed_builtins`, `list_builtins`, `copy_builtin` and `create` (idempotent on a `CreationId`), `get`, `list`, `rename`, `set_archived`, `add_version` (a retried identical upload is a no-op), `list_versions`, `get_version`, `latest_version` |
@@ -260,15 +261,14 @@ make test-db   # starts the compose database, migrates it, checks .sqlx/, runs t
   - every table with user data, `users` included, has a `BEFORE TRUNCATE` guard, and
     `TRUNCATE ... CASCADE` on each of them fails while user deletion still cascades.
 
-Not here yet: a test-only way to sign in as a user, and isolation tests at the server-function
-level (including the GDPR export). They come with `AuthUser` (#5) and the server functions
-(#18–#22), which wrap this repository.
+Isolation at the server-function level (signed in as A or B through the real router) uses the
+endpoint harness in `server/api/testing.rs`; see `docs/api.md`.
 
 CI runs them in the "Integration tests (Postgres)" job. It fails unless every
 `#[ignore = "needs Postgres"]` test in the app's `src/` appears as passed in the log, and unless at
 least as many schema tests (module `schema_tests`) and repository isolation tests (names containing
 `another_users`, `users_only`, `nobody_can`, `two_users` or `only_the_users`) passed as today.
-Follow the naming convention for new isolation tests and raise the floors in `ci.yml`.
+Follow the naming convention for new isolation tests and raise the floors in `scripts/check-postgres-tests.sh`.
 
 ### Adding a user-owned table
 

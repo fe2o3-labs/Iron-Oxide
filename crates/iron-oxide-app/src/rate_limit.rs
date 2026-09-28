@@ -4,8 +4,9 @@
 //! A refused call answers `429 Too Many Requests` with:
 //! - a `Retry-After` header: whole seconds, rounded up, at least 1;
 //! - for server functions, the server-function error body
-//!   `{"message": "...", "code": 429, "data": {"retry_after_secs": N}}`, the same `N`. The client
-//!   decodes it as `ServerFnError::ServerError { code: 429, details: Some({"retry_after_secs": N}), .. }`.
+//!   `{"message", "code": 429, "data": {"ServerError": {"message", "code": 429, "details":
+//!   {"retry_after_secs": N}}}}` (`docs/api.md`), the same `N`. The client decodes it as
+//!   `ServerFnError::ServerError { code: 429, details: Some({"retry_after_secs": N}), .. }`.
 //!
 //! A 429 is retryable, but only after the delay: never sooner.
 

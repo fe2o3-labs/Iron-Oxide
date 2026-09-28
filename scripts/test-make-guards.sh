@@ -7,7 +7,7 @@
 # run, a successful fetch and a clean `main` at exactly origin/main (not ahead, behind or
 # diverged), both before and after its `make check`, and deploys from a pristine export of the
 # commit; `make clean` and `make clean-all CONFIRM=1` refuse a target dir outside the checkout
-# without CONFIRM_SHARED=1. And the suite itself passes when its caller sets CONFIRM=1 or
+# without CONFIRM_SHARED=1; `make prune` refuses a target dir holding tracked files. And the suite itself passes when its caller sets CONFIRM=1 or
 # SKIP_SECRETS=1.
 set -euo pipefail
 
@@ -17,7 +17,7 @@ unset MAKEFLAGS MFLAGS MAKEOVERRIDES GNUMAKEFLAGS MAKELEVEL MAKEFILES \
   IRON_OXIDE_START_TEST_DB IRON_OXIDE_START_SMOKE_DB
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-scratch=$(mktemp -d)
+scratch=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$scratch"' EXIT
 
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com
@@ -154,6 +154,99 @@ run fail "refuses a main behind origin/main" "HEAD is not origin/main" -- "${dep
 
 git -C "$work" commit --quiet --allow-empty -m diverged
 run fail "refuses a main diverged from origin/main" "HEAD is not origin/main" -- "${deploy[@]}" CONFIRM=1
+
+echo "make prune (throwaway target dirs only)"
+# A tiny crate, so that the real `cargo metadata` resolves the target dir. The stub cargo passes
+# everything to the real one except `sweep`, which it only echoes.
+real_cargo=$(command -v cargo)
+printf '[package]\nname = "scratch"\nversion = "0.1.0"\nedition = "2021"\n' >"$work/Cargo.toml"
+mkdir -p "$work/src" && : >"$work/src/lib.rs"
+mkdir -p "$work/scripts" && cp "$root/scripts/prune.sh" "$work/scripts/prune.sh"
+printf '#!/bin/sh\nif [ "$1" = sweep ]; then echo "STUB sweep $*"; exit 0; fi\nexec "%s" "$@"\n' "$real_cargo" \
+  >"$stubs/cargo-sweep-stub"
+printf '#!/bin/sh\necho "INC=[${CARGO_INCREMENTAL-unset}] $*"\n' >"$stubs/cargo-inc"
+chmod +x "$stubs/cargo-sweep-stub" "$stubs/cargo-inc"
+fake_target() { mkdir -p "$1/debug" && : >"$1/.rustc_info.json"; }
+# prune_case <ok|fail> <description> <pattern> <env assignments...> -- <make arguments...>
+prune_case() {
+  local expect=$1 what=$2 pattern=$3
+  shift 3
+  local envs=()
+  while [ "$1" != -- ]; do envs+=("$1"); shift; done
+  shift
+  local out status=0
+  out=$(cd "$work" && env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR ${envs[@]+"${envs[@]}"} \
+    make prune CARGO="$stubs/cargo-sweep-stub" "$@" 2>&1) || status=$?
+  local verdict=pass
+  if [ "$expect" = ok ] && [ "$status" -ne 0 ]; then verdict="FAIL (exit $status)"; fi
+  if [ "$expect" = fail ] && [ "$status" -eq 0 ]; then verdict="FAIL (exit 0)"; fi
+  if ! grep -qF -- "$pattern" <<<"$out"; then verdict="FAIL (no \"$pattern\")"; fi
+  if [ "$expect" = fail ] && grep -q "STUB sweep" <<<"$out"; then verdict="FAIL (swept anyway)"; fi
+  if [ "$verdict" = pass ]; then
+    echo "  ok    $what"
+  else
+    echo "  $verdict  $what"
+    sed 's/^/        | /' <<<"$out"
+    failures=$((failures + 1))
+  fi
+  prune_out=$out
+}
+fakehome=$scratch/home && fake_target "$fakehome"
+notarget=$scratch/not-a-target && mkdir -p "$notarget"
+spaced="$scratch/my target" && fake_target "$spaced"
+prune_case fail "refuses the checkout" "this checkout or one of its parents" CARGO_TARGET_DIR="$work" --
+prune_case fail "refuses a parent of the checkout" "this checkout or one of its parents" CARGO_TARGET_DIR="$scratch" --
+prune_case fail "refuses /" "refusing to sweep /." CARGO_TARGET_DIR=/ --
+prune_case fail "refuses \$HOME" "refusing to sweep \$HOME" HOME="$fakehome" CARGO_TARGET_DIR="$fakehome" \
+  RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" --
+prune_case fail "refuses a dir that is not a cargo target dir" "does not look like a cargo target dir" \
+  CARGO_TARGET_DIR="$notarget" --
+prune_case fail "resolves CARGO_BUILD_TARGET_DIR (here: the checkout)" "this checkout or one of its parents" \
+  CARGO_BUILD_TARGET_DIR=. --
+prune_case ok "does nothing when the target dir does not exist" "Nothing to prune" \
+  CARGO_TARGET_DIR="$scratch/missing-target" --
+prune_case ok "handles a target dir with a space" "$spaced: " CARGO_TARGET_DIR="$spaced" --
+prune_case fail "rejects PRUNE_MAXSIZE=10G before deleting anything" "is not a size" \
+  CARGO_TARGET_DIR="$spaced" -- PRUNE_MAXSIZE=10G
+prune_case fail "rejects PRUNE_MAXSIZE='10 GB' before deleting anything" "is not a size" \
+  CARGO_TARGET_DIR="$spaced" -- "PRUNE_MAXSIZE=10 GB"
+prune_case ok "accepts PRUNE_MAXSIZE=10GB" "STUB sweep sweep --maxsize 10GB ." \
+  CARGO_TARGET_DIR="$spaced" -- PRUNE_MAXSIZE=10GB
+mkdir -p "$spaced/locked" && chmod 000 "$spaced/locked"
+prune_case ok "reports sizes even when du cannot read everything" " MB -> " CARGO_TARGET_DIR="$spaced" --
+chmod 755 "$spaced/locked"
+
+inc="$spaced/debug/incremental"
+mkdir -p "$inc/old-session" "$inc/new-session"
+touch -t 202001010000 "$inc/old-session"
+prune_case ok "dry run lists an old incremental cache" "would delete $inc/old-session" \
+  CARGO_TARGET_DIR="$spaced" -- DRY_RUN=1
+if [ -d "$inc/old-session" ]; then echo "  ok    dry run deletes nothing"; else
+  echo "  FAIL  dry run deletes nothing"; failures=$((failures + 1)); fi
+prune_case ok "deletes incremental caches older than PRUNE_DAYS" "STUB sweep" CARGO_TARGET_DIR="$spaced" --
+if [ ! -e "$inc/old-session" ] && [ -d "$inc/new-session" ]; then
+  echo "  ok    ...and keeps the recent ones"
+else
+  echo "  FAIL  ...and keeps the recent ones"; failures=$((failures + 1))
+fi
+prune_case ok "PRUNE_MAXSIZE deletes every incremental cache before the size sweep" "--maxsize 1GB" \
+  CARGO_TARGET_DIR="$spaced" -- PRUNE_MAXSIZE=1GB
+if [ ! -e "$inc/new-session" ]; then echo "  ok    ...including the recent ones"; else
+  echo "  FAIL  ...including the recent ones"; failures=$((failures + 1)); fi
+
+echo "make compile keeps incremental builds; the CI-like targets do not"
+out=$(cd "$work" && env -u CARGO_INCREMENTAL make compile CARGO="$stubs/cargo-inc" 2>&1 || true)
+if grep -q "INC=\[0\]" <<<"$out" || ! grep -q "INC=\[unset\]" <<<"$out"; then
+  echo "  FAIL  compile runs every cargo check incrementally"; sed 's/^/        | /' <<<"$out"; failures=$((failures + 1))
+else
+  echo "  ok    compile runs every cargo check incrementally"
+fi
+out=$(cd "$work" && env -u CARGO_INCREMENTAL make lint CARGO="$stubs/cargo-inc" 2>&1 || true)
+if grep -q "INC=\[unset\]" <<<"$out" || ! grep -q "INC=\[0\]" <<<"$out"; then
+  echo "  FAIL  lint runs with CARGO_INCREMENTAL=0"; sed 's/^/        | /' <<<"$out"; failures=$((failures + 1))
+else
+  echo "  ok    lint runs with CARGO_INCREMENTAL=0"
+fi
 
 echo "make clean / clean-all"
 shared=$scratch/shared-target

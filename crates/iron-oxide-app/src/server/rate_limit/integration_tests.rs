@@ -150,7 +150,10 @@ async fn a_burst_past_the_limit_gets_429_with_retry_after_until_it_refills() {
     let body = to_bytes(response.into_body(), 4096).await.unwrap();
     let body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["code"], 429);
-    assert_eq!(body["data"]["retry_after_secs"], 20);
+    assert_eq!(
+        body["data"]["ServerError"]["details"]["retry_after_secs"],
+        20
+    );
 
     tokio::time::advance(Duration::from_millis(5_500)).await;
     let response = send(
@@ -494,7 +497,11 @@ async fn the_client_sees_a_429_server_error_with_the_delay(db: PgPool) {
         json!({
             "message": "Too many requests. Please try again in 45 seconds.",
             "code": 429,
-            "data": { "retry_after_secs": 45 },
+            "data": { "ServerError": {
+                "message": "Too many requests. Please try again in 45 seconds.",
+                "code": 429,
+                "details": { "retry_after_secs": 45 },
+            } },
         })
     );
 }
@@ -761,4 +768,38 @@ async fn a_flooding_64_does_not_lock_out_its_48_neighbours() {
         }
     }
     assert_eq!(neighbour_allowed, 30);
+}
+
+/// A real 429 from the limiter, through the real router (and so the `/api/` error layer), decodes
+/// on the client into a rate-limit failure that carries the delay. Every sign-in function is
+/// under `/api/`; the Google callback is a page, not a server function.
+#[tokio::test]
+async fn a_real_429_classifies_as_rate_limited_with_its_delay() {
+    use crate::api::error::{ApiFailure, FailureKind};
+    use crate::server::api::errors_layer::tests::client_error;
+
+    let mut limits = generous();
+    limits.auth_begin.per_ip = Some(quota(1, Duration::from_secs(45)));
+    limits.write.per_ip = Some(quota(1, Duration::from_secs(7)));
+    let app = TestApp::with_rate_limit(
+        db::tests::unreachable_pool(),
+        config(ClientIpSource::Peer, limits),
+    )
+    .await;
+    let mut browser = app.browser();
+    for (path, secs) in [(SIGN_IN_BEGIN, 45), ("/api/sets", 7)] {
+        post_raw(&mut browser, path, json!({})).await;
+        let response = post_raw(&mut browser, path, json!({})).await;
+        let status = response.status();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{path}");
+        assert_eq!(retry_after(response.headers()), secs, "{path}");
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let failure = ApiFailure::classify(&client_error(status, &body).await);
+        assert_eq!(failure.kind, FailureKind::RateLimited, "{path}");
+        assert_eq!(failure.retry_after_secs(), Some(secs), "{path}");
+        assert_eq!(
+            failure.message,
+            format!("Too many requests. Please try again in {secs} seconds.")
+        );
+    }
 }

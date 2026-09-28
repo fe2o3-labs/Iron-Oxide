@@ -203,7 +203,9 @@ For server functions (paths under `/api/`) the body is the same JSON a server fu
 has:
 
 ```json
-{"message": "Too many requests. Please try again in 5 seconds.", "code": 429, "data": {"retry_after_secs": 5}}
+{"message": "Too many requests. Please try again in 5 seconds.", "code": 429,
+ "data": {"ServerError": {"message": "Too many requests. Please try again in 5 seconds.",
+                          "code": 429, "details": {"retry_after_secs": 5}}}}
 ```
 
 The Dioxus client decodes it as `ServerFnError::ServerError { code: 429, message, details:
@@ -214,7 +216,8 @@ message as plain text.
 **For the client error classification (#68) and the retry queue (#30):**
 
 - a 429 is **retryable, after the delay and never sooner**;
-- read the delay with `crate::rate_limit::retry_after(&error)`. It returns `Some(delay)` for a 429:
+- read the delay with `ApiFailure::classify(&error).retry_after_secs()` (`docs/api.md`), or
+  `crate::rate_limit::retry_after(&error)`. It returns `Some(delay)` for a 429:
   `retry_after_secs` from `details`, or 30 s if the 429 arrived without its body. It returns `None`
   for any other error;
 - when you retry a batch, wait the delay once for the whole batch, not per request.

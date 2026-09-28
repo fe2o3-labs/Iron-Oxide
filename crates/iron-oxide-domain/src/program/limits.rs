@@ -22,8 +22,8 @@ pub const MAX_NAME_CHARS: usize = 100;
 pub const MAX_TEXT_CHARS: usize = 2_000;
 /// Most days in a program.
 pub const MAX_DAYS: usize = 14;
-/// Longest rotation.
-pub const MAX_ROTATION: usize = 28;
+/// Longest rotation: each day appears at most once, so no more entries than days.
+pub const MAX_ROTATION: usize = MAX_DAYS;
 /// Most exercises in a day.
 pub const MAX_EXERCISES_PER_DAY: usize = 30;
 /// Most working sets (or holds) of an exercise.
