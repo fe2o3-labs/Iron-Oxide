@@ -136,7 +136,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:18-alpine
         # Throwaway credentials for an ephemeral CI container; not a secret.
         env:
           POSTGRES_USER: iron_oxide
