@@ -3,7 +3,13 @@
 # Production image for the Iron Oxide fullstack app (see docs/operations/deploy.md).
 #
 #   docker build -t iron-oxide .
-#   docker run --rm --init -p 8080:8080 iron-oxide
+#   docker run --rm --init -p 8080:8080 \
+#     --add-host=host.docker.internal:host-gateway \
+#     -e APP_BASE_URL=http://localhost:8080 \
+#     -e DATABASE_URL=postgres://iron_oxide:iron_oxide@host.docker.internal:5433/iron_oxide \
+#     iron-oxide
+#
+# The server needs a reachable Postgres at startup: here the local docker compose database.
 #
 # Stage 1 builds the release bundle with `dx bundle --web --release` (the same command as the CI
 # `dx-bundle` job). Stage 2 is a distroless image holding only the server binary and the client
@@ -69,12 +75,15 @@ ENV SQLX_OFFLINE=true
 # `--features server` and the client for wasm32 with `--features web`, which `cargo chef cook`
 # does not reproduce. The cargo registry and `target/` persist between builds on the same builder.
 # Do not set RUSTFLAGS here: it would override .cargo/config.toml (wasm needs its cfg flag).
-# `target/` is a cache mount, so the bundle is copied out to /out in the same step.
+# `target/` is a cache mount, so the bundle is copied out to /out in the same step. The web output
+# directory is removed first: dx does not delete old hashed bundles, and the cache mount would
+# otherwise ship every `.wasm`/`.js` ever built on this builder. The compile cache is kept.
 RUN --mount=type=cache,id=iron-oxide-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=iron-oxide-cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=iron-oxide-target,target=/app/target \
     set -eu; \
     if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi; \
+    rm -rf target/dx/iron-oxide-app/release/web; \
     dx bundle --web --release -p iron-oxide-app; \
     mkdir -p /out; \
     cp -a target/dx/iron-oxide-app/release/web /out/app; \

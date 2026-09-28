@@ -15,12 +15,24 @@ app as environment variables.
 
 ## Build and run the image locally
 
+The server connects to Postgres and runs the migrations before it listens, so start the local
+docker compose database first (`docker compose up -d`, see the README), then:
+
 ```sh
 docker build -t iron-oxide .
-docker run --rm --init -p 8080:8080 iron-oxide
+docker run --rm --init -p 8080:8080 \
+  --add-host=host.docker.internal:host-gateway \
+  -e APP_BASE_URL=http://localhost:8080 \
+  -e DATABASE_URL=postgres://iron_oxide:iron_oxide@host.docker.internal:5433/iron_oxide \
+  iron-oxide
 curl http://127.0.0.1:8080/healthz   # ok
+curl http://127.0.0.1:8080/readyz    # ok: the database answers
 open http://127.0.0.1:8080/
 ```
+
+Inside the container `localhost` is the container itself; `host.docker.internal` reaches the
+compose database published on the host. These are the local development credentials from
+`.env.example`, not secrets.
 
 On a small Docker VM (for example Colima's default 2 CPU / 2 GiB), limit parallel compilation
 so the linker isn't killed for lack of memory: `docker build --build-arg CARGO_BUILD_JOBS=2 ...`.
@@ -53,17 +65,32 @@ The variables are described in `.env.example` (from the config ticket, #3), whic
 reference if this page and it ever disagree. The server validates them at startup and exits with
 a message naming each missing or invalid one.
 
-Set them in one command, so the app restarts only once. Values come from Neon, Google Cloud and a
-generator, never from a file in the repo.
+Secret values must never be typed on a command line (they would land in the shell history) or
+printed on screen. `fly secrets import` reads `NAME=VALUE` lines from stdin, so each value goes
+from a hidden prompt or a generator straight to Fly:
 
 ```sh
-fly secrets set --stage \
-  DATABASE_URL='postgres://USER:PASSWORD@ep-XXXX.eu-central-1.aws.neon.tech/DBNAME?sslmode=require' \
-  APP_BASE_URL='https://iron-oxide.fly.dev'
+# Neon direct connection string: paste it at the silent prompt.
+read -rs DB_URL && printf 'DATABASE_URL=%s\n' "$DB_URL" | fly secrets import --stage; unset DB_URL
+
+# Not a secret, so it can be typed as is.
+fly secrets set --stage APP_BASE_URL='https://iron-oxide.fly.dev'
 ```
 
 `--stage` stores them without deploying (the app has no machine yet); the first deploy picks them
-up. After the first deploy, drop `--stage`: `fly secrets set` then restarts the machines.
+up. After the first deploy, drop `--stage`: Fly then restarts the machines with the new values.
+
+Later, for sign-in (#5), the same pattern applies (with `--stage` to set several before one
+restart, then `fly secrets deploy`). Generate the session key and send it straight to Fly, without
+ever seeing it:
+
+```sh
+printf 'SESSION_KEY=%s\n' "$(openssl rand 64 | openssl base64 -A)" | fly secrets import --stage
+read -rs GOOGLE_SECRET && printf 'GOOGLE_CLIENT_SECRET=%s\n' "$GOOGLE_SECRET" \
+  | fly secrets import --stage; unset GOOGLE_SECRET
+# ... the non-secret sign-in values with `fly secrets set --stage NAME=value`, then:
+fly secrets deploy
+```
 
 | Key | Required | What |
 |---|---|---|
@@ -73,7 +100,7 @@ up. After the first deploy, drop `--stage`: `fly secrets set` then restarts the 
 | `WEBAUTHN_ORIGIN` | sign-in | `https://iron-oxyde.com` |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | sign-in | OAuth "Web application" client from the Google Cloud console. |
 | `GOOGLE_REDIRECT_URL` | sign-in | `https://iron-oxyde.com/auth/google/callback`, also registered in the Google client. |
-| `SESSION_KEY` | sign-in | Session cookie key, at least 64 random bytes, base64: `openssl rand 64 \| openssl base64 -A`. Use a key that exists nowhere else. |
+| `SESSION_KEY` | sign-in | Session cookie key, at least 64 random bytes, base64. Generate it and pipe it to `fly secrets import` as shown above; never print it. Use a key that exists nowhere else. |
 | `RUST_LOG` | no | Log filter, e.g. `info,sqlx=warn`. Not a secret: it can go in `[env]` in `fly.toml`. |
 
 The six sign-in variables are all-or-nothing: set all of them or none (they are needed once
@@ -111,16 +138,31 @@ redirects plain HTTP to it.
 
 ### 5. Deploy from GitHub Actions
 
-Create a deploy token scoped to this app only, and store it as a repository secret:
+The deploy job uses the `production` GitHub environment. Restrict that environment to `main`, so
+that no other branch (and no other workflow) can read the deploy token:
+
+```sh
+gh api -X PUT repos/guizmaii-opensource/Iron-Oxide/environments/production \
+  -F 'deployment_branch_policy[protected_branches]=false' \
+  -F 'deployment_branch_policy[custom_branch_policies]=true'
+gh api -X POST repos/guizmaii-opensource/Iron-Oxide/environments/production/deployment-branch-policies \
+  -f name=main -f type=branch
+```
+
+(Or in the GitHub UI: Settings, Environments, `production`, Deployment branches: `main` only.)
+
+Then create a deploy token scoped to this app only, and store it as a secret **of the
+`production` environment**, not as a repository secret:
 
 ```sh
 fly tokens create deploy --app iron-oxide --name github-actions --expiry 8760h \
-  | gh secret set FLY_API_TOKEN --repo guizmaii-opensource/Iron-Oxide
+  | gh secret set FLY_API_TOKEN --env production --repo guizmaii-opensource/Iron-Oxide
 ```
 
 The token goes straight from flyctl to GitHub without being printed. It expires after a year
 (`8760h`); create a new one and run the same command to rotate it. Until the secret exists, the
-deploy job succeeds with a "Deploy skipped" notice instead of failing.
+deploy job succeeds with a "Deploy skipped" notice instead of failing. The job also refuses to
+deploy anything but `main`, including manual runs.
 
 Then trigger a deploy: push to `main`, or run the workflow by hand:
 
@@ -212,9 +254,10 @@ Then open `https://iron-oxyde.com` in a browser and sign in.
 - **VM**: `shared-cpu-1x` with 512 MB. Scale with `fly scale memory 1024` or
   `fly scale vm shared-cpu-2x` if needed.
 - **No volume**: all state lives in Neon.
-- **Signals**: `--init` in the `docker run` examples puts a small init process in front of the
-  server so Ctrl-C and `docker stop` are forwarded promptly. It is harmless once the server
-  handles `SIGTERM` itself (graceful shutdown, #3 / #4). On Fly, the app runs under Fly's own init.
+- **Signals**: `fly.toml` sets `kill_signal = "SIGTERM"` and `kill_timeout = "30s"`, so a machine
+  being replaced or stopped gets SIGTERM and 30 s to drain in-flight requests (graceful shutdown,
+  #3 / #4) before it is killed. Fly's defaults are SIGINT and 5 s. `--init` in the local
+  `docker run` example forwards Ctrl-C promptly; it is harmless with graceful shutdown.
 
 ## Day-to-day
 

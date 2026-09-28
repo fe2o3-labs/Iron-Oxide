@@ -30,16 +30,38 @@ jobs:
         run: docker build --tag iron-oxide:ci .
       - name: Image size
         run: docker image ls iron-oxide:ci
+      - name: Exactly one client bundle in the image
+        run: |
+          docker create --name iron-oxide-files iron-oxide:ci > /dev/null
+          files=$(docker export iron-oxide-files | tar -t)
+          docker rm iron-oxide-files > /dev/null
+          echo "$files" | grep '^app/'
+          test "$(echo "$files" | grep -c '^app/public/assets/.*\.wasm$')" -eq 1
+      # The server connects to Postgres (and runs the migrations) before it listens, so the
+      # container gets a real, throwaway database on a private network.
+      - name: Start Postgres
+        run: |
+          docker network create iron-oxide-ci
+          # Throwaway credentials for an ephemeral CI container; not a secret.
+          docker run --detach --name postgres --network iron-oxide-ci \
+            --env POSTGRES_USER=iron_oxide --env POSTGRES_PASSWORD=iron_oxide \
+            --env POSTGRES_DB=iron_oxide \
+            --health-cmd "pg_isready -U iron_oxide -d iron_oxide" --health-interval 2s \
+            postgres:18-alpine
+          for _ in $(seq 1 60); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' postgres)" = "healthy" ] && exit 0
+            sleep 1
+          done
+          docker logs postgres
+          exit 1
       - name: Smoke test the container
         run: |
-          # The server validates its config at startup (see .env.example). The database pool
-          # connects lazily and /healthz does not touch it, so no Postgres is needed here.
-          # Throwaway placeholder values for an ephemeral container; not secrets.
-          docker run --detach --init --name iron-oxide --publish 8080:8080 \
+          docker run --detach --init --name iron-oxide --network iron-oxide-ci \
+            --publish 8080:8080 \
             --env APP_BASE_URL=http://127.0.0.1:8080 \
-            --env DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide_test \
+            --env DATABASE_URL=postgres://iron_oxide:iron_oxide@postgres:5432/iron_oxide \
             iron-oxide:ci
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 60); do
             curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
             sleep 1
           done
@@ -53,7 +75,8 @@ jobs:
 
   deploy:
     name: Deploy to Fly.io
-    if: github.event_name != 'pull_request'
+    # Only `main` is ever deployed, including manual runs (workflow_dispatch works on any branch).
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # Never run two deploys at once, and never cancel one halfway.
     concurrency:
@@ -62,7 +85,8 @@ jobs:
     environment:
       name: production
     env:
-      # Deploy token scoped to the app (see docs/operations/deploy.md). `secrets` cannot be used
+      # Deploy token scoped to the app, stored as a secret of the `production` environment, which
+      # only `main` may use (see docs/operations/deploy.md). `secrets` cannot be used
       # in `if:` conditions, so the steps below test this variable instead.
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
@@ -81,6 +105,9 @@ jobs:
           persist-credentials: false
       - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # 1.5
         if: steps.token.outputs.present == 'true'
+        with:
+          # renovate: datasource=github-releases depName=superfly/flyctl extractVersion=^v(?<version>.+)$
+          version: 0.4.108
       # Builds on Fly's remote builder (amd64) and waits for the health checks of fly.toml.
       - name: fly deploy
         if: steps.token.outputs.present == 'true'

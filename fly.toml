@@ -6,6 +6,10 @@
 app = "iron-oxide"
 # Frankfurt, next to the Neon database (AWS eu-central-1).
 primary_region = "fra"
+# The server shuts down gracefully on SIGTERM (#50): it stops accepting connections and drains
+# in-flight requests. Fly's default is SIGINT with 5 s; give it 30 s before the hard kill.
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
 
 [build]
   dockerfile = "Dockerfile"
