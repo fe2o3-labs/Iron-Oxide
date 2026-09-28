@@ -326,6 +326,11 @@ jobs:
             http://127.0.0.1:8080/api/auth/passkey/sign-in/begin | grep -q '"challenge"'
           grep -i '^set-cookie: iron_oxide_session=' "$RUNNER_TEMP/headers" | grep -i 'httponly' | grep -qi 'samesite=lax'
           curl -sS http://127.0.0.1:8080/auth/google/callback | grep -q '"type":"error"'
+          # Billing (#21): the Stripe webhook stub is reachable cross-site (no Origin, like Stripe)
+          # and answers 501; a body over 256 KiB is 413.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8080/webhooks/stripe)" = "501"
+          head -c 300000 /dev/zero | tr '\0' ' ' > "$RUNNER_TEMP/big.json"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data-binary @"$RUNNER_TEMP/big.json" http://127.0.0.1:8080/webhooks/stripe)" = "413"
           # SIGTERM (Docker's stop signal, and what fly.toml sets) stops it cleanly with status 0.
           # SIGINT (Fly's default) is handled the same way; the Postgres tests cover it.
           kill -TERM "$server_pid"

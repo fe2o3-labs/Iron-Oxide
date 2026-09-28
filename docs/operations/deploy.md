@@ -111,6 +111,7 @@ fly secrets deploy
 | `GOOGLE_REDIRECT_URL` | yes | `APP_BASE_URL`'s origin + `/auth/google/callback`, e.g. `https://iron-oxyde.com/auth/google/callback`, also registered in the Google client. |
 | `SESSION_KEY` | yes | Session cookie key, at least 64 random bytes, base64. Generate it and pipe it to `fly secrets import` as shown above; never print it. Use a key that exists nowhere else. |
 | `RUST_LOG` | no | Log filter, e.g. `info,sqlx=warn`. Not a secret: it can go in `[env]` in `fly.toml`. |
+| `STRIPE_WEBHOOK_SECRET` | no | Stripe webhook signing secret. Not needed yet: the webhook is a stub (docs/billing.md). When billing ships, pipe it to `fly secrets import` like `SESSION_KEY`; never print it. |
 
 The six sign-in variables are required since sign-in (#5): **set them before deploying it**, or
 the new machines refuse to start (the old ones keep serving). `WEBAUTHN_ORIGIN` and
