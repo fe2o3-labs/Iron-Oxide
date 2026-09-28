@@ -725,6 +725,7 @@ mod tests {
             db_testing::creation(),
             "Test program",
             &document(5),
+            db_testing::unlimited,
         )
         .await
         .unwrap();
@@ -1099,10 +1100,16 @@ mod tests {
             .unwrap();
 
         // Another program starts at its first day: the history is filtered to the active program.
-        let (_, other, _) =
-            db::programs::create(&api.db, a.id, db_testing::creation(), "Other", &document(5))
-                .await
-                .unwrap();
+        let (_, other, _) = db::programs::create(
+            &api.db,
+            a.id,
+            db_testing::creation(),
+            "Other",
+            &document(5),
+            db_testing::unlimited,
+        )
+        .await
+        .unwrap();
         db::active_program::set(&api.db, a.id, other.id)
             .await
             .unwrap();
