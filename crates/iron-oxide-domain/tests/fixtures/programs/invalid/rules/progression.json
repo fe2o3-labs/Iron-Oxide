@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "name": "Rules that do not fit",
+  "days": [
+    {
+      "id": "a",
+      "name": "A",
+      "exercises": [
+        {
+          "id": "chin-up",
+          "name": "Chin-up",
+          "work": { "reps": { "sets": 3, "reps": 8 } },
+          "rest": 90,
+          "progression": { "double_progression": { "increment": { "kg": 0 } } }
+        },
+        {
+          "id": "squat",
+          "name": "Squat",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "kg": 100 },
+          "rest": 180,
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": { "lb": 5 },
+              "deload_after_failures": { "failures": 0, "percent": 60 }
+            }
+          }
+        },
+        {
+          "id": "bench",
+          "name": "Bench",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "kg": 60 },
+          "rest": 180,
+          "progression": { "training_max": { "increment": { "kg": 2.5 } } }
+        },
+        {
+          "id": "press",
+          "name": "Press",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "percent_of_training_max": 70 },
+          "rest": 180,
+          "progression": { "add_when_top_of_range": { "increment": { "kg": 1 } } }
+        },
+        {
+          "id": "plank",
+          "name": "Plank",
+          "work": { "hold": { "sets": 3, "seconds": 30 } },
+          "load": { "kg": 10 },
+          "rest": 60,
+          "progression": { "add_when_top_of_range": { "increment": { "kg": 2.5 } } }
+        }
+      ]
+    }
+  ],
+  "rotation": ["a"]
+}

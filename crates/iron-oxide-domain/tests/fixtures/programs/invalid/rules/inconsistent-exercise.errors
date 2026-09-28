@@ -1,0 +1,3 @@
+days[1].exercises[0].name: exercise `squat` must have the same name everywhere (see days[0].exercises[0])
+days[1].exercises[0].progression: exercise `squat` must have the same progression everywhere (see days[0].exercises[0])
+days[1].exercises[0].load: exercise `squat` must have the same kind of load everywhere (see days[0].exercises[0])

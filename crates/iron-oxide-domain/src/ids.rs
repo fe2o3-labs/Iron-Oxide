@@ -105,7 +105,7 @@ uuid_id!(
 pub const SLUG_MAX_LEN: usize = 64;
 
 /// Returns why `value` is not a valid slug, or `None` when it is. Shared by every slug ID.
-fn slug_problem(value: &str) -> Option<&'static str> {
+pub(crate) fn slug_problem(value: &str) -> Option<&'static str> {
     if value.is_empty() {
         return Some("must not be empty");
     }

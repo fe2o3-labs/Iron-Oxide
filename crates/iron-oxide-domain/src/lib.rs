@@ -16,6 +16,7 @@ mod duration;
 mod error;
 mod ids;
 mod percent;
+pub mod program;
 mod reps;
 mod units;
 mod weight;

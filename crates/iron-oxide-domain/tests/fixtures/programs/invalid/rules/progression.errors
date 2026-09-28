@@ -1,0 +1,9 @@
+days[0].exercises[0].progression.double_progression.increment.kg: must be greater than zero
+days[0].exercises[0].progression: `double_progression` needs a kg or lb load
+days[0].exercises[0].progression: `double_progression` needs a rep range such as {"min": 8, "max": 12}
+days[0].exercises[1].progression.add_when_top_of_range.increment: the increment is in lb but the load is in kg
+days[0].exercises[1].progression.add_when_top_of_range.deload_after_failures.failures: must be between 1 and 10 (got 0)
+days[0].exercises[1].progression.add_when_top_of_range.deload_after_failures.percent: must be above 0% and at most 50% (got 60%)
+days[0].exercises[2].progression: `training_max` needs a percent_of_training_max load
+days[0].exercises[3].progression: `add_when_top_of_range` needs a kg or lb load
+days[0].exercises[4].progression: timed work cannot use `add_when_top_of_range`; use "none"

@@ -1,0 +1,4 @@
+days[0].exercises[1].work.reps.sets: superset `a` needs the same number of sets for every exercise (4 here, 3 at days[0].exercises[0])
+days[0].exercises[3].superset: superset `a` must be next to the other exercises of the group
+days[0].exercises[5].superset: intervals cannot be part of a superset
+days[0].exercises[4].superset: superset `b` needs at least two exercises

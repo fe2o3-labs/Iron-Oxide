@@ -1,0 +1,636 @@
+{
+  "$id": "https://raw.githubusercontent.com/guizmaii-opensource/Iron-Oxide/main/schemas/program.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Iron Oxide training program",
+  "description": "A training program: its days, the order to run them in, and what to do on each day.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "Optional link to this JSON Schema, so editors can check and complete the document. Ignored\nby the app.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "days": {
+      "description": "The training days. Each needs a unique id.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Day"
+      }
+    },
+    "description": {
+      "description": "Optional description: who it is for, how to run it.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "description": "The program's name.",
+      "type": "string"
+    },
+    "rotation": {
+      "description": "The suggested order of the days, repeated forever: `[\"a\", \"b\", \"c\"]`. A day may appear\nseveral times (`[\"a\", \"b\", \"a\", \"b\", \"c\"]`), and every day must appear at least once.",
+      "type": "array",
+      "items": {
+        "description": "Lowercase letters and digits in words separated by single hyphens, e.g. `a` or `upper-1`.",
+        "type": "string",
+        "maxLength": 64,
+        "minLength": 1,
+        "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+      }
+    },
+    "schema_version": {
+      "description": "The version of the document format. Must be 1.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "name",
+    "days",
+    "rotation"
+  ],
+  "$defs": {
+    "Day": {
+      "description": "One training day.",
+      "type": "object",
+      "properties": {
+        "exercises": {
+          "description": "The exercises, in the order they are done.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Exercise"
+          }
+        },
+        "id": {
+          "description": "A slug such as `a` or `upper-1`, referenced by the rotation.",
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+        },
+        "name": {
+          "description": "The name shown in the app, e.g. `Day A`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "exercises"
+      ]
+    },
+    "Deload": {
+      "description": "Cuts the load after a streak of failed sessions.",
+      "type": "object",
+      "properties": {
+        "failures": {
+          "description": "Consecutive failed sessions that trigger the deload.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "percent": {
+          "description": "How much to take off, in percent of the working weight (10 means 100 kg becomes 90 kg).",
+          "type": "number",
+          "maximum": 1000,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "failures",
+        "percent"
+      ]
+    },
+    "DemoUrl": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^https?://[^\\s@/?#]+([/?#]\\S*)?$"
+    },
+    "Exercise": {
+      "description": "One exercise of a day.",
+      "type": "object",
+      "properties": {
+        "demo_url": {
+          "description": "Optional link to a demonstration (http or https).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DemoUrl"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "description": "A slug such as `back-squat`. Progress is tracked per exercise id, so the same exercise\non several days uses the same id (and the same name and progression rule).",
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+        },
+        "load": {
+          "description": "The working load. Leave it out for bodyweight work.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Load"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "description": "The name shown in the app, e.g. `Back squat`.",
+          "type": "string"
+        },
+        "notes": {
+          "description": "Optional coaching notes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "progression": {
+          "description": "How the target moves from one session to the next. Defaults to `\"none\"`.",
+          "$ref": "#/$defs/ProgressionRule"
+        },
+        "rest": {
+          "description": "Seconds of rest after each set (or after the intervals). In a superset, the rest after\neach member is the transition to the next member (often 0), and the rest of the last\nmember is the rest after the whole group.",
+          "type": "integer",
+          "maximum": 4294967295,
+          "minimum": 0
+        },
+        "superset": {
+          "description": "Groups this exercise with the next ones carrying the same label into a superset (A1, A2,\n…). Members must be next to each other and have the same number of sets.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+        },
+        "tempo": {
+          "description": "Optional lifting tempo such as `3-1-X-0`: eccentric, bottom pause, concentric, top pause,\nin seconds, `X` meaning explosive.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tempo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warmup": {
+          "description": "Warm-up sets done before the working sets, lightest first.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WarmupSet"
+          }
+        },
+        "work": {
+          "description": "What to do: sets of reps, timed holds, or work/rest intervals.",
+          "$ref": "#/$defs/Work"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "work",
+        "rest"
+      ]
+    },
+    "Load": {
+      "description": "The JSON shape of a [`Load`].",
+      "oneOf": [
+        {
+          "description": "A fixed weight in kilograms.",
+          "type": "object",
+          "properties": {
+            "kg": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kg"
+          ]
+        },
+        {
+          "description": "A fixed weight in pounds.",
+          "type": "object",
+          "properties": {
+            "lb": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "lb"
+          ]
+        },
+        {
+          "description": "A percentage of this exercise's training max, which the lifter enters in the app.",
+          "type": "object",
+          "properties": {
+            "percent_of_training_max": {
+              "type": "number",
+              "maximum": 1000,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "percent_of_training_max"
+          ]
+        }
+      ]
+    },
+    "ProgressionRule": {
+      "description": "How an exercise progresses. Only the rule's data lives here; the progression engine applies\nit.",
+      "oneOf": [
+        {
+          "description": "No automatic progression: `\"none\"`.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "Add `increment` once every working set reaches the top of the rep range (or the fixed rep\ncount): linear progression. Needs a fixed `kg` or `lb` load.\n`{\"add_when_top_of_range\": {\"increment\": {\"kg\": 2.5}}}`",
+          "type": "object",
+          "properties": {
+            "add_when_top_of_range": {
+              "type": "object",
+              "properties": {
+                "deload_after_failures": {
+                  "description": "Optional deload after repeated failures.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Deload"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "increment": {
+                  "description": "Weight added after a successful session.",
+                  "$ref": "#/$defs/UnitWeight"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "increment"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "add_when_top_of_range"
+          ]
+        },
+        {
+          "description": "Double progression: add reps session after session within the range; once every set\nreaches the top, add `increment` and go back to the bottom of the range. Needs a rep\nrange and a fixed `kg` or `lb` load.",
+          "type": "object",
+          "properties": {
+            "double_progression": {
+              "type": "object",
+              "properties": {
+                "deload_after_failures": {
+                  "description": "Optional deload after repeated failures.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Deload"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "increment": {
+                  "description": "Weight added once the top of the range is reached.",
+                  "$ref": "#/$defs/UnitWeight"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "increment"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "double_progression"
+          ]
+        },
+        {
+          "description": "Raise the training max by `increment` once every working set reaches its target. Needs a\n`percent_of_training_max` load.",
+          "type": "object",
+          "properties": {
+            "training_max": {
+              "type": "object",
+              "properties": {
+                "deload_after_failures": {
+                  "description": "Optional training max cut after repeated failures.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Deload"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "increment": {
+                  "description": "Added to the training max after a successful session.",
+                  "$ref": "#/$defs/UnitWeight"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "increment"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "training_max"
+          ]
+        }
+      ]
+    },
+    "RepRange": {
+      "description": "An inclusive rep range such as 8 to 12.",
+      "type": "object",
+      "properties": {
+        "max": {
+          "description": "The top of the range.",
+          "type": "integer",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "min": {
+          "description": "The fewest reps that count as a successful set.",
+          "type": "integer",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "min",
+        "max"
+      ]
+    },
+    "RepTarget": {
+      "oneOf": [
+        {
+          "description": "Exactly this many reps.",
+          "type": "integer",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        {
+          "$ref": "#/$defs/RepRange"
+        }
+      ]
+    },
+    "Tempo": {
+      "type": "string",
+      "examples": [
+        "3-1-X-0"
+      ],
+      "pattern": "^([0-9]{1,2}|X)-([0-9]{1,2}|X)-([0-9]{1,2}|X)-([0-9]{1,2}|X)$"
+    },
+    "UnitWeight": {
+      "description": "The JSON shape of a [`UnitWeight`]: the unit is the key.",
+      "oneOf": [
+        {
+          "description": "Kilograms.",
+          "type": "object",
+          "properties": {
+            "kg": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kg"
+          ]
+        },
+        {
+          "description": "Pounds.",
+          "type": "object",
+          "properties": {
+            "lb": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "lb"
+          ]
+        }
+      ]
+    },
+    "WarmupLoad": {
+      "description": "The JSON shape of a [`WarmupLoad`].",
+      "oneOf": [
+        {
+          "description": "A fixed weight in kilograms (20 for the empty bar).",
+          "type": "object",
+          "properties": {
+            "kg": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kg"
+          ]
+        },
+        {
+          "description": "A fixed weight in pounds (45 for the empty bar).",
+          "type": "object",
+          "properties": {
+            "lb": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "lb"
+          ]
+        },
+        {
+          "description": "A percentage of the exercise's working weight, below 100.",
+          "type": "object",
+          "properties": {
+            "percent_of_working_weight": {
+              "type": "number",
+              "maximum": 1000,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "percent_of_working_weight"
+          ]
+        }
+      ]
+    },
+    "WarmupSet": {
+      "description": "One line of warm-up: `{\"reps\": 5, \"load\": {\"percent_of_working_weight\": 50}}`.",
+      "type": "object",
+      "properties": {
+        "load": {
+          "description": "A fixed weight (the empty bar) or a percentage of the working weight.",
+          "$ref": "#/$defs/WarmupLoad"
+        },
+        "reps": {
+          "description": "Reps per warm-up set.",
+          "type": "integer",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "sets": {
+          "description": "How many sets of this warm-up. Defaults to 1.",
+          "type": "integer",
+          "format": "uint16",
+          "default": 1,
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "reps",
+        "load"
+      ]
+    },
+    "Work": {
+      "description": "What an exercise asks for.",
+      "oneOf": [
+        {
+          "description": "Sets of repetitions: `{\"reps\": {\"sets\": 3, \"reps\": 5}}` or\n`{\"reps\": {\"sets\": 3, \"reps\": {\"min\": 8, \"max\": 12}}}`.",
+          "type": "object",
+          "properties": {
+            "reps": {
+              "type": "object",
+              "properties": {
+                "reps": {
+                  "description": "Reps per set: a count or a `{min, max}` range.",
+                  "$ref": "#/$defs/RepTarget"
+                },
+                "sets": {
+                  "description": "Number of working sets.",
+                  "type": "integer",
+                  "format": "uint16",
+                  "maximum": 65535,
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "sets",
+                "reps"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "reps"
+          ]
+        },
+        {
+          "description": "Timed holds such as a plank: `{\"hold\": {\"sets\": 3, \"seconds\": 45}}`.",
+          "type": "object",
+          "properties": {
+            "hold": {
+              "type": "object",
+              "properties": {
+                "seconds": {
+                  "description": "Target length of each hold.",
+                  "type": "integer",
+                  "maximum": 4294967295,
+                  "minimum": 0
+                },
+                "sets": {
+                  "description": "Number of holds.",
+                  "type": "integer",
+                  "format": "uint16",
+                  "maximum": 65535,
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "sets",
+                "seconds"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "hold"
+          ]
+        },
+        {
+          "description": "Work/rest intervals such as treadmill sprints:\n`{\"intervals\": {\"work\": 30, \"rest\": 90, \"rounds\": 8}}`. There is no rest after the last\nround: the exercise's own `rest` follows.",
+          "type": "object",
+          "properties": {
+            "intervals": {
+              "type": "object",
+              "properties": {
+                "rest": {
+                  "description": "Seconds of rest between rounds.",
+                  "type": "integer",
+                  "maximum": 4294967295,
+                  "minimum": 0
+                },
+                "rounds": {
+                  "description": "Number of rounds.",
+                  "type": "integer",
+                  "format": "uint16",
+                  "maximum": 65535,
+                  "minimum": 0
+                },
+                "work": {
+                  "description": "Seconds of work per round.",
+                  "type": "integer",
+                  "maximum": 4294967295,
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "work",
+                "rest",
+                "rounds"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "intervals"
+          ]
+        }
+      ]
+    }
+  }
+}

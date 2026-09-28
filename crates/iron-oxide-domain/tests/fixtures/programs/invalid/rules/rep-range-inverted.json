@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "name": "Inverted range",
+  "days": [
+    {
+      "id": "a",
+      "name": "A",
+      "exercises": [
+        { "id": "squat", "name": "Squat", "work": { "reps": { "sets": 3, "reps": 5 } }, "rest": 60 }
+      ]
+    },
+    {
+      "id": "b",
+      "name": "B",
+      "exercises": [
+        { "id": "squat", "name": "Squat", "work": { "reps": { "sets": 3, "reps": 5 } }, "rest": 60 },
+        { "id": "row", "name": "Row", "work": { "reps": { "sets": 3, "reps": 8 } }, "rest": 60 },
+        {
+          "id": "curl",
+          "name": "Curl",
+          "work": { "reps": { "sets": 3, "reps": { "min": 12, "max": 8 } } },
+          "rest": 60
+        }
+      ]
+    }
+  ],
+  "rotation": ["a", "b"]
+}
