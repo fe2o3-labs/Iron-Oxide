@@ -16,6 +16,7 @@ iron-oxide-domain = { workspace = true }
 base64 = { workspace = true, optional = true }
 dotenvy = { workspace = true, optional = true }
 secrecy = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
@@ -37,6 +38,7 @@ server = [
   "dep:base64",
   "dep:dotenvy",
   "dep:secrecy",
+  "dep:serde_json",
   "dep:sqlx",
   "dep:thiserror",
   "dep:tokio",

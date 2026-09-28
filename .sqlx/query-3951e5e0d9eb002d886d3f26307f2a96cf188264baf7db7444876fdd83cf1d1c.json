@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT con.conname AS \"name!\", src.relname AS \"table!\",\n                  EXISTS (\n                      SELECT 1 FROM unnest(con.conkey, con.confkey) AS k(src_col, dst_col)\n                      JOIN pg_attribute sa ON sa.attrelid = con.conrelid AND sa.attnum = k.src_col\n                      JOIN pg_attribute da ON da.attrelid = con.confrelid AND da.attnum = k.dst_col\n                      WHERE sa.attname = 'user_id' AND da.attname = 'user_id'\n                  ) AS \"owned!\"\n           FROM pg_constraint con\n           JOIN pg_class src ON src.oid = con.conrelid\n           WHERE con.contype = 'f'\n             AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = con.conrelid\n                         AND a.attname = 'user_id' AND NOT a.attisdropped)\n             AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = con.confrelid\n                         AND a.attname = 'user_id' AND NOT a.attisdropped)\n           ORDER BY 2, 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name!",
+        "type_info": "Name"
+      },
+      {
+        "ordinal": 1,
+        "name": "table!",
+        "type_info": "Name"
+      },
+      {
+        "ordinal": 2,
+        "name": "owned!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "3951e5e0d9eb002d886d3f26307f2a96cf188264baf7db7444876fdd83cf1d1c"
+}
