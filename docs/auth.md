@@ -50,9 +50,11 @@ removals cannot both pass.
 
 ## Passkeys
 
-The relying party ID is `WEBAUTHN_RP_ID`. In production that is `iron-oxyde.com`, the registrable
-domain, so a future `app.` subdomain can use the same passkeys. The origin is `WEBAUTHN_ORIGIN`,
-which must equal `APP_BASE_URL`'s origin. Every ceremony requires user verification (Face ID,
+The relying party ID is `WEBAUTHN_RP_ID`. In production the app is served at
+`https://app.iron-oxyde.com` (the apex is the landing page, #70), and the RP ID is the **parent**
+domain `iron-oxyde.com`, not the app's host: passkeys are bound to the RP ID, so they keep working
+if the app moves to another subdomain. The origin is `WEBAUTHN_ORIGIN`, which must equal
+`APP_BASE_URL`'s origin; the RP ID must be that origin's host or a parent domain of it. Every ceremony requires user verification (Face ID,
 Touch ID, device PIN).
 
 **Sign-up** (`passkey_sign_up_begin` → `navigator.credentials.create()` → `passkey_sign_up_finish`):
@@ -266,7 +268,8 @@ In the [Google Cloud console](https://console.cloud.google.com/):
 
 1. Create a project, e.g. "Iron Oxide".
 2. **Google Auth Platform → Branding** (the OAuth consent screen): app name "Iron Oxide", a
-   support email, and `iron-oxyde.com` under authorized domains. **Audience**: External.
+   support email, and `iron-oxyde.com` under authorized domains (the registrable domain; it
+   covers `app.iron-oxyde.com`). **Audience**: External.
    **Data access**: no scopes need adding. The app asks for `openid` only, which needs no Google
    verification. Publish the app ("In production") when it goes live. In "Testing", only the
    listed test users can sign in.
@@ -275,7 +278,7 @@ In the [Google Cloud console](https://console.cloud.google.com/):
    - **Local:** name "Iron Oxide (local)". Authorized redirect URI:
      `http://localhost:8080/auth/google/callback`.
    - **Production:** name "Iron Oxide". Authorized redirect URI:
-     `https://iron-oxyde.com/auth/google/callback`.
+     `https://app.iron-oxyde.com/auth/google/callback`.
    - No "Authorized JavaScript origins" are needed: the flow runs on the server.
 4. Copy the client ID and secret into `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. Set
    `GOOGLE_REDIRECT_URL` to the exact redirect URI registered for that client. The server refuses
@@ -298,15 +301,17 @@ page's host to match it.
 
 To try the installed-PWA flow on a phone you need https on the real domain. Passkeys registered
 on a temporary host (e.g. the Fly default hostname) will not carry over to `iron-oxyde.com`.
+Passkeys made on `app.iron-oxyde.com` (RP ID `iron-oxyde.com`) keep working on any other
+`*.iron-oxyde.com` host the app may move to.
 
 ## Production settings
 
 | Variable | Value |
 |---|---|
-| `APP_BASE_URL` | `https://iron-oxyde.com` |
-| `WEBAUTHN_RP_ID` | `iron-oxyde.com` |
-| `WEBAUTHN_ORIGIN` | `https://iron-oxyde.com` |
-| `GOOGLE_REDIRECT_URL` | `https://iron-oxyde.com/auth/google/callback` |
+| `APP_BASE_URL` | `https://app.iron-oxyde.com` |
+| `WEBAUTHN_RP_ID` | `iron-oxyde.com` (the parent domain, not the app's host) |
+| `WEBAUTHN_ORIGIN` | `https://app.iron-oxyde.com` |
+| `GOOGLE_REDIRECT_URL` | `https://app.iron-oxyde.com/auth/google/callback` |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | the production client (secret) |
 | `SESSION_KEY` | `openssl rand 64 \| openssl base64 -A`, generated for production only (secret) |
 
