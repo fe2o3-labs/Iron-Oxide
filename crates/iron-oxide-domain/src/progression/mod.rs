@@ -38,7 +38,9 @@
 //!
 //! Extra sets beyond `n` are allowed and never hurt: the best `n` sets are judged. For the
 //! training max rule, only sets at least as heavy as that session's target weight count, so a
-//! session done lighter than prescribed cannot raise the training max.
+//! session done lighter than prescribed cannot raise the training max. "As heavy" allows half a
+//! step below the exact percentage of the training max, so the verdict does not depend on which
+//! way the target was rounded, and does not flip when the step setting changes later.
 //!
 //! # Rules
 //!
@@ -48,7 +50,8 @@
 //! - **None** (and every timed exercise, which cannot have a rule): no progression. The targets
 //!   are the last performance, else the program default.
 //! - **`add_when_top_of_range`**: the base weight is the weight lifted last session, the lightest
-//!   of its working sets. After a success, the next weight is base + increment; after a hold or a
+//!   of its working sets (sets logged without a weight are left out; with none at all, the
+//!   program's load). After a success, the next weight is base + increment; after a hold or a
 //!   failure, it stays the base. Reps aim for the top of the target.
 //! - **`double_progression`**: the weight stays the base while the reps climb. After a hold, the
 //!   rep target becomes the lowest reps of the best `n` sets plus one ("reps 8 → 9"). After a
@@ -86,19 +89,24 @@
 //!    working set `i` of the last session (the last set when fewer were done). Reps stay the
 //!    program's fixed count; for a range, the last reps clamped into the range. Timed work keeps
 //!    the program's seconds and rounds: a short hold last time does not shorten the target.
-//! 3. **Program default**: no history. The program's load (a percentage of the training max
-//!    rounded to the step), and the fixed count, or for a range the top of it (the bottom for
+//! 3. **Program default**: no history. The program's load (a fixed weight, or a percentage of the
+//!    training max) as described in [Rounding](#rounding), and the fixed count, or for a range the top of it (the bottom for
 //!    double progression).
 //!
 //! Warm-up sets follow the program's warm-up lines, computed from the heaviest working weight:
-//! fixed warm-up weights as written, percentages of the working weight rounded to the step and
-//! never as heavy as the working weight.
+//! fixed warm-up weights and percentages of the working weight (see [Rounding](#rounding)).
 //!
 //! # Rounding
 //!
-//! Weights taken as they are (the program's fixed load, a weight lifted last session, a fixed
-//! warm-up) are never rounded. Computed weights are:
+//! Weights the lifter actually lifted (the base of a hold or a failure, a copy of the last
+//! performance) are kept as they are: they were loadable. The others are rounded:
 //!
+//! - the program's fixed load and fixed warm-up weights, when they are written in the other unit
+//!   than the lifter's ([`ProgressionSettings::unit`]), to the nearest step: a program written in
+//!   kg gives loadable weights to a lifter in lb (the 20 kg bar becomes 45 lb). Written in the
+//!   lifter's unit, they are kept as written (a 24 kg kettlebell stays 24 kg). A fixed warm-up
+//!   lighter than the working weight stays lighter: if rounding would reach the working weight, it
+//!   is kept exact;
 //! - an increase to the nearest step, or the next step up when the nearest would not move it, so
 //!   an increment smaller than the step still progresses (100 kg + 1 kg with a 2.5 kg step is
 //!   102.5 kg);

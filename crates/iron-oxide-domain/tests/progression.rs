@@ -216,6 +216,16 @@ mod add_when_top_of_range {
     }
 
     #[test]
+    fn sets_logged_without_a_weight_do_not_drop_the_base() {
+        let mut slip = session(kg(100.0), &[5, 5]);
+        slip.sets.push(WorkingSet::bodyweight(Reps::new(5)));
+        assert_eq!(working(&targets(&squat(), &[slip])).0, kg(102.5));
+        // No weight at all: the program's load is the base.
+        let none = PastSession::new(vec![WorkingSet::bodyweight(Reps::new(5)); 3]);
+        assert_eq!(working(&targets(&squat(), &[none])).0, kg(102.5));
+    }
+
+    #[test]
     fn a_missed_rep_is_a_failure() {
         let next = targets(&squat(), &[session(kg(100.0), &[5, 5, 4])]);
         assert_eq!(next.last_verdict, Some(SessionVerdict::Failure));
@@ -374,7 +384,7 @@ mod add_when_top_of_range {
         // With the default 2.5 kg step, +1 kg still moves to the next step.
         assert_eq!(working(&targets(&press, &history)).0, kg(42.5));
         // With 1 kg micro-plates, exactly +1 kg.
-        let fine = ProgressionSettings::new(kg(1.0)).unwrap();
+        let fine = ProgressionSettings::new(Unit::Kg, kg(1.0)).unwrap();
         let next = ready(next_targets(&press, None, fine, &history));
         assert_eq!(working(&next).0, kg(41.0));
     }
@@ -532,6 +542,24 @@ mod training_max {
         // Heavier is fine.
         let heavier = with_tm(kg(100.0), &[session(kg(85.0), &[5, 5, 5])]);
         assert_eq!(heavier.training_max, Some(kg(102.5)));
+    }
+
+    #[test]
+    fn half_a_step_of_tolerance_on_the_target() {
+        // 80 % of 102.5 kg is exactly 82 kg; the target shown was 82.5 kg.
+        let history = [session(kg(80.0), &[5, 5, 5]), session(kg(82.0), &[5, 5, 5])];
+        assert_eq!(with_tm(kg(100.0), &history).training_max, Some(kg(105.0)));
+        // A lifter in lb loaded 180 lb (81.65 kg): within half a 2.5 kg step of 82 kg.
+        let pounds = [
+            session(kg(80.0), &[5, 5, 5]),
+            session(lb(180.0), &[5, 5, 5]),
+        ];
+        assert_eq!(with_tm(kg(100.0), &pounds).training_max, Some(kg(105.0)));
+        // A full step lighter does not count.
+        let lighter = [session(kg(80.0), &[5, 5, 5]), session(kg(80.0), &[5, 5, 5])];
+        let next = with_tm(kg(100.0), &lighter);
+        assert_eq!(next.training_max, Some(kg(102.5)));
+        assert_eq!(next.last_verdict, Some(SessionVerdict::Failure));
     }
 
     #[test]
@@ -881,6 +909,30 @@ mod warmups {
     }
 
     #[test]
+    fn fixed_warmups_round_to_the_step() {
+        let squat = with_warmup(squat());
+        let settings = ProgressionSettings::for_unit(Unit::Lb);
+        let next = ready(next_targets(&squat, None, settings, &[]));
+        // 100 kg is 220.46 lb: 220 lb, and the 20 kg bar is 45 lb.
+        assert_eq!(working(&next).0, lb(220.0));
+        assert_eq!(
+            weights(&next),
+            [
+                Some(lb(45.0)),
+                Some(lb(45.0)),
+                Some(lb(130.0)),
+                Some(lb(175.0))
+            ]
+        );
+        // Rounding would make the warm-up as heavy as the working weight: kept as written.
+        let mut light = with_warmup(squat.clone());
+        light.load = Some(Load::Weight(unit_weight(45.0, Unit::Lb)));
+        let next = ready(next_targets(&light, None, settings, &[]));
+        assert_eq!(working(&next).0, lb(45.0));
+        assert_eq!(next.warmup[0].weight, Some(kg(20.0)));
+    }
+
+    #[test]
     fn percentages_need_a_working_weight() {
         // A percentage warm-up on body-weight work is rejected by validation; no weight here.
         let pullup = with_warmup(exercise(
@@ -960,13 +1012,19 @@ mod history_from_logs {
 }
 
 #[test]
-fn every_builtin_exercise_has_targets() {
-    for builtin in builtin_programs().unwrap() {
+fn every_builtin_exercise_has_loadable_targets() {
+    for (builtin, unit) in builtin_programs()
+        .unwrap()
+        .into_iter()
+        .flat_map(|builtin| Unit::ALL.map(|unit| (builtin.clone(), unit)))
+    {
+        let settings = ProgressionSettings::for_unit(unit);
+        let step = settings.step();
         let program = builtin.program();
         let training_maxes = program.training_max_exercises();
         for exercise in program.exercises() {
             let training_max = training_maxes.contains(&exercise.id).then(|| kg(100.0));
-            let next = ready(next_targets(exercise, training_max, kg_settings(), &[]));
+            let next = ready(next_targets(exercise, training_max, settings, &[]));
             assert_eq!(next.source, TargetSource::ProgramDefault, "{}", exercise.id);
             assert_eq!(
                 next.working.len(),
@@ -974,10 +1032,18 @@ fn every_builtin_exercise_has_targets() {
                 "{}",
                 exercise.id
             );
+            let on_step = |weight: Weight| {
+                weight.round_to(step, iron_oxide_domain::Rounding::Down) == Ok(weight)
+            };
+            for set in next.working.iter().chain(&next.warmup) {
+                if let Some(weight) = set.weight {
+                    assert!(on_step(weight), "{} in {unit}: {weight:?}", exercise.id);
+                }
+            }
             let working = next.working.iter().filter_map(|set| set.weight).max();
             for warmup in &next.warmup {
                 if let (Some(warmup), Some(working)) = (warmup.weight, working) {
-                    assert!(warmup <= working, "{}", exercise.id);
+                    assert!(warmup < working, "{} in {unit}", exercise.id);
                 }
             }
         }

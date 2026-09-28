@@ -137,7 +137,8 @@ fn history() -> impl Strategy<Value = Vec<PastSession>> {
 fn settings() -> impl Strategy<Value = ProgressionSettings> {
     prop_oneof![
         unit().prop_map(ProgressionSettings::for_unit),
-        positive_weight().prop_map(|step| ProgressionSettings::new(step).unwrap()),
+        (unit(), positive_weight())
+            .prop_map(|(unit, step)| ProgressionSettings::new(unit, step).unwrap()),
     ]
 }
 

@@ -6,7 +6,9 @@ use super::change::{ChangeKind, ProgressionChange};
 use super::history::{PastSession, WorkingSet};
 use super::settings::ProgressionSettings;
 use super::target::{ExerciseTargets, NextTargets, SetGoal, SetTarget, TargetSource};
-use crate::program::{Deload, Exercise, Load, ProgressionRule, RepTarget, WarmupLoad, Work};
+use crate::program::{
+    Deload, Exercise, Load, ProgressionRule, RepTarget, UnitWeight, WarmupLoad, Work,
+};
 use crate::{Percent, Reps, Rounding, Weight};
 
 /// How a past session went against the program's rep target. See the
@@ -56,7 +58,7 @@ pub fn next_targets(
     let step = settings.step();
     let sessions: Vec<&PastSession> = history.iter().filter(|s| !s.is_empty()).collect();
     let default_weight = match exercise.load {
-        Some(Load::Weight(weight)) => Some(weight.weight()),
+        Some(Load::Weight(weight)) => Some(program_weight(weight, settings)),
         Some(Load::PercentOfTrainingMax(_)) => {
             training_max.map(|(percent, training_max)| percent_weight(training_max, percent, step))
         }
@@ -78,6 +80,7 @@ pub fn next_targets(
                 increment: increment.weight(),
                 deload: deload_after_failures,
                 double: false,
+                default: default_weight.unwrap_or(Weight::ZERO),
                 step,
             },
         ),
@@ -95,6 +98,7 @@ pub fn next_targets(
                 increment: increment.weight(),
                 deload: deload_after_failures,
                 double: true,
+                default: default_weight.unwrap_or(Weight::ZERO),
                 step,
             },
         ),
@@ -126,7 +130,7 @@ pub fn next_targets(
     NextTargets::Ready(ExerciseTargets {
         exercise: exercise.id.clone(),
         source: plan.source,
-        warmup: warmup(exercise, working_weight, step),
+        warmup: warmup(exercise, working_weight, settings),
         working: plan.working,
         training_max: plan
             .training_max
@@ -216,6 +220,8 @@ struct WeightRule {
     increment: Weight,
     deload: Option<Deload>,
     double: bool,
+    /// The base when a session logged no weight at all.
+    default: Weight,
     step: Weight,
 }
 
@@ -228,12 +234,13 @@ fn weight_rule(sessions: &[&PastSession], rule: &WeightRule) -> Plan {
     let mut last_verdict = None;
     let mut change = None;
     for session in sessions {
+        // Sets logged without a weight (a slip in the log) do not drag the base to zero.
         let base = session
             .sets
             .iter()
-            .map(weight_of)
+            .filter_map(|set| set.weight)
             .min()
-            .unwrap_or(Weight::ZERO);
+            .unwrap_or(rule.default);
         let (verdict, reached) = judge(&session.sets, rule.sets, rule.target, None);
         weight = base;
         let unchanged = |failed_sessions| ChangeKind::Unchanged {
@@ -321,8 +328,14 @@ fn training_max_rule(sessions: &[&PastSession], rule: &TrainingMaxRule) -> Plan 
     let mut last_verdict = None;
     let mut change = None;
     for session in sessions {
-        let target_weight = percent_weight(training_max, rule.percent, rule.step);
-        let (verdict, _) = judge(&session.sets, rule.sets, rule.target, Some(target_weight));
+        // Sets count from half a step below the exact percentage, so the verdict does not depend
+        // on which way the target was rounded (nor flip when the step setting changes).
+        let at_least = rule
+            .percent
+            .of(training_max)
+            .unwrap_or(Weight::MAX)
+            .saturating_sub(half(rule.step));
+        let (verdict, _) = judge(&session.sets, rule.sets, rule.target, Some(at_least));
         let before = training_max;
         let unchanged = |failed_sessions| ChangeKind::TrainingMaxUnchanged {
             training_max: before,
@@ -433,15 +446,19 @@ fn no_rule(exercise: &Exercise, sessions: &[&PastSession], default_weight: Optio
 }
 
 /// The warm-up sets, from the heaviest working weight.
-fn warmup(exercise: &Exercise, working: Option<Weight>, step: Weight) -> Vec<SetTarget> {
+fn warmup(
+    exercise: &Exercise,
+    working: Option<Weight>,
+    settings: ProgressionSettings,
+) -> Vec<SetTarget> {
     exercise
         .warmup
         .iter()
         .flat_map(|line| {
             let weight = match line.load {
-                WarmupLoad::Weight(weight) => Some(weight.weight()),
+                WarmupLoad::Weight(weight) => Some(fixed_warmup(weight, working, settings)),
                 WarmupLoad::PercentOfWorkingWeight(percent) => {
-                    working.map(|working| lighter_share(working, percent, step))
+                    working.map(|working| lighter_share(working, percent, settings.step()))
                 }
             };
             let target = SetTarget {
@@ -464,6 +481,36 @@ fn round_or_exact(exact: Weight, step: Weight, rounding: Rounding) -> Weight {
         .or_else(|_| exact.round_to(step, Rounding::Down))
         .unwrap_or(exact);
     if rounded.is_zero() { exact } else { rounded }
+}
+
+/// Half of `step`, rounded down.
+fn half(step: Weight) -> Weight {
+    Weight::from_nanograms(step.as_nanograms() / 2).unwrap_or(Weight::ZERO)
+}
+
+/// A weight written in the program: as written in the lifter's unit, and rounded to the nearest
+/// step in the other unit (a 100 kg load is 220 lb for a lifter who loads in pounds).
+fn program_weight(weight: UnitWeight, settings: ProgressionSettings) -> Weight {
+    if weight.unit() == settings.unit() {
+        weight.weight()
+    } else {
+        round_or_exact(weight.weight(), settings.step(), Rounding::Nearest)
+    }
+}
+
+/// A fixed warm-up weight, converted like [`program_weight`] (the 20 kg bar is 45 lb), unless
+/// rounding would make it as heavy as the working weight while the written weight was lighter:
+/// then it is kept exact.
+fn fixed_warmup(
+    weight: UnitWeight,
+    working: Option<Weight>,
+    settings: ProgressionSettings,
+) -> Weight {
+    let converted = program_weight(weight, settings);
+    match working {
+        Some(working) if converted >= working && weight.weight() < working => weight.weight(),
+        _ => converted,
+    }
 }
 
 /// `base + increment`, rounded to the nearest step, or up when the nearest does not move it (an
