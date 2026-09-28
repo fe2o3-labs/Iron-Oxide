@@ -52,6 +52,8 @@ logged, never returned.
 | `NotFound` | 404 | `Not found.` | No such row **among the caller's own**. Another user's id gives exactly the same answer as an id that does not exist. |
 | `Conflict(msg)` | 409 | `msg` | An id reused with different content, a session that has already ended |
 | `Invalid(msg)` | 422 | `msg` | Invalid input: a domain value, a program document, a database `CHECK` (`Invalid value.`) |
+| `InvalidProgram(problems)` | 422 | `This program is not valid.` | An uploaded program document that does not parse or breaks a rule. `problems` (`ProgramProblems`) is sent as the error details, see [Programs](#programs-srcapiprogramsrs-19). |
+| `TooLarge(msg)` | 413 | `msg` | A request body or document past its size limit |
 | `Transient(detail)` | 503 | `The server is busy. Please try again.` | Nothing was saved and the same request can simply be retried. Covers a concurrent write, a pool timeout, a dropped connection, a serialization failure or a deadlock. |
 | `Unauthorized` | 401 | `Please sign in.` | Not signed in (normally rejected earlier by `AuthUser`) |
 | `Forbidden(msg)` | 403 | `msg` | Plan gating (#21) |
@@ -84,7 +86,7 @@ show:
   message.
 - **Retryable:** `Transient` (503, 502, 504), `RateLimited` (429, honouring `Retry-After`), and
   `Network` (timeouts, connection failures, the request never answered).
-- **Not retryable:** 400, 401, 403, 404, 409, 422 and 500. Retrying the same request cannot fix
+- **Not retryable:** 400, 401, 403, 404, 409, 413, 422 and 500. Retrying the same request cannot fix
   them. A 401 means going back to sign-in.
 
 ## Idempotency
@@ -143,3 +145,47 @@ async fn another_users_session_is_not_found(db: PgPool) {
 ```
 
 Unit tests without a database stay next to the code as usual.
+
+## Programs (`src/api/programs.rs`, #19)
+
+Every function is a `POST` that needs a signed-in user and only reads or changes that user's
+programs. Built-in programs are read-only: a user trains with a copy, which is their own program.
+An id of another user's program, or of a built-in's own row, gets the same `404` as an id that does
+not exist.
+
+| Function | Route | Arguments | Returns | Errors |
+|---|---|---|---|---|
+| `list_builtin_programs` | `/api/programs/builtins` | | `Vec<BuiltinProgramView>` (`builtin_id`, name, version, parsed document) | |
+| `copy_builtin_program` | `/api/programs/copy-builtin` | `builtin_id`, `creation_id` | `ProgramDetail` of the copy | 404 unknown (or malformed) built-in id; 409 `creation_id` already used for another request |
+| `list_programs` | `/api/programs/list` | `include_archived` | `Vec<ProgramView>`, oldest first | |
+| `get_program` | `/api/programs/get` | `program_id` | `ProgramDetail` (latest version) | 404 |
+| `get_active_program` | `/api/programs/active` | | `Option<ProgramDetail>` (latest version) | |
+| `set_active_program` | `/api/programs/active/set` | `program_id` | `ProgramDetail` | 404; 409 archived |
+| `upload_program` | `/api/programs/upload` | `target`, `document` | `UploadOutcome` (`program`, `version`, `saved`) | 404; 409 `creation_id` reused; 413; 422 `InvalidProgram` with `ProgramProblems` |
+| `list_program_versions` | `/api/programs/versions` | `program_id` | `Vec<VersionView>`, oldest first, without documents | 404 |
+| `set_program_archived` | `/api/programs/archive` | `program_id`, `archived` | `()` | 404; 409 archiving the active program |
+
+- **Idempotency.** A copy and a new-program upload take a client `creation_id` (UUIDv7): a retry
+  returns the program already created (`saved: false` for an upload); the same `creation_id` with a
+  different built-in or document is `409`. A new version whose document equals the program's latest
+  version adds nothing and returns that version with `saved: false`; documents are compared as
+  jsonb, so formatting and key order do not matter.
+- **Uploads are untrusted.** `target` is `{"kind": "new_program", "creation_id": …}` (named after
+  the document's `name`) or `{"kind": "new_version", "program_id": …}` (the program keeps its own
+  name). In order:
+  1. A middleware on the route reads the whole body before Dioxus does and refuses it with `413`
+     past `UPLOAD_BODY_LIMIT` (2 × `MAX_DOCUMENT_BYTES` + 16 KiB: the document travels as a JSON
+     string, where `"`, `\` and line breaks take two bytes). It checks `Content-Length` first and
+     then counts the bytes actually read, so a missing or lying header does not get past it.
+  2. A document over `MAX_DOCUMENT_BYTES` (256 KiB) is refused with `413`, before parsing.
+  3. `Program::from_json` parses and validates it. A failure is `422` with `ProgramProblems`
+     (`{errors: [{path, message, line?, column?}], omitted}`) as the error details: a parse error
+     is one entry with its line and column; broken rules are at most `MAX_REPORTED_ERRORS` entries,
+     the rest counted in `omitted`. Read them on the client with `ProgramProblems::from_error`.
+  4. The document is stored as uploaded (like the built-ins), not re-serialized.
+- **Archive, never delete.** Archiving hides a program from `list_programs` (unless
+  `include_archived`) and keeps its versions and the sessions run from them; it can still be read
+  and get new versions, and `archived: false` restores it. The active program cannot be archived and
+  an archived program cannot be made active (`409`), so the active program is never hidden.
+- **Timestamps.** `created_at` in `ProgramView` and `VersionView` is a `Timestamp` (milliseconds,
+  see [Layout](#layout)).
