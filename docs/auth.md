@@ -283,11 +283,9 @@ In the [Google Cloud console](https://console.cloud.google.com/):
 ## Running it locally
 
 ```sh
-docker compose up -d --wait
-cp .env.example .env
-# In .env: set GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET (the local client above) and
-# SESSION_KEY=$(openssl rand 64 | openssl base64 -A)
-dx serve --web -p iron-oxide-app
+make env   # .env from .env.example, with a freshly generated SESSION_KEY
+# In .env: set GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET (the local client above)
+make dev   # Postgres, migrations, dx serve
 ```
 
 Open **http://localhost:8080**, not 127.0.0.1: the RP ID is `localhost`, and WebAuthn requires the
