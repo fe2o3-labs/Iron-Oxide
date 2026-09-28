@@ -1,0 +1,81 @@
+name: Deploy
+
+# Pushes to `main` deploy to Fly.io; pull requests only build the production image.
+# First-time setup (Fly app, secrets, FLY_API_TOKEN): docs/operations/deploy.md.
+on:
+  push:
+    branches: [main]
+  # No branch filter: stacked PRs (whose base is not `main`) get the image build too.
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Builds the Dockerfile on amd64, the architecture Fly runs, so a broken image fails the PR
+  # instead of the production deploy. Nothing is pushed and no secret is used.
+  image:
+    name: Docker image build
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-image-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the production image
+        run: docker build --tag iron-oxide:ci .
+      - name: Image size
+        run: docker image ls iron-oxide:ci
+      - name: Smoke test the container
+        run: |
+          docker run --detach --init --name iron-oxide --publish 8080:8080 iron-oxide:ci
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
+            sleep 1
+          done
+          set -x
+          test "$(curl -sSf http://127.0.0.1:8080/healthz)" = "ok"
+          curl -sSf http://127.0.0.1:8080/ | grep -q "Iron Oxide"
+          curl -sSf http://127.0.0.1:8080/api/server-time | grep -Eq '^[0-9]+$'
+      - name: Container log
+        if: always()
+        run: docker logs iron-oxide || true
+
+  deploy:
+    name: Deploy to Fly.io
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # Never run two deploys at once, and never cancel one halfway.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    environment:
+      name: production
+    env:
+      # Deploy token scoped to the app (see docs/operations/deploy.md). `secrets` cannot be used
+      # in `if:` conditions, so the steps below test this variable instead.
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - name: Check that FLY_API_TOKEN is set
+        id: token
+        run: |
+          if [ -z "$FLY_API_TOKEN" ]; then
+            echo "::notice title=Deploy skipped::The FLY_API_TOKEN repository secret is not set. See docs/operations/deploy.md."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.token.outputs.present == 'true'
+        with:
+          persist-credentials: false
+      - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # 1.5
+        if: steps.token.outputs.present == 'true'
+      # Builds on Fly's remote builder (amd64) and waits for the health checks of fly.toml.
+      - name: fly deploy
+        if: steps.token.outputs.present == 'true'
+        run: flyctl deploy --remote-only
