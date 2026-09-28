@@ -25,8 +25,7 @@ pub const MAX_PAGE: u32 = 100;
 pub struct HistoryEntry {
     pub id: SessionId,
     pub program_id: ProgramId,
-    /// The program's current name (programs can be renamed by adding versions, the name is kept
-    /// on the program).
+    /// The program's current name (a rename shows on past sessions too).
     pub program_name: String,
     pub program_version_id: ProgramVersionId,
     /// The version number (1, 2, ...) the session was run from.
