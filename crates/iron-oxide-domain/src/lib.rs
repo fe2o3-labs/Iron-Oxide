@@ -11,6 +11,11 @@
 //!   increment and display helpers.
 //! - [`Reps`], [`Percent`] and [`Seconds`].
 //! - [`ValueError`] for every rejected value.
+//!
+//! # Progression
+//!
+//! [`progression::next_targets`] computes an exercise's next targets from its program rule and
+//! history, and the [`progression::ProgressionChange`] shown in the end-of-session summary.
 
 mod display;
 mod duration;
@@ -18,6 +23,7 @@ mod error;
 mod ids;
 mod percent;
 pub mod program;
+pub mod progression;
 mod reps;
 pub mod session;
 mod units;
