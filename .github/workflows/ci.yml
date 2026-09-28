@@ -23,7 +23,8 @@ env:
 
 jobs:
   # The repo is public and built in the open: a leaked secret must fail CI.
-  # Runs on every push and PR and scans the full git history, not only the diff.
+  # Scans only the new commits: the PR's commits on a pull request, the pushed range on a push to
+  # main. The weekly full-history scan of main is in secret-scan.yml.
   # The gitleaks binary is used directly because `gitleaks/gitleaks-action`
   # requires a paid license for organisation-owned repositories.
   gitleaks:
@@ -47,8 +48,33 @@ jobs:
           curl -sSfLO "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
           grep " ${archive}\$" "gitleaks_${GITLEAKS_VERSION}_checksums.txt" | sha256sum --check --strict
           tar -xzf "$archive" gitleaks
-      - name: Scan git history
-        run: '"$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 .'
+      - name: Scan the new commits
+        # PR: the PR's own commits (base..head). Push to main: the pushed range. Manual run: the
+        # whole history of the checked-out branch. The weekly full-history scan of main is in
+        # secret-scan.yml. Never the gitleaks default (`git log --all`), which would scan every
+        # branch fetched by `fetch-depth: 0` and fail this run for someone else's commit.
+        # Known false positives: see "Secrets" in SECURITY.md (`gitleaks:allow`, `.gitleaksignore`).
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          case "$EVENT" in
+            pull_request)
+              range="${PR_BASE_SHA}..${PR_HEAD_SHA}" ;;
+            push)
+              if git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+                range="${PUSH_BEFORE}..${GITHUB_SHA}"
+              else
+                # New branch or force push: the previous tip is unknown, scan everything.
+                range="HEAD"
+              fi ;;
+            *)
+              range="HEAD" ;;
+          esac
+          echo "Scanning commits: $range"
+          "$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 --log-opts="--no-merges $range" .
 
   # The Rust jobs below are skipped until a root `Cargo.toml` exists (it lands with #2).
   detect:
@@ -211,6 +237,16 @@ jobs:
           test "$(curl -sSf http://127.0.0.1:8080/healthz)" = "ok"
           curl -sSf http://127.0.0.1:8080/ | grep -q "Iron Oxide"
           curl -sSf http://127.0.0.1:8080/api/server-time | grep -Eq '^[0-9]+$'
+          # The wasm client that hydrates the page is served: the JS loader referenced by the page
+          # and every .wasm file of the bundle (with the MIME type browsers require).
+          js=$(curl -sSf http://127.0.0.1:8080/ | grep -oE 'src="[^"]*\.js"' | head -1 | cut -d'"' -f2)
+          test -n "$js"
+          curl -sSf -o /dev/null "http://127.0.0.1:8080${js}"
+          wasm_files=$(find public -name '*.wasm')
+          test -n "$wasm_files"
+          for f in $wasm_files; do
+            curl -sSf -o /dev/null -w '%{content_type}\n' "http://127.0.0.1:8080/${f#public/}" | grep -q '^application/wasm'
+          done
           # PWA: the manifest and head tags are in the SSR page, and the static files are served at the root.
           curl -sSf http://127.0.0.1:8080/ | grep -q '<link rel="manifest" href="/manifest.webmanifest"'
           curl -sSf http://127.0.0.1:8080/ | grep -q 'navigator.serviceWorker.register(`/sw.js?build='
