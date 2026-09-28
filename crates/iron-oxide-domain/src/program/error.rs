@@ -187,6 +187,14 @@ pub enum ValidationErrorKind {
         /// The missing day id.
         id: String,
     },
+    /// A day appears twice in the rotation.
+    #[error("day `{id}` appears more than once in the rotation (first at {first})")]
+    DuplicateRotationDay {
+        /// The repeated day id.
+        id: String,
+        /// Its first occurrence.
+        first: JsonPath,
+    },
     /// A day never appears in the rotation, so it would never be trained.
     #[error("day `{id}` is not in the rotation")]
     DayNotInRotation {
