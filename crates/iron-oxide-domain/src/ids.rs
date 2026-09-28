@@ -3,8 +3,9 @@
 //! Every entity gets its own UUID-backed newtype so that, for example, a [`SetId`] can never be passed
 //! where a [`SessionId`] is expected. They serialize as a plain UUID string.
 //!
-//! [`ExerciseId`] is different: it is a human-readable slug (`back-squat`) because exercises are named
-//! in hand-written program JSON and must stay stable across program versions.
+//! [`ExerciseId`] and [`DayId`] are different: they are human-readable slugs (`back-squat`, `a`)
+//! because exercises and days are named in hand-written program JSON and must stay stable across
+//! program versions. Both follow the same slug rules.
 
 use std::fmt;
 use std::str::FromStr;
@@ -100,42 +101,15 @@ uuid_id!(
     "program version id"
 );
 
-/// Identifies an exercise with a stable slug such as `back-squat` or `ohp`.
-///
-/// Rules: 1 to [`ExerciseId::MAX_LEN`] characters, lowercase ASCII letters and digits, in words
-/// separated by single hyphens (no leading, trailing or doubled hyphen).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct ExerciseId(String);
+/// Maximum length of a slug ID ([`ExerciseId`], [`DayId`]), in bytes (all characters are ASCII).
+pub const SLUG_MAX_LEN: usize = 64;
 
-impl ExerciseId {
-    /// Maximum length of a slug, in bytes (all characters are ASCII).
-    pub const MAX_LEN: usize = 64;
-
-    /// Validates a slug.
-    ///
-    /// # Errors
-    /// [`ValueError::InvalidExerciseId`] when the text breaks one of the slug rules.
-    pub fn new(value: impl Into<String>) -> Result<Self, ValueError> {
-        let value = value.into();
-        match slug_problem(&value) {
-            None => Ok(Self(value)),
-            Some(reason) => Err(ValueError::InvalidExerciseId { value, reason }),
-        }
-    }
-
-    /// Returns the slug.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
+/// Returns why `value` is not a valid slug, or `None` when it is. Shared by every slug ID.
 fn slug_problem(value: &str) -> Option<&'static str> {
     if value.is_empty() {
         return Some("must not be empty");
     }
-    if value.len() > ExerciseId::MAX_LEN {
+    if value.len() > SLUG_MAX_LEN {
         return Some("must be at most 64 characters");
     }
     if !value
@@ -153,39 +127,86 @@ fn slug_problem(value: &str) -> Option<&'static str> {
     None
 }
 
-impl TryFrom<String> for ExerciseId {
-    type Error = ValueError;
+macro_rules! slug_id {
+    ($(#[$doc:meta])* $name:ident, $variant:ident) => {
+        $(#[$doc])*
+        ///
+        /// Rules: 1 to [`SLUG_MAX_LEN`] characters, lowercase ASCII letters and digits, in words
+        /// separated by single hyphens (no leading, trailing or doubled hyphen). Serializes as a plain
+        /// string and is validated on deserialize.
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[serde(try_from = "String", into = "String")]
+        pub struct $name(String);
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
+        impl $name {
+            /// Maximum length of the slug, in bytes (all characters are ASCII).
+            pub const MAX_LEN: usize = SLUG_MAX_LEN;
+
+            /// Validates a slug.
+            ///
+            /// # Errors
+            #[doc = concat!("[`ValueError::", stringify!($variant), "`] when the text breaks one of the slug rules.")]
+            pub fn new(value: impl Into<String>) -> Result<Self, ValueError> {
+                let value = value.into();
+                match slug_problem(&value) {
+                    None => Ok(Self(value)),
+                    Some(reason) => Err(ValueError::$variant { value, reason }),
+                }
+            }
+
+            /// Returns the slug.
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = ValueError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(id: $name) -> Self {
+                id.0
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = ValueError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Self::new(s)
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    };
 }
 
-impl From<ExerciseId> for String {
-    fn from(id: ExerciseId) -> Self {
-        id.0
-    }
-}
-
-impl FromStr for ExerciseId {
-    type Err = ValueError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::new(s)
-    }
-}
-
-impl AsRef<str> for ExerciseId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ExerciseId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+slug_id!(
+    /// Identifies an exercise with a stable slug such as `back-squat` or `ohp`.
+    ExerciseId,
+    InvalidExerciseId
+);
+slug_id!(
+    /// Identifies a training day of a program with a stable slug such as `a` or `upper-1`.
+    DayId,
+    InvalidDayId
+);
 
 #[cfg(test)]
 mod tests {
@@ -287,6 +308,53 @@ mod tests {
                 other => panic!("{input:?} gave {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn day_id_follows_the_same_rules() {
+        assert_eq!(DayId::MAX_LEN, ExerciseId::MAX_LEN);
+        for slug in ["a", "upper-1", "day-b", &"d".repeat(DayId::MAX_LEN)] {
+            let id = DayId::new(slug).unwrap();
+            assert_eq!(id.as_str(), slug);
+            assert_eq!(id.as_ref(), slug);
+            assert_eq!(id.to_string(), slug);
+            assert_eq!(slug.parse::<DayId>().unwrap(), id);
+            assert_eq!(DayId::try_from(slug.to_owned()).unwrap(), id);
+        }
+        let cases = [
+            ("", "must not be empty"),
+            (
+                &"d".repeat(DayId::MAX_LEN + 1),
+                "must be at most 64 characters",
+            ),
+            (
+                "Day A",
+                "only lowercase letters, digits and hyphens are allowed",
+            ),
+            ("-a", "must not start or end with a hyphen"),
+            ("a-", "must not start or end with a hyphen"),
+            ("day--a", "must not contain consecutive hyphens"),
+        ];
+        for (input, expected) in cases {
+            match DayId::new(input) {
+                Err(ValueError::InvalidDayId { value, reason }) => {
+                    assert_eq!(value, input);
+                    assert_eq!(reason, expected, "input {input:?}");
+                }
+                other => panic!("{input:?} gave {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn day_id_serde_validates() {
+        let id = DayId::new("upper-1").unwrap();
+        assert_eq!(serde_json::to_string(&id).unwrap(), "\"upper-1\"");
+        assert_eq!(serde_json::from_str::<DayId>("\"upper-1\"").unwrap(), id);
+        assert_eq!(String::from(id), "upper-1");
+        let err = serde_json::from_str::<DayId>("\"Day A\"").unwrap_err();
+        assert!(err.to_string().contains("invalid day id `Day A`"));
+        assert!(serde_json::from_str::<DayId>("1").is_err());
     }
 
     #[test]
