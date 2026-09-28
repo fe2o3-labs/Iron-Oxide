@@ -199,12 +199,14 @@ The app is served at `https://app.iron-oxyde.com`. The apex `iron-oxyde.com` is 
    It prints the DNS records to create. **Copy the records from that output**, not from this
    page: the challenge target is specific to the app.
 
-2. In Route 53, hosted zone `iron-oxyde.com`, create:
+2. In Route 53, hosted zone `iron-oxyde.com`, create the records Fly asks for. `fly certs setup
+   app.iron-oxyde.com` shows them again at any time; copy the targets from its output, not from
+   this table:
 
    | Name | Type | Value |
    |---|---|---|
-   | `app.iron-oxyde.com` | `CNAME` | `iron-oxide.fly.dev` |
-   | `_acme-challenge.app.iron-oxyde.com` | `CNAME` | the target printed by `fly certs add` |
+   | `app.iron-oxyde.com` | `CNAME` | the target shown by `fly certs setup` (e.g. `iron-oxide.fly.dev`) |
+   | `_acme-challenge.app.iron-oxyde.com` | `CNAME` | the target shown by `fly certs setup` |
 
    A subdomain can be a plain `CNAME` to the Fly hostname (only the apex cannot). The
    `_acme-challenge` record lets Fly issue and renew the Let's Encrypt certificate even before
@@ -216,8 +218,14 @@ The app is served at `https://app.iron-oxyde.com`. The apex `iron-oxyde.com` is 
    fly certs check app.iron-oxyde.com
    ```
 
-4. Switch the app to the domain. All four values move together: the server refuses to start if
-   `WEBAUTHN_ORIGIN` or `GOOGLE_REDIRECT_URL` does not match `APP_BASE_URL`, and the RP ID must
+4. First, update Google (see docs/auth.md), in this order:
+   1. **Google Auth Platform → Branding** (a project setting, not a client setting): add
+      `iron-oxyde.com` to the authorized domains, if it is not there yet.
+   2. **Google Auth Platform → Clients**, the production client: add
+      `https://app.iron-oxyde.com/auth/google/callback` to its authorized redirect URIs.
+
+5. Then switch the app to the domain. All four values move together: the server refuses to start
+   if `WEBAUTHN_ORIGIN` or `GOOGLE_REDIRECT_URL` does not match `APP_BASE_URL`, and the RP ID must
    be the origin's host or a parent of it. One `secrets set` restarts the app once:
 
    ```sh
@@ -228,9 +236,7 @@ The app is served at `https://app.iron-oxyde.com`. The apex `iron-oxyde.com` is 
      GOOGLE_REDIRECT_URL='https://app.iron-oxyde.com/auth/google/callback'
    ```
 
-   Before that, add `https://app.iron-oxyde.com/auth/google/callback` to the production Google
-   OAuth client's authorized redirect URIs, and `iron-oxyde.com` to its authorized domains (see
-   docs/auth.md). Passkeys created on `iron-oxide.fly.dev` do not work on the new domain.
+   Passkeys created on `iron-oxide.fly.dev` do not work on the new domain.
 
 ### 7. Verify HTTPS
 
