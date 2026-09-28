@@ -304,11 +304,39 @@ pub async fn list(
     .collect()
 }
 
+/// Every session run from any version of `program`, whatever its status, oldest first (by start,
+/// then id). The input of the day rotation and of the progression history (#18); a user's history
+/// in one program stays small (a few hundred sessions), so it is read in one go.
+///
+/// A program that is not the user's gives no sessions, like one that does not exist.
+pub async fn list_in_program(
+    pool: &PgPool,
+    user: UserId,
+    program: ProgramId,
+) -> Result<Vec<WorkoutSession>, RepoError> {
+    sqlx::query_as!(
+        SessionRow,
+        "SELECT s.id, s.program_version_id, v.program_id, s.day_id, s.status, s.started_at,
+                s.finished_at
+         FROM workout_sessions s
+         JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id
+         WHERE s.user_id = $1 AND v.program_id = $2
+         ORDER BY s.started_at, s.id",
+        user.as_uuid(),
+        program.as_uuid(),
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(WorkoutSession::try_from)
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::server::db::{
-        MIGRATOR,
+        MIGRATOR, programs,
         testing::{self, at, new_session, random_uuid},
     };
 
@@ -529,6 +557,46 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     #[ignore = "needs Postgres"]
+    async fn list_in_program_keeps_every_version_and_status_oldest_first(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (program, version_1) = testing::program(&pool, user).await;
+        let (_, version_2) = programs::add_version(&pool, user, program, &testing::document("v2"))
+            .await
+            .unwrap();
+        let (_, other_version) = testing::program(&pool, user).await;
+        let mut expected = Vec::new();
+        for (hour, version) in [(2, version_2.id), (0, version_1), (1, other_version)] {
+            let new = NewSession {
+                started_at: at(hour * 3_600),
+                program_version_id: version,
+                ..new_session(version)
+            };
+            start(&pool, user, &new).await.unwrap();
+            if version != other_version {
+                expected.push((hour, new.id));
+            }
+        }
+        finish(
+            &pool,
+            user,
+            expected[1].1,
+            SessionOutcome::Abandoned,
+            at(60),
+        )
+        .await
+        .unwrap();
+        expected.sort();
+        let listed = list_in_program(&pool, user, program).await.unwrap();
+        assert_eq!(
+            listed.iter().map(|s| s.id).collect::<Vec<_>>(),
+            expected.iter().map(|(_, id)| *id).collect::<Vec<_>>()
+        );
+        assert!(listed.iter().all(|s| s.program_id == program));
+        assert_eq!(listed[0].status, SessionStatus::Abandoned);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
     async fn sessions_with_the_same_start_page_by_id(pool: PgPool) {
         let user = testing::user(&pool).await;
         let (_, version) = testing::program(&pool, user).await;
@@ -567,6 +635,12 @@ mod tests {
         }
         assert_eq!(get_in_progress(&pool, b).await.unwrap(), None);
         assert!(list(&pool, b, None, None, 100).await.unwrap().is_empty());
+        assert!(
+            list_in_program(&pool, b, program_a)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             list(&pool, b, Some(program_a), None, 100)
                 .await

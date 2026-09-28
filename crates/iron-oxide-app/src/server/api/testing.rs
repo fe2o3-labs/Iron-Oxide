@@ -71,7 +71,9 @@ impl TestApi {
     }
 }
 
-/// A signed-in user and their browser.
+/// A signed-in user and their browser. A clone shares the session: use clones to send concurrent
+/// requests as the same user.
+#[derive(Clone)]
 pub struct TestUser {
     /// The user's id, as the repository's owner key.
     pub id: UserId,

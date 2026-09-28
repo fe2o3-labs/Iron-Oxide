@@ -23,7 +23,7 @@ pub use volume::{Volume, VolumeDisplay, session_volume};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Reps, Weight};
+use crate::{LoggedSet, Reps, Weight};
 
 /// One set as it was performed: the input of every statistic in this module.
 ///
@@ -96,6 +96,23 @@ impl PerformedSet {
     }
 }
 
+/// The logged set as a [`PerformedSet`], for the statistics: its weight, reps and warm-up flag.
+///
+/// `None` for a set without a weight (body-weight work) and for timed work (a set with a duration,
+/// weighted or not): neither has a meaningful volume, top set or one-rep max.
+impl<T> From<&LoggedSet<T>> for Option<PerformedSet> {
+    fn from(set: &LoggedSet<T>) -> Self {
+        match (set.weight, set.duration) {
+            (Some(weight), None) => Some(PerformedSet {
+                weight,
+                reps: set.reps,
+                warmup: set.warm_up,
+            }),
+            (None, _) | (Some(_), Some(_)) => None,
+        }
+    }
+}
+
 /// A working set that was completed: a weight lifted for a number of reps (at least one).
 ///
 /// Used for top sets, record events and chart points. Lifts order by weight, then by reps, so the
@@ -156,6 +173,38 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{kg, reps, warm, work};
     use super::*;
+
+    fn logged(weight: Option<f64>, duration: Option<u32>, warm_up: bool) -> LoggedSet<i64> {
+        LoggedSet {
+            id: crate::SetId::from_uuid(uuid::Uuid::from_u128(1)),
+            exercise: crate::ExerciseId::new("back-squat").unwrap(),
+            set_index: 0,
+            reps: reps(5),
+            weight: weight.map(kg),
+            duration: duration.map(crate::Seconds::new),
+            warm_up,
+            completed_at: 0,
+        }
+    }
+
+    #[test]
+    fn a_weighted_logged_set_is_a_performed_set() {
+        let set: Option<PerformedSet> = (&logged(Some(100.0), None, false)).into();
+        assert_eq!(set, Some(work(100.0, 5)));
+        let set: Option<PerformedSet> = (&logged(Some(60.0), None, true)).into();
+        assert_eq!(set, Some(warm(60.0, 5)));
+    }
+
+    #[test]
+    fn body_weight_and_timed_logged_sets_are_not_performed_sets() {
+        for set in [
+            logged(None, None, false),
+            logged(None, Some(60), false),
+            logged(Some(20.0), Some(60), false),
+        ] {
+            assert_eq!(Option::<PerformedSet>::from(&set), None, "{set:?}");
+        }
+    }
 
     fn lift(weight: f64, count: u16) -> Lift {
         Lift {
