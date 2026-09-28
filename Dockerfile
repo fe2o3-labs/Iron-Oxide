@@ -31,8 +31,10 @@ ARG TARGETARCH
 # Unset (the default) means one job per CPU.
 ARG CARGO_BUILD_JOBS
 
+# curl downloads dx. pkg-config and libssl-dev let crates that link the system OpenSSL
+# (webauthn-rs, via openssl-sys) build; the runtime image ships the matching libssl3.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Official prebuilt dx from the Dioxus GitHub release, installed the same way as in CI
@@ -92,7 +94,8 @@ RUN --mount=type=cache,id=iron-oxide-cargo-registry,target=/usr/local/cargo/regi
 # ---------------------------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------------------------
-# glibc, libgcc, CA certificates (TLS to Neon and Google) and a `nonroot` user; no shell.
+# glibc, libgcc, OpenSSL 3 (libssl3t64), CA certificates (TLS to Neon and Google) and a `nonroot`
+# user; no shell.
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97 AS runtime
 
 # The server serves the client assets from `public/` next to its binary.
