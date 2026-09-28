@@ -22,6 +22,11 @@
 //!
 //! e1RM ([`E1rmFormula`]), [`Volume`], [`top_set`], personal records ([`ExerciseRecords`],
 //! [`PrEvent`]) and chart series ([`exercise_series`]), all computed from [`PerformedSet`] values.
+//!
+//! # Progression
+//!
+//! [`progression::next_targets`] computes an exercise's next targets from its program rule and
+//! history, and the [`progression::ProgressionChange`] shown in the end-of-session summary.
 
 pub mod session;
 pub mod time;
@@ -34,6 +39,7 @@ mod ids;
 mod percent;
 mod plates;
 pub mod program;
+pub mod progression;
 mod reps;
 mod stats;
 mod units;
