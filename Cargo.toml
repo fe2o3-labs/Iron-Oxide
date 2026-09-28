@@ -88,3 +88,13 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(web_sys_unstable_apis)"] }
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+
+# Lean debug info for dev builds, to keep target dirs small: line tables only for our crates
+# (backtraces keep file:line), none for dependencies. dx's dev profiles (`server-dev`,
+# `wasm-dev`) are defined ad hoc by dx with `inherits = "dev"`, so they get this too; defining
+# them here would switch off dx's own profile tweaks.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
