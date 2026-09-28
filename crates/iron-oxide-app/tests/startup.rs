@@ -137,6 +137,22 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// Sign-in settings for local development (#5). The session key is 64 zero bytes: test-only.
+const SIGN_IN_VARS: [(&str, &str); 6] = [
+    ("WEBAUTHN_RP_ID", "localhost"),
+    ("WEBAUTHN_ORIGIN", "http://localhost:8080"),
+    ("GOOGLE_CLIENT_ID", "test-client.apps.googleusercontent.com"),
+    ("GOOGLE_CLIENT_SECRET", "test-client-secret"),
+    (
+        "GOOGLE_REDIRECT_URL",
+        "http://localhost:8080/auth/google/callback",
+    ),
+    (
+        "SESSION_KEY",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+    ),
+];
+
 /// A server process started against the test database, ready to serve.
 struct Server {
     child: Option<Child>,
@@ -157,6 +173,7 @@ impl Server {
             .env_clear()
             .env("DATABASE_URL", database_url)
             .env("APP_BASE_URL", "http://localhost:8080")
+            .envs(SIGN_IN_VARS.iter().copied())
             .env("PORT", port.to_string())
             .env("DIOXUS_PUBLIC_PATH", &public)
             .env("RUST_LOG", "info")
@@ -363,4 +380,7 @@ fn a_nasty_database_password_never_reaches_the_logs() {
     assert!(!logs.contains("SECRETxyz"), "{logs}");
     let encoded_password = url.password().unwrap_or_default();
     assert!(!logs.contains(encoded_password), "{logs}");
+    // The sign-in secrets never reach the logs either, even at trace level.
+    assert!(!logs.contains("test-client-secret"), "{logs}");
+    assert!(!logs.contains("AAAAAAAAAAAAAAAA"), "{logs}");
 }

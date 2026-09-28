@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE sessions\n             SET user_id = $2, data = $3, expires_at = $4, updated_at = now()\n             WHERE id_hash = $1 AND expires_at > now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Uuid",
+        "Jsonb",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "526a1b1ca2b4f896f34b324fa100afe3fde3692c2df6e39c8227ef48504a7db5"
+}
