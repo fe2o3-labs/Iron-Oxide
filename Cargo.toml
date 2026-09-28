@@ -36,8 +36,9 @@ dotenvy = "0.15.7"
 # 4.0.1, its latest release, requires 0.12). We use it through `openidconnect::reqwest`.
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 secrecy = "0.10.3"
-# Held back on 0.8 (0.9.0 is the latest): `tower-sessions-sqlx-store` 0.15 (Postgres sessions, #5)
-# depends on sqlx 0.8, and the session store must share our `PgPool` type.
+# Held back on 0.8 (0.9.0 is the latest), capped in Renovate. The original reason
+# (`tower-sessions-sqlx-store`) no longer applies: #5 uses its own session store. Moving to 0.9 is
+# a separate change (sqlx-cli, `.sqlx`, the Renovate cap).
 sqlx = { version = "0.8.6", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls-ring-webpki",
@@ -72,7 +73,7 @@ webauthn-rs = { version = "0.5.5", default-features = false, features = [
 openssl = "0.10.81"
 webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = ["softpasskey"] }
 
-# tokio: the app adds `time` for its server build; `macros`/`rt` are for tests.
+# Dev-dependencies for tests (tokio: the app also enables runtime features for its server build).
 tokio = { version = "1.53.1", features = ["macros", "rt"] }
 tower = { version = "0.5.3", features = ["util"] }
 

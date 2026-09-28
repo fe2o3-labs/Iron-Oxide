@@ -9,6 +9,7 @@ compile_error!("wasm builds need `--cfg=web_sys_unstable_apis` (set in .cargo/co
 
 mod api;
 mod auth;
+mod pwa;
 #[cfg(feature = "server")]
 mod server;
 mod ui;

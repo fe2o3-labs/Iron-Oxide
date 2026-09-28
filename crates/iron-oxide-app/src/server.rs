@@ -10,10 +10,13 @@ pub mod state;
 use std::{future::IntoFuture, process::ExitCode, sync::Arc, time::Duration};
 
 use dioxus::logger::tracing;
-use dioxus::server::axum::{self, Extension, Router, http::StatusCode, routing::get};
+use dioxus::server::axum::{
+    self, Extension, Router, http::StatusCode, middleware::from_fn, routing::get,
+};
 use tokio::net::TcpListener;
 
 pub use self::{config::Config, state::AppState};
+use crate::pwa::missing_assets::missing_assets_are_not_found;
 use crate::ui::App;
 
 /// Why the server stopped with an error.
@@ -199,7 +202,9 @@ impl ShutdownSignals {
 /// Full server router: the Dioxus application merged with the custom routes, with the shared
 /// state attached to every request (server functions included).
 pub fn router(state: AppState, auth: auth::AuthState) -> Router {
-    let app = dioxus::server::router(App).merge(custom_routes());
+    let app = dioxus::server::router(App)
+        .merge(custom_routes())
+        .layer(from_fn(missing_assets_are_not_found));
     // Sign-in (#5): sessions, the CSRF check and the Google callback around the app.
     auth::install(app, auth, state.db.clone()).layer(Extension(state))
 }

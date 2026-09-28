@@ -7,6 +7,10 @@ use dioxus::fullstack::RequestError;
 use dioxus::prelude::*;
 
 use crate::api::server_time;
+use crate::pwa::PwaHead;
+
+/// Colour tokens shared by every screen (see docs/palette.md).
+const TOKENS_CSS: Asset = asset!("/assets/tokens.css");
 
 /// Styles of the app shell and the account panel.
 const AUTH_CSS: Asset = asset!("/assets/auth.css");
@@ -18,7 +22,9 @@ pub fn App() -> Element {
 
     rsx! {
         document::Title { "Iron Oxide" }
+        PwaHead {}
         document::Meta { name: "viewport", content: "width=device-width, initial-scale=1" }
+        document::Stylesheet { href: TOKENS_CSS }
         document::Stylesheet { href: AUTH_CSS }
         main { class: "io-app",
             header { class: "io-header",
