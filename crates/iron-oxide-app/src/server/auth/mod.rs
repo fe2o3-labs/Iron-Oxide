@@ -316,6 +316,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn webauthn_accepts_the_app_subdomain_with_the_parent_rp_id() {
+        let origin = url::Url::parse("https://app.iron-oxyde.com").unwrap();
+        WebauthnBuilder::new("iron-oxyde.com", &origin)
+            .unwrap()
+            .build()
+            .unwrap();
+    }
+
+    #[test]
     fn webauthn_rejects_an_rp_id_foreign_to_the_origin() {
         let origin = url::Url::parse("https://iron-oxyde.com").unwrap();
         assert!(WebauthnBuilder::new("example.com", &origin).is_err());

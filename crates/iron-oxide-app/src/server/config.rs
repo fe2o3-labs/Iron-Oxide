@@ -1135,6 +1135,35 @@ mod tests {
     }
 
     #[test]
+    fn the_production_app_subdomain_with_the_parent_rp_id_is_accepted() {
+        // The app at app.iron-oxyde.com, passkeys bound to the parent domain (#7, #70).
+        let vars = set(
+            set(
+                set(
+                    set(
+                        production(),
+                        vars::APP_BASE_URL,
+                        "https://app.iron-oxyde.com",
+                    ),
+                    vars::WEBAUTHN_ORIGIN,
+                    "https://app.iron-oxyde.com",
+                ),
+                vars::WEBAUTHN_RP_ID,
+                "iron-oxyde.com",
+            ),
+            vars::GOOGLE_REDIRECT_URL,
+            "https://app.iron-oxyde.com/auth/google/callback",
+        );
+        let config = load(&vars).unwrap();
+        assert_eq!(config.auth.webauthn_rp_id, "iron-oxyde.com");
+        assert_eq!(
+            config.auth.webauthn_origin.as_str(),
+            "https://app.iron-oxyde.com/"
+        );
+        assert!(config.auth.cookie_secure);
+    }
+
+    #[test]
     fn rp_id_must_match_the_origin() {
         for (rp_id, origin) in [
             ("example.com", "https://notexample.com"),

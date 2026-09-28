@@ -145,12 +145,8 @@ impl Browser {
         builder
     }
 
-    /// Calls a server function (`POST` with a JSON body) and decodes the result.
-    pub async fn call<T: DeserializeOwned>(
-        &mut self,
-        path: &str,
-        body: Value,
-    ) -> Result<T, CallError> {
+    /// `POST path` with a JSON body, returning the status and the raw body.
+    pub async fn post_json(&mut self, path: &str, body: Value) -> (StatusCode, Vec<u8>) {
         let request = self
             .request("POST", path)
             .header(header::CONTENT_TYPE, "application/json")
@@ -159,6 +155,16 @@ impl Browser {
         let response = self.send(request).await;
         let status = response.status();
         let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        (status, bytes.to_vec())
+    }
+
+    /// Calls a server function (`POST` with a JSON body) and decodes the result.
+    pub async fn call<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        body: Value,
+    ) -> Result<T, CallError> {
+        let (status, bytes) = self.post_json(path, body).await;
         if status.is_success() {
             Ok(serde_json::from_slice(&bytes)
                 .unwrap_or_else(|e| panic!("{path}: {e}: {}", String::from_utf8_lossy(&bytes))))

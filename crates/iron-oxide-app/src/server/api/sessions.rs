@@ -1025,6 +1025,26 @@ mod tests {
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
     #[ignore = "needs Postgres"]
+    async fn a_database_outage_is_a_retryable_503(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let mut a = api.user("A").await;
+        let session = db_testing::session(&api.db, a.id).await;
+        // The session load in `AuthUser` is the first query to fail.
+        api.db.close().await;
+        let error = a
+            .call_err(GET, json!({ "session_id": session.as_uuid() }))
+            .await;
+        assert_eq!(
+            error,
+            CallError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: crate::server::api::error::TRANSIENT.to_owned(),
+            }
+        );
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
     async fn every_endpoint_needs_a_signed_in_user(db: PgPool) {
         let api = TestApi::new(db).await;
         let a = api.user("A").await;

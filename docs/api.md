@@ -29,7 +29,8 @@ pub async fn get_session(session_id: SessionId) -> Result<SessionView, ServerFnE
 ```
 
 - Every function is a `POST` under `/api/<area>/<name>`. The CSRF layer checks every `POST`,
-  and nothing is cached.
+  and nothing is cached. The only exception is `server_time` (`GET /api/server-time`), which
+  predates the conventions and reads nothing of the user's.
 - The server-only arguments go after the route: `state: Extension<AppState>` for the pool and
   `user: AuthUser` for the signed-in user. Without a valid session, `AuthUser` rejects the call with
   `401` before the body runs.
@@ -53,7 +54,7 @@ logged, never returned.
 | `NotFound` | 404 | `Not found.` | No such row **among the caller's own**. Another user's id gives exactly the same answer as an id that does not exist. |
 | `Conflict(msg)` | 409 | `msg` | An id reused with different content, a session that has already ended |
 | `Invalid(msg)` | 422 | `msg` | Invalid input: a domain value, a program document, a database `CHECK` (`Invalid value.`) |
-| `Transient(detail)` | 503 | `The server is busy. Please try again.` | Nothing was saved and the same request can simply be retried. Covers a concurrent write, a pool timeout, a dropped connection, a serialization failure or a deadlock. |
+| `Transient(detail)` | 503 | `The server is busy. Please try again.` | The same request can simply be retried: it may have been saved before a dropped connection, but every write is idempotent. Covers a concurrent write, a pool timeout, a dropped connection, a serialization failure or a deadlock. |
 | `Unauthorized` | 401 | `Please sign in.` | Not signed in (normally rejected earlier by `AuthUser`) |
 | `Forbidden(msg)` | 403 | `msg` | Plan gating (#21) |
 | `Internal(detail)` | 500 | `Something went wrong. Please try again.` | Bugs, corrupt stored data, any other database failure |
@@ -81,33 +82,53 @@ status and message (and, for structured data such as a list of problems, `detail
 
 ### The error body
 
-Every failed `/api/` call answers with the same JSON, whatever produced it:
+Every failed `/api/` call that answers JSON has the same body, whatever produced it:
 
 ```json
 { "message": "Not found.", "code": 404, "data": { "ServerError": { "message": "Not found.", "code": 404 } } }
 ```
 
-Dioxus produces two shapes on its own. An error returned by a server function has Dioxus's
-`Display` text (`error running server function: Not found. (details: None)`) as `message`. An
-extractor rejection (`AuthUser`'s 401, the CSRF 403) or arguments that do not decode give
-`{"error": text}`. `server::api::errors_layer` rewrites both into the shape above, with our message
-on top and in `data.ServerError`, keeping any `details`.
+`data.ServerError` may also have `details`, structured data for the UI (a list of problems, a
+429's `retry_after_secs`). The Dioxus client decodes `data` into `ServerFnError::ServerError {
+message, code, details }`: **our message and details are that variant's own `message` and
+`details`**.
+
+Dioxus produces other shapes on its own. An error returned by a server function has Dioxus's
+`Display` text (`error running server function: …`) as the top `message`. An extractor rejection
+(`AuthUser`'s 401, the CSRF 403) or arguments that do not decode give `{"error": text}`. A body
+with a `data` that is not a `ServerError` (see the 429 below) would not decode on the client.
+`server::api::errors_layer` rewrites all of them into the shape above. Bodies that are not JSON
+(a panic, axum's own 405, 413 or 415) are left alone; the client classifies them by status.
 
 **Arguments that do not decode** are `422 Invalid request.` They include a malformed id, a wrong
-type or a missing field. Dioxus answers them with a `500` whose text is a serde error. Any other
-raw `500` gets the generic message. The original text is logged in both cases.
+type or a missing field. Dioxus answers them with a `500` whose text is a serde error.
+
+**Every 5xx except 503** gets the generic message and no details, whatever the function put in
+it (`ServerFnError::new(detail)`, an `anyhow` error). The original text is logged.
+
+**429 (rate limiting, #72).** The body is
+
+```json
+{ "message": "Too many requests. Please wait a moment.", "code": 429,
+  "data": { "ServerError": { "message": "Too many requests. Please wait a moment.", "code": 429,
+                             "details": { "retry_after_secs": 30 } } } }
+```
+
+plus the `Retry-After: 30` header. A limiter may also send `{"message", "code": 429, "data":
+{"retry_after_secs": 30}}`: the layer moves that `data` into `details`. On the client,
+`ApiFailure::retry_after_secs()` reads it.
 
 ### On the client
 
 `crate::api::error::ApiFailure::classify(&ServerFnError)` gives a `FailureKind`, the message to
 show and any structured `details`:
 
-- It handles a decoded `ServerError { code, details, .. }` and a bare
+- It handles a decoded `ServerError { message, code, details }` and a bare
   `RequestError::Status(_, code)`.
-- The message shown is only ever **ours**, from `details.ServerError.message`, for every 4xx and
-  for 503. It never shows the `ServerFnError`'s own `message` or `Display`, which can be Dioxus's
-  text or a proxy's page. Without our message, and for 500s and unknown statuses, it shows a
-  generic message for the kind.
+- It shows **our** message, the `ServerError`'s own `message`, for every 4xx and for 503. For 500s
+  and unknown statuses, and for answers that are not ours (`message` = `HTTP {code}: {text}`, the
+  client's fallback for a body that is not our JSON), it shows a generic message for the kind and
+  drops the details.
 - 413 counts as `Invalid`.
 - **Retryable:** `Transient` (503, 502, 504), `RateLimited` (429, honouring `Retry-After`), and
   `Network` (timeouts, connection failures, the request never answered).
@@ -123,6 +144,10 @@ retried request is recognised:
 - same id, different content: `409`;
 - concurrent duplicates: one row, the others get the same success, or a `503` that a retry turns
   into it.
+
+**Every write endpoint, updates included, must succeed unchanged when replayed.** A `503` can
+follow a write that was committed (the connection dropped during `COMMIT`), and the retry queue
+then sends it again.
 
 Timestamps that are part of what is saved (`started_at`, `completed_at`, `finished_at`) come from
 the client, in the request. If the server stamped `now()`, a retry would carry a different time
