@@ -38,6 +38,8 @@ in order of preference:
    `let secret = "…"; // gitleaks:allow (test fixture, not a real key)`.
 3. If the line can't be edited (for example, the finding is in an already-pushed commit), add its
    fingerprint to `.gitleaksignore`, with a comment line above it that says why it is not a
-   secret. The fingerprint is printed by gitleaks: `<commit>:<file>:<rule-id>:<line>`.
+   secret. The fingerprint is printed by gitleaks: `<commit>:<file>:<rule-id>:<line>`. It contains
+   the commit SHA, so it only survives merge-commit merges. A squash or rebase creates a new commit,
+   and the finding comes back: prefer options 1 and 2.
 
 Never use these to silence a real secret. A real secret must be revoked and rotated.
