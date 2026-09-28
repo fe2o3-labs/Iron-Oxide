@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "name": "Out of range values",
+  "days": [
+    {
+      "id": "a",
+      "name": "A",
+      "exercises": [
+        {
+          "id": "squat",
+          "name": "Squat",
+          "work": { "reps": { "sets": 0, "reps": 0 } },
+          "load": { "kg": 0 },
+          "rest": 9000
+        },
+        {
+          "id": "curl",
+          "name": "Curl",
+          "work": { "reps": { "sets": 21, "reps": { "min": 0, "max": 101 } } },
+          "load": { "percent_of_training_max": 151 },
+          "rest": 60
+        },
+        {
+          "id": "plank",
+          "name": "Plank",
+          "work": { "hold": { "sets": 3, "seconds": 0 } },
+          "rest": 60
+        },
+        {
+          "id": "bike",
+          "name": "Bike",
+          "work": { "intervals": { "work": 0, "rest": 3601, "rounds": 0 } },
+          "rest": 60
+        }
+      ]
+    }
+  ],
+  "rotation": ["a"]
+}

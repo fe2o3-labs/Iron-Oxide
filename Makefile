@@ -233,7 +233,6 @@ sqlx-prepare: db-up migrate ## Regenerate the offline query data in .sqlx/ (comm
 	$(Q)SQLX_OFFLINE=false $(CARGO) sqlx prepare --workspace -- --all-targets --features $(APP)/server
 
 schema: ## Regenerate schemas/program.schema.json from the domain types (commit it)
-	$(Q)$(call need-file,crates/$(DOMAIN)/src/program/schema.rs,#56)
 	$(Q)UPDATE_SCHEMA=1 $(CARGO) test -p $(DOMAIN) $(LOCKED) program::schema
 
 icons: ## Regenerate the PNG icons from the SVG sources (rsvg-convert, ImageMagick)

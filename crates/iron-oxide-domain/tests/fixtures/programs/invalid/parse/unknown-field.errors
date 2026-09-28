@@ -1,0 +1,1 @@
+days[0].exercises[1].restt: unknown field `restt`, expected one of `id`, `name`, `work`, `load`, `rest`, `tempo`, `notes`, `demo_url`, `warmup`, `superset`, `progression` (line 14, column 17)

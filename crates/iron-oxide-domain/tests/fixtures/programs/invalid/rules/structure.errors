@@ -1,0 +1,7 @@
+name: must not be blank
+description: must not be blank
+days[0].exercises[1].id: exercise `squat` already appears in this day at days[0].exercises[0]
+days[1].id: duplicate day id `a` (already used at days[0].id)
+days[1].exercises: must contain at least one exercise
+days[2].id: day `c` is not in the rotation
+rotation[1]: unknown day `b`

@@ -12,8 +12,10 @@ A strength-training PWA written in Rust with [Dioxus](https://dioxuslabs.com) fu
 | `crates/iron-oxide-app/migrations` | SQL migrations, embedded in the server and applied at startup. |
 | `.sqlx/` | Offline query metadata for the sqlx macros (see "Database"). |
 | `docker-compose.yml` | Local Postgres for development and tests. |
+| `programs/` | Built-in training programs (JSON), embedded in the domain crate. |
+| `schemas/program.schema.json` | JSON Schema of a program document, generated from the domain types. Regenerate with `make schema`; a test fails when it is stale. |
 | `Makefile` | Entry point for every dev, test, build and deploy task (`make` lists them). |
-| `scripts/` | Helpers the Makefile and CI call: `setup.sh` (tool check and install), `smoke-test.sh` (release bundle smoke test). |
+| `scripts/` | Helpers the Makefile and CI call: `setup.sh` (tool check and install), `smoke-test.sh` (release bundle smoke test), `check-postgres-tests.sh` (every Postgres test ran), `test-make-guards.sh` (the Makefile's own guards). |
 
 ## Quick start
 

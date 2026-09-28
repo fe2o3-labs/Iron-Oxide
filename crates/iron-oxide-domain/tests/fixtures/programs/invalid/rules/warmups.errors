@@ -1,0 +1,7 @@
+days[0].exercises[0].warmup[0].sets: must be between 1 and 10 (got 0)
+days[0].exercises[0].warmup[0].reps: must be between 1 and 100 (got 0)
+days[0].exercises[0].warmup[1].load.lb: warm-up load 135 lb must be lighter than the working load 60 kg
+days[0].exercises[0].warmup[2].load.percent_of_working_weight: must be above 0% and below 100% (got 100%)
+days[0].exercises[0].warmup[3].load.kg: must be greater than zero
+days[0].exercises[1].warmup[0].load.percent_of_working_weight: percent_of_working_weight needs a working load on the exercise
+days[0].exercises[2].warmup: warm-up sets need sets of reps, not timed work

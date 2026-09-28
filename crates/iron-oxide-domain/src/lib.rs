@@ -33,6 +33,7 @@ mod error;
 mod ids;
 mod percent;
 mod plates;
+pub mod program;
 mod reps;
 mod stats;
 mod units;

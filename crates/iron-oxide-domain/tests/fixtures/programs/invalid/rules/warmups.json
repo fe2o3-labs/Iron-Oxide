@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "name": "Bad warm-ups",
+  "days": [
+    {
+      "id": "a",
+      "name": "A",
+      "exercises": [
+        {
+          "id": "squat",
+          "name": "Squat",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "kg": 60 },
+          "rest": 180,
+          "warmup": [
+            { "sets": 0, "reps": 0, "load": { "kg": 20 } },
+            { "reps": 5, "load": { "lb": 135 } },
+            { "reps": 3, "load": { "percent_of_working_weight": 100 } },
+            { "reps": 3, "load": { "kg": 0 } }
+          ]
+        },
+        {
+          "id": "chin-up",
+          "name": "Chin-up",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "rest": 120,
+          "warmup": [{ "reps": 3, "load": { "percent_of_working_weight": 50 } }]
+        },
+        {
+          "id": "plank",
+          "name": "Plank",
+          "work": { "hold": { "sets": 3, "seconds": 30 } },
+          "rest": 60,
+          "warmup": [{ "reps": 1, "load": { "kg": 5 } }]
+        }
+      ]
+    }
+  ],
+  "rotation": ["a"]
+}
