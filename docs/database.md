@@ -48,6 +48,7 @@ erDiagram
     programs {
         uuid id PK
         uuid user_id "NULL only for built-ins"
+        uuid creation_id "client idempotency key, unique per user"
         text source_builtin_id "slug"
         text name "1-100 chars"
         boolean archived
@@ -98,9 +99,9 @@ with the sign-in `sessions` table.
 | Table | Holds | Notes |
 |---|---|---|
 | `user_settings` | Unit, bar weight, plate inventory, default rest, sound | One row per user, created by the first save. Until then the repository returns `UserSettings::defaults()`, which a test keeps equal to the column defaults. |
-| `training_maxes` | One training max per user and exercise, with `set_at` | Per user, not per program (#56). A table rather than a jsonb map, so the weight range and the slug are checked. `set_at` is when the lifter entered it: the progression engine (#57) replays the completed sets after it, so the engine's result is never stored back without moving `set_at` (the repository writes both together). |
-| `programs` | A program's header | `user_id` is NULL only for built-ins (`CHECK (user_id IS NOT NULL OR source_builtin_id IS NOT NULL)`); one row per built-in id (partial unique index). A copy of a built-in keeps its `source_builtin_id`. Programs are archived, not deleted, so old sessions stay linked. |
-| `program_versions` | Immutable program documents | `version` is 1, 2, ... per program. A trigger rejects every `UPDATE`; there is no update path in the repository. Rows are only deleted by cascade (program or user deleted). |
+| `training_maxes` | One training max per user and exercise, with `set_at` | Per user, not per program (#56). A table rather than a jsonb map, so the weight range and the slug are checked. `set_at` is when the lifter entered it: the progression engine (#57) replays the completed sets after it. `training_maxes::set` writes the weight and `set_at` together, but it cannot tell an entered value from a computed one: the caller must pass the time the value is valid from (never keep the old `set_at` with the engine's result), or the same sets are counted twice. |
+| `programs` | A program's header | `user_id` is NULL only for built-ins (`CHECK (user_id IS NOT NULL OR source_builtin_id IS NOT NULL)`); one row per built-in id (partial unique index). A copy of a built-in keeps its `source_builtin_id`. `creation_id` is the client's idempotency key for the create or copy request (`UNIQUE (user_id, creation_id)`), so a retry returns the same program. Programs are archived, not deleted: a trigger rejects any `DELETE` that is not the cascade from a deleted user. |
+| `program_versions` | Immutable program documents | `version` is 1, 2, ... per program. A trigger rejects every `UPDATE`; there is no update path in the repository. A trigger rejects any `DELETE` that is not the cascade from a deleted user, so a version number is never freed for other content. |
 | `active_program` | The program a user trains with | Composite FK to `programs (id, user_id)`: only one of the user's own programs (never a built-in; copy it first). |
 | `workout_sessions` | A training session | Client-generated id, primary key `(user_id, id)`. `finished_at` is set exactly when the status is not `in_progress`, and not before `started_at`. |
 | `workout_sets` | A logged set | Client-generated id, the idempotency key; primary key `(user_id, id)`. |
@@ -147,6 +148,8 @@ types mirror them field for field, and switch to them once they are merged.
    user's (or a built-in's) program version, and another user's program cannot be made active,
    whatever the application sends.
 4. **Owners never change**: a trigger rejects any update of `user_id` in every user-owned table.
+   Programs and versions cannot be deleted directly either (`forbid_direct_delete`, which lets
+   only foreign key cascades through: `pg_trigger_depth() >= 2`).
 5. **Program versions take their owner from their program**: a trigger sets
    `program_versions.user_id` from `programs.user_id`, ignoring what the caller wrote. This also
    covers built-ins, where the composite key alone would not be checked (a NULL column skips a
@@ -175,7 +178,15 @@ types mirror them field for field, and switch to them once they are merged.
   - same id and different content: `RepoError::Conflict`;
   - an id another user also uses: irrelevant, the write is the caller's own and succeeds. The
     other row is never read, compared or modified.
-- **Typed ids** (`UserId`, `ProgramId`, `ProgramVersionId`, `SessionId`, `SetId`) so ids of
+  - A set saved while its session's `start` is committing (the insert's snapshot misses the
+    session, the next read sees it) is retried once internally, so it is saved; if the session
+    kept changing it returns `RepoError::Transient` ("please try again", nothing saved), never
+    `Conflict`.
+- **Idempotent program creation** (`programs::create`, `programs::copy_builtin`): the client sends
+  a `CreationId` per request. A retry with the same key returns the program it created
+  (`Change::Unchanged`), including under concurrent retries; the same key for a different request
+  (another document, or a create replayed as a copy) is a `Conflict`. Keys are per user.
+- **Typed ids** (`UserId`, `ProgramId`, `ProgramVersionId`, `CreationId`, `SessionId`, `SetId`) so ids of
   different kinds cannot be swapped. They will be replaced by the domain ids of #48.
 - Queries use the compile-time checked `sqlx::query!` / `query_as!` macros; the metadata is in
   `.sqlx/`.
@@ -184,7 +195,7 @@ types mirror them field for field, and switch to them once they are merged.
 |---|---|
 | `settings` | `get` (defaults when never saved), `save` |
 | `training_maxes` | `list`, `set`, `delete` |
-| `programs` | `seed_builtins`, `list_builtins`, `copy_builtin`, `create`, `get`, `list`, `rename`, `set_archived`, `add_version` (a retried identical upload is a no-op), `list_versions`, `get_version`, `latest_version` |
+| `programs` | `seed_builtins`, `list_builtins`, `copy_builtin` and `create` (idempotent on a `CreationId`), `get`, `list`, `rename`, `set_archived`, `add_version` (a retried identical upload is a no-op), `list_versions`, `get_version`, `latest_version` |
 | `active_program` | `get`, `set`, `clear` |
 | `sessions` | `start` (idempotent), `finish` (idempotent), `get`, `get_in_progress`, `list` (history pages by `(started_at, id)`, optionally for one program) |
 | `sets` | `upsert_idempotent`, `list_for_session`, `completed_for_exercise` (sets of one exercise after a time, in completed sessions of any version of a program: the progression input of #57, served by the `(user_id, exercise_id, completed_at)` index) |
@@ -237,14 +248,22 @@ DATABASE_URL=postgres://iron_oxide:iron_oxide@localhost:5433/iron_oxide_test \
     column, and keeps the other user's rows. `populate` must write to each such table first, so a
     new table fails this test until it is covered;
   - every unique key (primary keys included) of a table with a `user_id` column includes
-    `user_id`, or is on the `UNIQUE_KEYS_WITHOUT_OWNER` allowlist with a reason.
+    `user_id`, or is on the `UNIQUE_KEYS_WITHOUT_OWNER` allowlist with a reason;
+  - every foreign key between two tables that have a `user_id` column maps `user_id` to
+    `user_id`, or is on the `FOREIGN_KEYS_WITHOUT_OWNER` allowlist with a reason;
+  - no table exists outside `public` (and the system schemas), so the checks above see every
+    table;
+  - programs and versions cannot be deleted directly, and still go with their user.
 
 Not here yet: a test-only way to sign in as a user, and isolation tests at the server-function
 level (including the GDPR export). They come with `AuthUser` (#5) and the server functions
 (#18–#22), which wrap this repository.
 
-CI runs them in the "Integration tests (Postgres)" job, and fails if the key isolation tests do not
-appear as passed in its log.
+CI runs them in the "Integration tests (Postgres)" job. It fails unless every
+`#[ignore = "needs Postgres"]` test in the app's `src/` appears as passed in the log, and unless at
+least as many schema tests (module `schema_tests`) and repository isolation tests (names containing
+`another_users`, `users_only`, `nobody_can`, `two_users` or `only_the_users`) passed as today.
+Follow the naming convention for new isolation tests and raise the floors in `ci.yml`.
 
 ### Adding a user-owned table
 
@@ -253,7 +272,7 @@ appear as passed in its log.
 2. Client-generated ids in a `(user_id, id)` primary key; every other unique key including
    `user_id` too (or allowlisted in `schema_tests.rs` with a reason).
 3. References to other user-owned rows as composite foreign keys including `user_id` (add a
-   `UNIQUE (id, user_id)` on the target if needed).
+   `UNIQUE (id, user_id)` on the target if needed); a catalog test enforces it.
 4. Repository functions that take a `UserId` and filter every statement by it, returning
    `NotFound` for rows that are not the caller's.
 5. Add a row to it in `testing::populate`, and isolation tests for each new function.

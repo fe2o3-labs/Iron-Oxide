@@ -202,17 +202,23 @@ jobs:
           cargo test --workspace --locked -- --ignored
           cargo test -p iron-oxide-app --features server --locked -- --ignored 2>&1 \
             | tee "$RUNNER_TEMP/server-tests.log"
-          # Guard against the data isolation tests silently not running (a renamed module, a
-          # filter, a feature flag): these must appear as passed in the log.
-          for test in \
-            server::db::schema_tests::deleting_a_user_removes_their_rows_in_every_table_and_keeps_others \
-            server::db::schema_tests::every_user_id_cascades_from_users_and_is_indexed \
-            server::db::sets::tests::another_users_sets_are_invisible_and_untouchable \
-            server::db::sessions::tests::another_users_sessions_are_invisible_and_untouchable \
-            server::db::programs::tests::another_users_programs_are_invisible_and_untouchable; do
-            grep -qF "test $test ... ok" "$RUNNER_TEMP/server-tests.log" \
-              || { echo "::error::isolation test did not run: $test"; exit 1; }
-          done
+          # Guard against Postgres tests silently not running (a renamed module, a filter, a
+          # feature flag). 1) Every `#[ignore = "needs Postgres"]` test in the app's src/ must
+          # appear as passed. 2) Every isolation and schema test must be among them: the schema
+          # tests by module, the repository isolation tests by naming convention.
+          expected=$(grep -rE '^\s*#\[ignore = "needs Postgres"\]' crates/iron-oxide-app/src | wc -l)
+          passed=$(grep -cE '^test server::\S+ \.\.\. ok$' "$RUNNER_TEMP/server-tests.log" || true)
+          echo "Postgres tests in src/: $expected, passed: $passed"
+          if [ "$expected" -lt 1 ] || [ "$passed" -ne "$expected" ]; then
+            echo "::error::$passed of $expected Postgres tests passed"; exit 1
+          fi
+          schema=$(grep -cE '^test server::db::schema_tests::\S+ \.\.\. ok$' "$RUNNER_TEMP/server-tests.log" || true)
+          isolation=$(grep -cE '^test server::db::\w+::tests::\w*(another_users|users_only|nobody_can|two_users|only_the_users)\w* \.\.\. ok$' "$RUNNER_TEMP/server-tests.log" || true)
+          echo "schema tests passed: $schema, isolation tests passed: $isolation"
+          # Floors: today's counts. Raise them when adding tests; lowering one needs a reason.
+          if [ "$schema" -lt 18 ] || [ "$isolation" -lt 9 ]; then
+            echo "::error::isolation or schema tests missing (schema $schema < 18 or isolation $isolation < 9)"; exit 1
+          fi
 
   # Builds the release bundle exactly as the Dockerfile (#7) will, then runs the server and checks
   # the page, a server function round-trip, /healthz and /readyz over HTTP, and a graceful
