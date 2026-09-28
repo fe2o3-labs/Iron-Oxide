@@ -6,10 +6,10 @@
   "type": "object",
   "properties": {
     "$schema": {
-      "description": "Optional link to this JSON Schema, so editors can check and complete the document. Ignored\nby the app.",
-      "type": [
-        "string",
-        "null"
+      "description": "Optional link to this JSON Schema, so editors can check and complete the document. Only\nthe published URL is accepted.",
+      "enum": [
+        "https://raw.githubusercontent.com/guizmaii-opensource/Iron-Oxide/main/schemas/program.schema.json",
+        null
       ]
     },
     "days": {
@@ -17,18 +17,26 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/Day"
-      }
+      },
+      "maxItems": 14,
+      "minItems": 1
     },
     "description": {
       "description": "Optional description: who it is for, how to run it.",
       "type": [
         "string",
         "null"
-      ]
+      ],
+      "maxLength": 2000,
+      "minLength": 1,
+      "pattern": "[^\\s\\u0085]"
     },
     "name": {
       "description": "The program's name.",
-      "type": "string"
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1,
+      "pattern": "[^\\s\\u0085]"
     },
     "rotation": {
       "description": "The suggested order of the days, repeated forever: `[\"a\", \"b\", \"c\"]`. A day may appear\nseveral times (`[\"a\", \"b\", \"a\", \"b\", \"c\"]`), and every day must appear at least once.",
@@ -39,13 +47,13 @@
         "maxLength": 64,
         "minLength": 1,
         "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
-      }
+      },
+      "maxItems": 28,
+      "minItems": 1
     },
     "schema_version": {
       "description": "The version of the document format. Must be 1.",
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0
+      "const": 1
     }
   },
   "additionalProperties": false,
@@ -65,7 +73,9 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/Exercise"
-          }
+          },
+          "maxItems": 30,
+          "minItems": 1
         },
         "id": {
           "description": "A slug such as `a` or `upper-1`, referenced by the rotation.",
@@ -76,7 +86,10 @@
         },
         "name": {
           "description": "The name shown in the app, e.g. `Day A`.",
-          "type": "string"
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1,
+          "pattern": "[^\\s\\u0085]"
         }
       },
       "additionalProperties": false,
@@ -93,15 +106,15 @@
         "failures": {
           "description": "Consecutive failed sessions that trigger the deload.",
           "type": "integer",
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 10,
+          "minimum": 1
         },
         "percent": {
           "description": "How much to take off, in percent of the working weight (10 means 100 kg becomes 90 kg).",
           "type": "number",
-          "maximum": 1000,
-          "minimum": 0
+          "exclusiveMinimum": 0,
+          "maximum": 50.0,
+          "multipleOf": 0.01
         }
       },
       "additionalProperties": false,
@@ -113,7 +126,7 @@
     "DemoUrl": {
       "type": "string",
       "maxLength": 2048,
-      "pattern": "^https?://[^\\s@/?#]+([/?#]\\S*)?$"
+      "pattern": "^https://([A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?([/?#][!#-;=?-\\[\\]_a-z~]*)?$"
     },
     "Exercise": {
       "description": "One exercise of a day.",
@@ -150,14 +163,20 @@
         },
         "name": {
           "description": "The name shown in the app, e.g. `Back squat`.",
-          "type": "string"
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1,
+          "pattern": "[^\\s\\u0085]"
         },
         "notes": {
           "description": "Optional coaching notes.",
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 2000,
+          "minLength": 1,
+          "pattern": "[^\\s\\u0085]"
         },
         "progression": {
           "description": "How the target moves from one session to the next. Defaults to `\"none\"`.",
@@ -166,7 +185,7 @@
         "rest": {
           "description": "Seconds of rest after each set (or after the intervals). In a superset, the rest after\neach member is the transition to the next member (often 0), and the rest of the last\nmember is the rest after the whole group.",
           "type": "integer",
-          "maximum": 4294967295,
+          "maximum": 3600,
           "minimum": 0
         },
         "superset": {
@@ -195,7 +214,9 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/WarmupSet"
-          }
+          },
+          "maxItems": 10,
+          "minItems": 0
         },
         "work": {
           "description": "What to do: sets of reps, timed holds, or work/rest intervals.",
@@ -219,7 +240,8 @@
           "properties": {
             "kg": {
               "type": "number",
-              "minimum": 0
+              "exclusiveMinimum": 0,
+              "maximum": 2000.0
             }
           },
           "additionalProperties": false,
@@ -233,7 +255,8 @@
           "properties": {
             "lb": {
               "type": "number",
-              "minimum": 0
+              "exclusiveMinimum": 0,
+              "maximum": 4409.2452
             }
           },
           "additionalProperties": false,
@@ -247,8 +270,9 @@
           "properties": {
             "percent_of_training_max": {
               "type": "number",
-              "maximum": 1000,
-              "minimum": 0
+              "exclusiveMinimum": 0,
+              "maximum": 150.0,
+              "multipleOf": 0.01
             }
           },
           "additionalProperties": false,
@@ -377,14 +401,14 @@
         "max": {
           "description": "The top of the range.",
           "type": "integer",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 100,
+          "minimum": 1
         },
         "min": {
           "description": "The fewest reps that count as a successful set.",
           "type": "integer",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 100,
+          "minimum": 1
         }
       },
       "additionalProperties": false,
@@ -398,8 +422,8 @@
         {
           "description": "Exactly this many reps.",
           "type": "integer",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 100,
+          "minimum": 1
         },
         {
           "$ref": "#/$defs/RepRange"
@@ -422,7 +446,8 @@
           "properties": {
             "kg": {
               "type": "number",
-              "minimum": 0
+              "exclusiveMinimum": 0,
+              "maximum": 20.0
             }
           },
           "additionalProperties": false,
@@ -436,7 +461,8 @@
           "properties": {
             "lb": {
               "type": "number",
-              "minimum": 0
+              "exclusiveMinimum": 0,
+              "maximum": 45.0
             }
           },
           "additionalProperties": false,
@@ -455,7 +481,8 @@
           "properties": {
             "kg": {
               "type": "number",
-              "minimum": 0
+              "exclusiveMinimum": 0,
+              "maximum": 2000.0
             }
           },
           "additionalProperties": false,
@@ -469,7 +496,8 @@
           "properties": {
             "lb": {
               "type": "number",
-              "minimum": 0
+              "exclusiveMinimum": 0,
+              "maximum": 4409.2452
             }
           },
           "additionalProperties": false,
@@ -483,8 +511,9 @@
           "properties": {
             "percent_of_working_weight": {
               "type": "number",
-              "maximum": 1000,
-              "minimum": 0
+              "exclusiveMaximum": 100.0,
+              "exclusiveMinimum": 0,
+              "multipleOf": 0.01
             }
           },
           "additionalProperties": false,
@@ -505,16 +534,15 @@
         "reps": {
           "description": "Reps per warm-up set.",
           "type": "integer",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 100,
+          "minimum": 1
         },
         "sets": {
           "description": "How many sets of this warm-up. Defaults to 1.",
           "type": "integer",
-          "format": "uint16",
           "default": 1,
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 10,
+          "minimum": 1
         }
       },
       "additionalProperties": false,
@@ -540,9 +568,8 @@
                 "sets": {
                   "description": "Number of working sets.",
                   "type": "integer",
-                  "format": "uint16",
-                  "maximum": 65535,
-                  "minimum": 0
+                  "maximum": 20,
+                  "minimum": 1
                 }
               },
               "additionalProperties": false,
@@ -567,15 +594,14 @@
                 "seconds": {
                   "description": "Target length of each hold.",
                   "type": "integer",
-                  "maximum": 4294967295,
-                  "minimum": 0
+                  "maximum": 3600,
+                  "minimum": 1
                 },
                 "sets": {
                   "description": "Number of holds.",
                   "type": "integer",
-                  "format": "uint16",
-                  "maximum": 65535,
-                  "minimum": 0
+                  "maximum": 20,
+                  "minimum": 1
                 }
               },
               "additionalProperties": false,
@@ -600,21 +626,20 @@
                 "rest": {
                   "description": "Seconds of rest between rounds.",
                   "type": "integer",
-                  "maximum": 4294967295,
+                  "maximum": 3600,
                   "minimum": 0
                 },
                 "rounds": {
                   "description": "Number of rounds.",
                   "type": "integer",
-                  "format": "uint16",
-                  "maximum": 65535,
-                  "minimum": 0
+                  "maximum": 100,
+                  "minimum": 1
                 },
                 "work": {
                   "description": "Seconds of work per round.",
                   "type": "integer",
-                  "maximum": 4294967295,
-                  "minimum": 0
+                  "maximum": 3600,
+                  "minimum": 1
                 }
               },
               "additionalProperties": false,

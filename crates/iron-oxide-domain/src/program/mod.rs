@@ -1,16 +1,22 @@
 //! Training programs: the JSON document format, its validation, and the built-in programs.
 //!
 //! A program is a versioned JSON document (see `schemas/program.schema.json` at the repository
-//! root, generated from these types). Reading one is two steps, both done by
-//! [`Program::from_json`]:
+//! root, generated from these types). Uploaded documents are untrusted, so reading one with
+//! [`Program::from_json`] is bounded at every step:
 //!
-//! 1. **Parsing** with serde. Unknown fields are rejected, and every value checks its own format
-//!    (slugs, weights, tempo, URLs). Parsing stops at the first problem and reports a
-//!    [`ParseError`] with its JSON path, line and column.
-//! 2. **Validation** with [`Program::validate`], which checks the rules that span several values
-//!    (rep ranges, rotation, supersets, progression rules against loads, limits) and reports
-//!    **every** broken rule as a [`ValidationError`] with its JSON path, such as
-//!    `days[1].exercises[2].work.reps.reps: min 12 is greater than max 8`.
+//! 1. **Size**: at most [`limits::MAX_DOCUMENT_BYTES`], checked before parsing.
+//! 2. **Parsing** with serde. Unknown fields are rejected, every value checks its own format
+//!    (slugs, weights, tempo, URLs), and arrays are only accepted where the schema has arrays.
+//!    Parsing stops at the first problem and reports a [`ParseError`] with its JSON path, line
+//!    and column (when known).
+//! 3. **Validation** with [`Program::validate`], which checks the rules that span several values
+//!    (rep ranges, rotation, supersets, progression rules against loads, [`limits`]) and reports
+//!    every broken rule, up to [`limits::MAX_REPORTED_ERRORS`], as a [`ValidationError`] with its
+//!    JSON path, such as `days[1].exercises[2].work.reps.reps: min 12 is greater than max 8`.
+//!    Items past a list's limit are not checked.
+//!
+//! Error messages never repeat more than [`limits::MAX_ECHOED_CHARS`] characters of a user value.
+//! The JSON Schema carries the same limits; a differential test keeps the two in agreement.
 //!
 //! # Training maxes
 //!
@@ -23,11 +29,14 @@
 mod builtin;
 mod error;
 mod ids;
+pub mod limits;
 mod model;
 #[cfg(test)]
 mod schema;
+mod structure;
 mod validate;
 mod values;
+mod whole;
 
 use std::collections::BTreeSet;
 
@@ -38,9 +47,9 @@ pub use error::{
 };
 pub use ids::{BuiltinProgramId, InvalidSlug, SupersetId};
 pub use model::{Day, Deload, Exercise, Program, ProgressionRule, WarmupSet, Work};
-pub use validate::{CURRENT_SCHEMA_VERSION, limits};
+pub use validate::CURRENT_SCHEMA_VERSION;
 pub use values::{
-    DemoUrl, InvalidDemoUrl, InvalidTempo, Load, RepRange, RepTarget, Tempo, TempoPhase,
+    DemoUrl, InvalidDemoUrl, InvalidTempo, Load, RepRange, RepTarget, SchemaUrl, Tempo, TempoPhase,
     UnitWeight, WarmupLoad,
 };
 
@@ -51,12 +60,6 @@ pub const PROGRAM_SCHEMA_URL: &str = "https://raw.githubusercontent.com/guizmaii
 
 /// The program JSON Schema, as committed in `schemas/program.schema.json`.
 pub const PROGRAM_SCHEMA_JSON: &str = include_str!("../../../../schemas/program.schema.json");
-
-/// Only what is needed to check the version before parsing the rest.
-#[derive(serde::Deserialize)]
-struct VersionProbe {
-    schema_version: Option<serde_json::Value>,
-}
 
 /// The 1-based line and column of the first character after leading whitespace.
 fn start_of_value(json: &str) -> (usize, usize) {
@@ -69,15 +72,28 @@ fn start_of_value(json: &str) -> (usize, usize) {
 }
 
 impl Program {
-    /// Parses and validates a program document.
+    /// Parses and validates a program document. Safe on untrusted input: the size is checked
+    /// first ([`limits::MAX_DOCUMENT_BYTES`]), and the errors are bounded in number and length.
     ///
     /// A `schema_version` other than [`CURRENT_SCHEMA_VERSION`] is reported on its own, before
     /// the rest of the document is read, since a different version may have a different shape.
     ///
     /// # Errors
-    /// [`ProgramError::Parse`] for invalid JSON or a wrong shape (the first problem only), and
-    /// [`ProgramError::Invalid`] with every broken rule otherwise.
+    /// [`ProgramError::Parse`] for an oversized document, invalid JSON or a wrong shape (the
+    /// first problem only), and [`ProgramError::Invalid`] with every broken rule otherwise.
     pub fn from_json(json: &str) -> Result<Self, ProgramError> {
+        if json.len() > limits::MAX_DOCUMENT_BYTES {
+            return Err(ProgramError::Parse(ParseError {
+                path: JsonPath::root(),
+                message: format!(
+                    "the document is {} bytes; the limit is {} bytes",
+                    json.len(),
+                    limits::MAX_DOCUMENT_BYTES
+                ),
+                line: 0,
+                column: 0,
+            }));
+        }
         let probe: serde_json::Value = serde_json::from_str(json).map_err(|error| {
             ProgramError::Parse(ParseError::from_serde(JsonPath::root(), &error))
         })?;
@@ -90,27 +106,25 @@ impl Program {
                 column,
             }));
         }
-        if let Ok(VersionProbe {
-            schema_version: Some(version),
-        }) = serde_json::from_value(probe)
-            && let Some(found) = version.as_u64()
+        if let Some(found) = probe.get("schema_version").and_then(whole::as_whole)
             && found != u64::from(CURRENT_SCHEMA_VERSION)
         {
-            return Err(ProgramError::Invalid(ValidationErrors::new(vec![
-                ValidationError::new(
-                    JsonPath::root().key("schema_version"),
-                    ValidationErrorKind::UnsupportedSchemaVersion {
-                        found,
-                        supported: CURRENT_SCHEMA_VERSION,
-                    },
-                ),
-            ])));
+            let mut errors = ValidationErrors::default();
+            errors.push(ValidationError::new(
+                JsonPath::root().key("schema_version"),
+                ValidationErrorKind::UnsupportedSchemaVersion {
+                    found,
+                    supported: CURRENT_SCHEMA_VERSION,
+                },
+            ));
+            return Err(ProgramError::Invalid(errors));
         }
 
         let deserializer = &mut serde_json::Deserializer::from_str(json);
         let program: Self = serde_path_to_error::deserialize(deserializer).map_err(|error| {
             ProgramError::Parse(ParseError::from_serde(error.path().into(), error.inner()))
         })?;
+        structure::check(&probe).map_err(ProgramError::Parse)?;
         program.validate().map_err(ProgramError::Invalid)?;
         Ok(program)
     }
@@ -311,11 +325,17 @@ mod tests {
             0_u32..=limits::MAX_SECONDS,
             any::<bool>(),
             1_u16..=10,
+            // Quarter kilos up to 20 kg, half pounds up to 45 lb.
+            1_u32..=80,
         )
-            .prop_map(move |(work, load, rest, progress, failures)| {
+            .prop_map(move |(work, load, rest, progress, failures, step)| {
+                let increment = match load.unit() {
+                    Unit::Kg => UnitWeight::new(f64::from(step) / 4.0, Unit::Kg).unwrap(),
+                    Unit::Lb => UnitWeight::new(f64::from(step.min(90)) / 2.0, Unit::Lb).unwrap(),
+                };
                 let progression = if progress {
                     ProgressionRule::AddWhenTopOfRange {
-                        increment: UnitWeight::from_weight(load.weight(), load.unit()),
+                        increment,
                         deload_after_failures: Some(Deload {
                             failures,
                             percent: Percent::new(10.0).unwrap(),

@@ -1,1 +1,1 @@
-days[0].exercises[0].demo_url: invalid demo URL `javascript:alert(1)`: must start with https:// or http:// (line 15, column 9)
+days[0].exercises[0].demo_url: invalid demo URL `javascript:alert(1)`: must start with https:// (line 15, column 9)

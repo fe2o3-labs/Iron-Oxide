@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::ids::SupersetId;
-use super::values::{DemoUrl, Load, RepTarget, Tempo, UnitWeight, WarmupLoad};
+use super::values::{DemoUrl, Load, RepTarget, SchemaUrl, Tempo, UnitWeight, WarmupLoad};
+use super::whole;
 use crate::{DayId, ExerciseId, Percent, Reps, Seconds};
 
 /// A training program: its days, the order to run them in, and what to do on each day.
@@ -14,21 +15,27 @@ use crate::{DayId, ExerciseId, Percent, Reps, Seconds};
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Program {
-    /// Optional link to this JSON Schema, so editors can check and complete the document. Ignored
-    /// by the app.
+    /// Optional link to this JSON Schema, so editors can check and complete the document. Only
+    /// the published URL is accepted.
     #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
-    pub schema: Option<String>,
+    pub schema: Option<SchemaUrl>,
     /// The version of the document format. Must be 1.
+    #[serde(deserialize_with = "whole::u32")]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::schema_version"))]
     pub schema_version: u32,
     /// The program's name.
+    #[cfg_attr(test, schemars(schema_with = "super::schema::name"))]
     pub name: String,
     /// Optional description: who it is for, how to run it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::optional_text"))]
     pub description: Option<String>,
     /// The training days. Each needs a unique id.
+    #[cfg_attr(test, schemars(schema_with = "super::schema::days"))]
     pub days: Vec<Day>,
     /// The suggested order of the days, repeated forever: `["a", "b", "c"]`. A day may appear
     /// several times (`["a", "b", "a", "b", "c"]`), and every day must appear at least once.
+    #[cfg_attr(test, schemars(schema_with = "super::schema::rotation"))]
     pub rotation: Vec<DayId>,
 }
 
@@ -40,8 +47,10 @@ pub struct Day {
     /// A slug such as `a` or `upper-1`, referenced by the rotation.
     pub id: DayId,
     /// The name shown in the app, e.g. `Day A`.
+    #[cfg_attr(test, schemars(schema_with = "super::schema::name"))]
     pub name: String,
     /// The exercises, in the order they are done.
+    #[cfg_attr(test, schemars(schema_with = "super::schema::exercises"))]
     pub exercises: Vec<Exercise>,
 }
 
@@ -54,6 +63,7 @@ pub struct Exercise {
     /// on several days uses the same id (and the same name and progression rule).
     pub id: ExerciseId,
     /// The name shown in the app, e.g. `Back squat`.
+    #[cfg_attr(test, schemars(schema_with = "super::schema::name"))]
     pub name: String,
     /// What to do: sets of reps, timed holds, or work/rest intervals.
     pub work: Work,
@@ -63,6 +73,8 @@ pub struct Exercise {
     /// Seconds of rest after each set (or after the intervals). In a superset, the rest after
     /// each member is the transition to the next member (often 0), and the rest of the last
     /// member is the rest after the whole group.
+    #[serde(deserialize_with = "whole::seconds")]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::rest_seconds"))]
     pub rest: Seconds,
     /// Optional lifting tempo such as `3-1-X-0`: eccentric, bottom pause, concentric, top pause,
     /// in seconds, `X` meaning explosive.
@@ -70,12 +82,14 @@ pub struct Exercise {
     pub tempo: Option<Tempo>,
     /// Optional coaching notes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::optional_text"))]
     pub notes: Option<String>,
     /// Optional link to a demonstration (http or https).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub demo_url: Option<DemoUrl>,
     /// Warm-up sets done before the working sets, lightest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::warmup"))]
     pub warmup: Vec<WarmupSet>,
     /// Groups this exercise with the next ones carrying the same label into a superset (A1, A2,
     /// …). Members must be next to each other and have the same number of sets.
@@ -95,6 +109,8 @@ pub enum Work {
     /// `{"reps": {"sets": 3, "reps": {"min": 8, "max": 12}}}`.
     Reps {
         /// Number of working sets.
+        #[serde(deserialize_with = "whole::u16")]
+        #[cfg_attr(test, schemars(schema_with = "super::schema::sets"))]
         sets: u16,
         /// Reps per set: a count or a `{min, max}` range.
         reps: RepTarget,
@@ -102,8 +118,12 @@ pub enum Work {
     /// Timed holds such as a plank: `{"hold": {"sets": 3, "seconds": 45}}`.
     Hold {
         /// Number of holds.
+        #[serde(deserialize_with = "whole::u16")]
+        #[cfg_attr(test, schemars(schema_with = "super::schema::sets"))]
         sets: u16,
         /// Target length of each hold.
+        #[serde(deserialize_with = "whole::seconds")]
+        #[cfg_attr(test, schemars(schema_with = "super::schema::active_seconds"))]
         seconds: Seconds,
     },
     /// Work/rest intervals such as treadmill sprints:
@@ -111,10 +131,16 @@ pub enum Work {
     /// round: the exercise's own `rest` follows.
     Intervals {
         /// Seconds of work per round.
+        #[serde(deserialize_with = "whole::seconds")]
+        #[cfg_attr(test, schemars(schema_with = "super::schema::active_seconds"))]
         work: Seconds,
         /// Seconds of rest between rounds.
+        #[serde(deserialize_with = "whole::seconds")]
+        #[cfg_attr(test, schemars(schema_with = "super::schema::rest_seconds"))]
         rest: Seconds,
         /// Number of rounds.
+        #[serde(deserialize_with = "whole::u16")]
+        #[cfg_attr(test, schemars(schema_with = "super::schema::rounds"))]
         rounds: u16,
     },
 }
@@ -150,10 +176,16 @@ fn is_one_set(sets: &u16) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct WarmupSet {
     /// How many sets of this warm-up. Defaults to 1.
-    #[serde(default = "one_set", skip_serializing_if = "is_one_set")]
-    #[cfg_attr(test, schemars(extend("default" = 1)))]
+    #[serde(
+        default = "one_set",
+        skip_serializing_if = "is_one_set",
+        deserialize_with = "whole::u16"
+    )]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::warmup_sets"))]
     pub sets: u16,
     /// Reps per warm-up set.
+    #[serde(deserialize_with = "whole::reps")]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::rep_count"))]
     pub reps: Reps,
     /// A fixed weight (the empty bar) or a percentage of the working weight.
     pub load: WarmupLoad,
@@ -165,8 +197,12 @@ pub struct WarmupSet {
 #[serde(deny_unknown_fields)]
 pub struct Deload {
     /// Consecutive failed sessions that trigger the deload.
+    #[serde(deserialize_with = "whole::u16")]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::failures"))]
     pub failures: u16,
     /// How much to take off, in percent of the working weight (10 means 100 kg becomes 90 kg).
+    #[serde(deserialize_with = "whole::percent")]
+    #[cfg_attr(test, schemars(schema_with = "super::schema::deload_percent"))]
     pub percent: Percent,
 }
 
