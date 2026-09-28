@@ -202,6 +202,45 @@ fn candidates() -> Vec<Value> {
     values
 }
 
+/// Demo URL candidates, tried at every `demo_url` node.
+fn url_candidates() -> Vec<Value> {
+    let mut urls = Vec::new();
+    // Every printable ASCII character (and a few others) at each position of a demo URL: host,
+    // port, path, query and fragment. This catches drift in the schema's URL pattern alone.
+    let characters = (0x20_u8..=0x7e)
+        .map(char::from)
+        .chain(['\u{7f}', '\u{e9}', '\u{202e}']);
+    for c in characters {
+        for url in [
+            format!("https://a{c}b.c/"),
+            format!("https://{c}.b/"),
+            format!("https://a.b:8{c}/"),
+            format!("https://a.b/x{c}y"),
+            format!("https://a.b/?q={c}"),
+            format!("https://a.b/#{c}"),
+        ] {
+            urls.push(Value::from(url));
+        }
+    }
+    for port in [
+        "0", "1", "01", "080", "8080", "65535", "65536", "99999", "100000",
+    ] {
+        urls.push(Value::from(format!("https://a.b:{port}/")));
+    }
+    for host in [
+        "[::1]",
+        "[1.2.3.4]",
+        "[]",
+        "1.2.3.4",
+        "a-.b",
+        "-a.b",
+        "xn--bcher-kva.example",
+    ] {
+        urls.push(Value::from(format!("https://{host}/")));
+    }
+    urls
+}
+
 /// JSON pointers (as key/index lists) of every node below the root.
 fn nodes(value: &Value, path: &mut Vec<Value>, out: &mut Vec<Vec<Value>>) {
     match value {
@@ -297,13 +336,18 @@ fn rust_and_schema_agree_on_single_changes() {
         cases: 0,
     };
     let candidates = candidates();
+    let urls = url_candidates();
     for (name, document) in documents() {
         checker.check(&document, &name);
         let mut paths = vec![Vec::new()];
         nodes(&document, &mut Vec::new(), &mut paths);
         for path in &paths {
             let where_ = format!("{name} at {path:?}");
-            for candidate in &candidates {
+            let is_url = path.last() == Some(&Value::from("demo_url"));
+            for candidate in candidates
+                .iter()
+                .chain(if is_url { &urls[..] } else { &[] })
+            {
                 let mut changed = document.clone();
                 *node_mut(&mut changed, path) = candidate.clone();
                 checker.check(&changed, &format!("{where_} = {candidate}"));

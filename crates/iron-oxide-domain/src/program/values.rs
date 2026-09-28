@@ -458,8 +458,8 @@ pub struct InvalidDemoUrl {
 ///   which would let `https://evil.example\.youtube.com` read like a YouTube link. Internationalised
 ///   hosts and paths are written in their ASCII form (punycode, percent-encoding), as browsers
 ///   copy them.
-/// - A host made of letters, digits and hyphens in dot-separated labels, or an IPv6 literal in
-///   brackets, with an optional port of 1 to 5 digits. No user name or password.
+/// - A host made of letters, digits and hyphens in dot-separated labels (IP literals in brackets
+///   are not accepted), with an optional port from 1 to 65535. No user name or password.
 /// - At most [`DemoUrl::MAX_LEN`] characters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -500,26 +500,22 @@ pub(super) const fn is_url_char(byte: u8) -> bool {
         )
 }
 
-fn is_host(host: &str) -> bool {
-    if let Some(inner) = host
-        .strip_prefix('[')
-        .and_then(|rest| rest.strip_suffix(']'))
-    {
-        return !inner.is_empty()
-            && inner
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.');
-    }
-    host.split('.').all(|label| {
-        !label.is_empty()
-            && label
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    })
+/// The characters allowed in a host name label. `schema.rs` builds its pattern from this.
+pub(super) const fn is_host_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-'
 }
 
+/// Dot-separated labels of [`is_host_char`] characters, e.g. `www.example.com` or `1.2.3.4`.
+fn is_host(host: &str) -> bool {
+    host.split('.')
+        .all(|label| !label.is_empty() && label.bytes().all(is_host_char))
+}
+
+/// A port a browser can connect to: 1 to 65535, without leading zeros.
 fn is_port(port: &str) -> bool {
-    (1..=5).contains(&port.len()) && port.bytes().all(|b| b.is_ascii_digit())
+    !port.starts_with('0')
+        && port.bytes().all(|b| b.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|port| port > 0)
 }
 
 fn demo_url_problem(value: &str) -> Option<&'static str> {
@@ -538,19 +534,15 @@ fn demo_url_problem(value: &str) -> Option<&'static str> {
     if authority.contains('@') {
         return Some("must not contain a user name or password");
     }
-    // An IPv6 literal contains colons, so the port is whatever follows its closing bracket.
-    let (host, port) = match authority.rfind(']') {
-        Some(end) => authority.split_at(end + 1),
-        None => authority
-            .rfind(':')
-            .map_or((authority, ""), |colon| authority.split_at(colon)),
-    };
-    if host.is_empty() || !is_host(host) {
+    let (host, port) = authority
+        .rfind(':')
+        .map_or((authority, ""), |colon| authority.split_at(colon));
+    if !is_host(host) {
         return Some("must have a host name such as www.example.com");
     }
     if let Some(port) = port.strip_prefix(':') {
         if !is_port(port) {
-            return Some("the port must be 1 to 5 digits");
+            return Some("the port must be a number from 1 to 65535");
         }
     } else if !port.is_empty() {
         return Some("must have a host name such as www.example.com");
@@ -800,8 +792,8 @@ mod tests {
             "https://www.youtube.com/watch?v=abc&t=10s",
             "https://example.com",
             "https://example.com:8443/x#t=1",
-            "https://[::1]/demo",
-            "https://[2001:db8::1]:443",
+            "https://1.2.3.4:65535/demo",
+            "https://example.com:1",
             "https://xn--bcher-kva.example/%C3%A9t%C3%A9?q=[1]~_!$&'()*+,;=:@",
         ] {
             let url = DemoUrl::new(good).unwrap();
@@ -820,6 +812,7 @@ mod tests {
         const CHARS: &str =
             "may only contain printable ASCII characters, without spaces or \\ \" < > ^ ` { | }";
         const HOST: &str = "must have a host name such as www.example.com";
+        const PORT: &str = "the port must be a number from 1 to 65535";
         let cases = [
             ("http://example.com", "must start with https://"),
             ("ftp://example.com", "must start with https://"),
@@ -833,15 +826,18 @@ mod tests {
             ("https://a.b./", HOST),
             ("https://a_b.c/", HOST),
             ("https://[]/", HOST),
-            ("https://[::1]x/", HOST),
-            ("https://[zz]/", HOST),
+            ("https://[::1]/", HOST),
+            ("https://[1.2.3.4]/", HOST),
+            ("https://[::1]:443/", HOST),
             ("https://a]b/", HOST),
-            ("https://example.com:/x", "the port must be 1 to 5 digits"),
-            (
-                "https://example.com:123456/x",
-                "the port must be 1 to 5 digits",
-            ),
-            ("https://example.com:8a/x", "the port must be 1 to 5 digits"),
+            ("https://example.com:/x", PORT),
+            ("https://example.com:0/x", PORT),
+            ("https://example.com:080/x", PORT),
+            ("https://example.com:65536/x", PORT),
+            ("https://example.com:99999/x", PORT),
+            ("https://example.com:123456/x", PORT),
+            ("https://example.com:8a/x", PORT),
+            ("https://example.com:+80/x", PORT),
             ("https://evil.example\\.youtube.com/", CHARS),
             ("https://exa mple.com", CHARS),
             ("https://example.com/\n", CHARS),
@@ -884,6 +880,14 @@ mod tests {
         let accents = format!("https://a.b/{}", "é".repeat(1_100));
         assert_eq!(DemoUrl::new(accents).unwrap_err().reason, CHARS);
         assert!(serde_json::from_str::<DemoUrl>("\"ftp://x\"").is_err());
+    }
+
+    #[test]
+    fn host_characters() {
+        for byte in 0_u8..=255 {
+            let expected = byte.is_ascii_alphanumeric() || byte == b'-';
+            assert_eq!(is_host_char(byte), expected, "{byte:#x}");
+        }
     }
 
     #[test]
