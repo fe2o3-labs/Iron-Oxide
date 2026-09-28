@@ -198,8 +198,21 @@ jobs:
       # Each `sqlx::test` gets its own fresh database on this server.
       - name: Run the tests that need Postgres
         run: |
+          set -o pipefail
           cargo test --workspace --locked -- --ignored
-          cargo test -p iron-oxide-app --features server --locked -- --ignored
+          cargo test -p iron-oxide-app --features server --locked -- --ignored 2>&1 \
+            | tee "$RUNNER_TEMP/server-tests.log"
+          # Guard against the data isolation tests silently not running (a renamed module, a
+          # filter, a feature flag): these must appear as passed in the log.
+          for test in \
+            server::db::schema_tests::deleting_a_user_removes_their_rows_in_every_table_and_keeps_others \
+            server::db::schema_tests::every_user_id_cascades_from_users_and_is_indexed \
+            server::db::sets::tests::another_users_sets_are_invisible_and_untouchable \
+            server::db::sessions::tests::another_users_sessions_are_invisible_and_untouchable \
+            server::db::programs::tests::another_users_programs_are_invisible_and_untouchable; do
+            grep -qF "test $test ... ok" "$RUNNER_TEMP/server-tests.log" \
+              || { echo "::error::isolation test did not run: $test"; exit 1; }
+          done
 
   # Builds the release bundle exactly as the Dockerfile (#7) will, then runs the server and checks
   # the page, a server function round-trip, /healthz and /readyz over HTTP, and a graceful
