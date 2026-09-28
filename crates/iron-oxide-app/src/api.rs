@@ -12,5 +12,6 @@ pub mod billing;
     reason = "used by the UI screens that call the server functions (#29-#32)"
 )]
 pub mod error;
+pub mod programs;
 pub mod sessions;
 pub mod time;

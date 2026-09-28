@@ -125,6 +125,13 @@ uuid_id!(
     ProgramVersionId,
     "program version id"
 );
+uuid_id!(
+    /// A client's idempotency key for a request that creates something whose id the server
+    /// chooses (a program: copied from a built-in or uploaded). Retrying the request with the same
+    /// key returns what the first one created instead of creating it twice.
+    CreationId,
+    "creation id"
+);
 
 /// Maximum length of a slug ID ([`ExerciseId`], [`DayId`]), in bytes (all characters are ASCII).
 pub const SLUG_MAX_LEN: usize = 64;
@@ -282,6 +289,7 @@ mod tests {
             SetId::new_v7().as_uuid(),
             ProgramId::new_v7().as_uuid(),
             ProgramVersionId::new_v7().as_uuid(),
+            CreationId::new_v7().as_uuid(),
         ] {
             assert_eq!(uuid.get_version_num(), 7);
             assert_eq!(uuid.get_version(), Some(uuid::Version::SortRand));
