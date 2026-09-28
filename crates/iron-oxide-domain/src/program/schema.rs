@@ -22,7 +22,7 @@ use super::limits::*;
 use super::model::{Day, Exercise, WarmupSet};
 use super::values::{
     DemoUrl, Load, LoadRepr, RepRange, RepTarget, SchemaUrl, Tempo, UnitWeight, UnitWeightRepr,
-    WarmupLoad, WarmupLoadRepr,
+    WarmupLoad, WarmupLoadRepr, is_host_char, is_url_char,
 };
 use super::{CURRENT_SCHEMA_VERSION, PROGRAM_SCHEMA_URL, Program};
 use crate::{DayId, ExerciseId, Percent, Reps, Seconds};
@@ -34,14 +34,31 @@ const SLUG_PATTERN: &str = "^[a-z0-9]+(-[a-z0-9]+)*$";
 /// whitespace. ECMA-262 `\s` is Unicode `White_Space` plus U+FEFF, minus U+0085.
 const NOT_BLANK_PATTERN: &str = "[^\\s\\u0085]";
 
-/// A `DemoUrl`: `https://`, a host (dot-separated labels, or an IPv6 literal), an optional port,
-/// then only the characters `values::is_url_char` allows.
-const DEMO_URL_PATTERN: &str = concat!(
-    "^https://",
-    "([A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*|\\[[0-9A-Fa-f:.]+\\])",
-    "(:[0-9]{1,5})?",
-    "([/?#][!#-;=?-\\[\\]_a-z~]*)?$",
-);
+/// A port from 1 to 65535 without leading zeros, as `values::is_port` accepts.
+const PORT_PATTERN: &str =
+    "(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3})";
+
+/// A regex character class of the ASCII bytes `allowed` accepts, so the schema cannot drift
+/// from the Rust predicate.
+fn class(allowed: fn(u8) -> bool) -> String {
+    let mut class = String::from("[");
+    for byte in (0_u8..=0x7f).filter(|&byte| allowed(byte)) {
+        if matches!(byte, b'\\' | b']' | b'[' | b'^' | b'-') {
+            class.push('\\');
+        }
+        class.push(char::from(byte));
+    }
+    class.push(']');
+    class
+}
+
+/// A `DemoUrl`: `https://`, dot-separated host labels, an optional port, then only the
+/// characters `values::is_url_char` allows. Built from the same predicates as the Rust check.
+fn demo_url_pattern() -> String {
+    let label = class(is_host_char);
+    let path = class(is_url_char);
+    format!("^https://{label}+(\\.{label}+)*(:{PORT_PATTERN})?([/?#]{path}*)?$")
+}
 
 /// The heaviest weight in pounds, rounded down to 4 decimals: 2 000 kg is 4 409.245 243 7… lb.
 /// The schema is stricter than the app only between 4 409.2452 and that value.
@@ -233,7 +250,7 @@ manual_schema!(Tempo, "Tempo", inline = false, |_g| json_schema!({
 }));
 manual_schema!(DemoUrl, "DemoUrl", inline = false, |_g| json_schema!({
     "type": "string",
-    "pattern": DEMO_URL_PATTERN,
+    "pattern": demo_url_pattern(),
     "maxLength": DemoUrl::MAX_LEN,
 }));
 manual_schema!(SchemaUrl, "SchemaUrl", inline = true, |_g| json_schema!({
@@ -291,6 +308,23 @@ fn committed_schema_is_up_to_date() {
         path.display()
     );
     assert_eq!(super::PROGRAM_SCHEMA_JSON, committed);
+}
+
+#[test]
+fn character_classes_list_exactly_the_allowed_bytes() {
+    assert_eq!(
+        class(is_host_char),
+        "[\\-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]"
+    );
+    assert_eq!(class(|byte| byte == b'^' || byte == b']'), "[\\]\\^]");
+    let path = class(is_url_char);
+    let listed: Vec<u8> = path
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .replace('\\', "")
+        .into_bytes();
+    let expected: Vec<u8> = (0_u8..=0x7f).filter(|&byte| is_url_char(byte)).collect();
+    assert_eq!(listed, expected);
 }
 
 #[test]
