@@ -101,7 +101,8 @@ pub async fn sign_up_begin(
 ) -> Result<CreationChallengeResponse, AuthError> {
     let display_name = normalize_name(display_name)
         .map_err(|reason| AuthError::Invalid(format!("The name {reason}.")))?;
-    let user_id = Uuid::now_v7();
+    // The domain generator keeps ids in order within the process (#67).
+    let user_id = iron_oxide_domain::UserId::new_v7().as_uuid();
     let user_handle = new_user_handle();
     let label = display_name.as_deref().unwrap_or(DEFAULT_ACCOUNT_NAME);
     let (ccr, registration) =
