@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "DELETE FROM auth_ceremonies\n           WHERE id = $1 AND kind = ANY($2) AND relay_code IS NOT NULL\n           RETURNING kind AS \"kind: CeremonyKind\", user_id, state, relay_code AS \"relay_code!\",\n                     expires_at > now() AS \"live!\"",
+  "query": "DELETE FROM auth_ceremonies\n           WHERE id = $1 AND kind = ANY($2) AND state ->> 'state' = $3\n           RETURNING kind AS \"kind: CeremonyKind\", user_id, state, expires_at > now() AS \"live!\"",
   "describe": {
     "columns": [
       {
@@ -33,11 +33,6 @@
       },
       {
         "ordinal": 3,
-        "name": "relay_code!",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 4,
         "name": "live!",
         "type_info": "Bool"
       }
@@ -65,16 +60,16 @@
               }
             }
           }
-        }
+        },
+        "Text"
       ]
     },
     "nullable": [
       false,
       true,
       false,
-      true,
       null
     ]
   },
-  "hash": "3a3e19922465c1b54b4c452be4e45cdab20c000a3493942f325832e2528133ca"
+  "hash": "5ae6594bc6ff30dc96bf13d99ffe752762a289a23245c99795bf68fc632a1af3"
 }

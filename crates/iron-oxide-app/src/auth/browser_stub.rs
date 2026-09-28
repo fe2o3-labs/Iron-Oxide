@@ -55,6 +55,12 @@ impl GooglePopup {
         Self
     }
 
+    /// No popup outside the browser.
+    #[must_use]
+    pub fn this_window() -> Self {
+        Self
+    }
+
     /// Never open outside the browser.
     #[must_use]
     pub fn is_open(&self) -> bool {

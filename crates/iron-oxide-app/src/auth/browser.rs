@@ -256,6 +256,12 @@ impl GooglePopup {
         Self { window }
     }
 
+    /// No popup: the flow runs in this window (a full-page redirect).
+    #[must_use]
+    pub fn this_window() -> Self {
+        Self { window: None }
+    }
+
     /// Whether the browser let us open the popup (otherwise the flow uses this window).
     #[must_use]
     pub fn is_open(&self) -> bool {

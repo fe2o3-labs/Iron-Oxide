@@ -94,26 +94,43 @@ This is the authorization code flow with PKCE (S256), `state` and `nonce`. It as
      for an installed PWA. The popup is opened blank first, then pointed at Google once the URL
      comes back;
    - **in the current window**, if popups are blocked (a full redirect).
-2. Google redirects to `GET /auth/google/callback?code=…&state=…`. Google's pages send
-   `Cross-Origin-Opener-Policy: same-origin`, so by then the popup has lost its `window.opener`
-   in most browsers; nothing relies on it.
-   - If the request carries the session that started the flow (a full redirect, or a popup that
-     shares the app's cookies), the callback finishes the flow itself and rotates the session.
-     In a popup, the page announces `{"type":"done"}` on a same-origin `BroadcastChannel` (and to
-     `window.opener` with `postMessage(…, <our origin>)` if it still has one) and closes itself.
-     After a full redirect it goes back to `/`.
-   - Otherwise the popup has its own cookie jar, which can happen in an installed iOS web app.
-     The callback finds the ceremony by the SHA-256 of `state` (stored at begin) and leaves the
-     code on it (first writer wins), then closes. The app, which polls `google_finish()` every
-     2 s while it waits (timers pause in the background, so it also checks right after coming
-     back), redeems the code in its own session. The code is useless to anyone else: it needs the
-     PKCE verifier, which never leaves the server; and only the browser that went to Google
-     knows `state`.
-   - The app ignores messages from any other origin.
+2. Google redirects to `GET /auth/google/callback?code=…&state=…`. This is the standard web
+   flow: the callback completes sign-in **only in the browser context that holds the session
+   that started it**, and only if `state` matches that session's ceremony.
+   - A full-page redirect, or a popup that shares the app's cookies, carries that session. The
+     callback finishes the flow and rotates the session. In a popup the page announces
+     `{"type":"done"}` on a same-origin `BroadcastChannel` (and to `window.opener` with
+     `postMessage(…, <our origin>)` if it still has one; Google's pages send
+     `Cross-Origin-Opener-Policy: same-origin`, so usually it does not) and closes itself. The
+     app then re-checks `me()`; it also re-checks every 2 s while it waits, in case the message
+     does not arrive. After a full redirect the page goes back to `/`.
+   - A request without that session, or with another `state`, gets an error page and changes
+     nothing: the ceremony is only consumed when its own `state` comes back. So a forged
+     navigation to the callback (`?error=…`, or junk `code`/`state`; any site can trigger one,
+     since the cookie is `SameSite=Lax`) cannot cancel a sign-in in progress.
+   - **Installed iOS web app:** if the popup gets its own cookie jar, the callback there has no
+     session and shows an error. While waiting, the app offers "Continue in this window", which
+     restarts the flow as a full-page redirect (top-level navigation) in the app's own window. If
+     neither shares the app's cookies there, sign-in in the installed app uses passkeys. To be
+     confirmed on a real iPhone.
    - The page is sent with `Cache-Control: no-store`, `Referrer-Policy: no-referrer` (its URL
      holds the code) and a CSP that only allows its own inline script (by hash). It cannot be
      framed, never echoes the code, and data it shows is escaped.
-3. Finishing takes the ceremony and compares `state` in constant time. It then exchanges the code
+
+   **Why nothing may complete a flow outside the session that started it (the forwarded-link
+   attack).** Anyone can call `google_begin` and get a genuine authorization URL (Google's
+   domain, our client id, our redirect URI) that carries *their* `state`, nonce and PKCE
+   challenge. If they send it to a victim ("Sign in to Iron Oxide with Google") and the victim
+   signs in at Google, the victim's browser arrives at our callback with the victim's code and
+   the attacker's `state`. An earlier design let such a callback leave the code on the server for
+   the session owning that `state` to redeem: the attacker would have been signed in as the
+   victim. `state` is not a secret of the victim's browser; it is only a secret of whoever
+   started the flow. With the standard flow the victim's browser holds no ceremony for that
+   `state`, the callback shows an error, and the code is never usable by the attacker, who never
+   sees it (and could not redeem it without Google redirecting to them). Tested by
+   `a_forwarded_sign_in_url_cannot_sign_the_attacker_in_as_the_victim` and
+   `a_forwarded_link_url_cannot_bind_the_victims_google_to_the_attacker`.
+3. Finishing takes the ceremony whose `state` matches (checked again in constant time). It then exchanges the code
    together with the PKCE verifier, over an HTTP client that follows no redirects. It verifies the
    ID token:
    - the signature, against Google's JWKS fetched on each sign-in, so key rotation needs no
@@ -122,9 +139,10 @@ This is the authorization code flow with PKCE (S256), `state` and `nonce`. It as
      expiry and issue time;
    - the nonce.
 4. Then:
-   - **Sign-in**: the user linked to `sub` is signed in. If there is none, a new account is
-     created with that identity.
-   - **Link** (from a signed-in session): `sub` is linked to the current user. This is refused if
+   - **Signed out** ("Continue with Google"): the user linked to `sub` is signed in. If there is
+     none, **a new account is created** with that identity.
+   - **Signed in**, whichever button: `sub` is linked to the current user; a signed-in session
+     never switches to, or creates, another account through Google. This is refused if
      `sub` already belongs to another account, or if the user already has a different Google
      account. Linking an identity to itself again is a no-op.
 
@@ -212,19 +230,22 @@ server-side: which check failed, and database errors.
 | **Session theft (DB copy, XSS)** | Only SHA-256 of ids stored; `HttpOnly`; signed cookie; idle 14 d and absolute 30 d expiry; server-side sign-out | `session_ids_are_stored_hashed`, `sign_out_deletes_the_session_server_side`, `an_expired_session_is_401`, `a_session_past_the_absolute_timeout_is_401_and_deleted` |
 | **CSRF** | `SameSite=Lax` + `Sec-Fetch-Site`/`Origin` check on every non-safe method; state changes only via `POST` | `csrf::tests`, `cross_site_posts_are_refused_without_side_effects` |
 | **Login CSRF** (victim signed into the attacker's account) | Google: `state` bound to the victim's session, single-use; passkeys: the challenge lives in the victim's session | `a_forged_callback_cannot_log_the_victim_into_the_attackers_account` |
+| **Forwarded authorization URL** (attacker starts a flow, victim completes it at Google) | The callback completes only with the ceremony of its own session and matching `state`; no code is ever stored or handed to another session | `a_forwarded_sign_in_url_cannot_sign_the_attacker_in_as_the_victim`, `a_forwarded_link_url_cannot_bind_the_victims_google_to_the_attacker` |
+| **Forged callback cancelling a flow** (cross-site navigation to the callback) | The ceremony is consumed only when its own `state` comes back, `?error=` included | `a_forged_callback_cannot_cancel_a_flow_in_progress`, `googles_error_with_the_right_state_ends_the_flow` |
 | **Challenge / ceremony replay** | Ceremony consumed with `DELETE … RETURNING`, 5–10 min TTL, bound to the session (and user); WebAuthn signs the challenge; signature counter checked | `a_replayed_sign_in_is_rejected`, `two_concurrent_finishes_of_one_ceremony_cannot_both_succeed`, `concurrent_google_finishes_of_one_ceremony_cannot_both_succeed`, `a_sign_up_ceremony_is_single_use`, `a_google_ceremony_is_single_use`, `an_expired_ceremony_is_rejected` |
 | **Passkey without user verification** | UV required at registration and sign-in | `user_verification_is_required` |
 | **Credential/user mismatch** (assertion with another user's handle) | Lookup by credential id *and* user handle | `a_user_handle_pointing_at_another_account_is_rejected` |
 | **Account linking hijack** | Linked by `sub` only, never email; `(provider, subject)` unique; linking refuses a `sub` owned by another account; link ceremonies bound to the initiating user | `linking_cannot_take_over_another_accounts_google`, `a_link_ceremony_cannot_be_finished_by_another_user`, `google_sign_in_creates_then_finds_the_account_by_sub` |
 | **Token substitution** (ID token for another client, issuer or user) | `aud` = exactly our client id (and `azp` if present), `iss` = Google, RS256 signature against Google's JWKS (no HMAC algorithms), `nonce` bound to the ceremony, `exp`/`iat`; code bound to our PKCE verifier | `google_rejects_a_token_for_another_client`, `…_shared_with_another_audience`, `…_from_another_issuer`, `…_signed_with_an_unknown_key`, `google_rejects_an_hs256_token_keyed_with_the_client_secret`, `…_an_expired_token`, `google_rejects_a_nonce_mismatch`, `google_rejects_a_code_bound_to_another_pkce_challenge` |
-| **Authorization code interception or injection** (popup relay, logs, referrer) | PKCE; `Referrer-Policy: no-referrer`, `no-store`; the code is never put in a page; a relayed code only attaches to the live ceremony whose `state` it carries, once | `a_popup_without_the_session_relays_the_code_to_the_app`, `a_relayed_code_needs_a_live_ceremony_with_that_state`, `google::tests` |
+| **Authorization code interception** (logs, referrer, history) | PKCE; `Referrer-Policy: no-referrer`, `no-store`; the code is never put in a page nor stored | `google_rejects_a_code_bound_to_another_pkce_challenge`, `google::tests` |
 | **Open redirect** | No return-URL parameter anywhere; the callback only ever goes to `/`; the Google redirect URL is fixed by config and validated | `config::tests::google_redirect_url_must_be_the_app_callback` |
 | **XSS via the callback page** | Query data JSON-escaped for `<script>` and HTML-escaped; CSP allows only the page's own script by hash | `google::tests::callback_page_is_locked_down`, `script_safe_json_cannot_close_the_script_element` |
 | **Locking yourself out** | Last sign-in method cannot be removed (row lock against races) | `add_list_and_remove_passkeys_but_never_the_last_way_in`, `google_as_the_only_method_cannot_be_unlinked` |
 | **Deleted user keeps access** | Sessions, identities and ceremonies cascade from `users`; a deleted session is never resurrected | `deleting_a_user_deletes_their_auth_rows`, `saving_a_deleted_session_does_not_resurrect_it` |
-| **Secrets in logs** | `secrecy` wrappers; generic client errors | `a_nasty_database_password_never_reaches_the_logs`, `error::tests` |
+| **Secrets in logs** | `secrecy` wrappers; generic client errors; `webauthn_rs_core`/`webauthn_rs` capped at `info` whatever `RUST_LOG` says (they log credential ids and public keys at `debug`, challenges and registrations at `trace`) | `a_nasty_database_password_never_reaches_the_logs`, `error::tests`, `logging::tests` |
 | **Credential stuffing / password spraying** | **Not applicable**: there are no passwords. Passkeys are phishing-resistant and origin-bound | — |
-| **Brute force / resource exhaustion** on the begin endpoints | Ceremonies and signed-out sessions are short-lived and cleaned up; per-IP and per-user rate limits come with #23 (the begin/finish functions and the callback are the places to limit) | — |
+| **Brute force / resource exhaustion** on the begin endpoints | A new begin deletes the ceremony it replaces (one row per kind per session); ceremonies and signed-out sessions are short-lived and cleaned up; per-IP and per-user rate limits come with #23 (the begin/finish functions and the callback are the places to limit). New cookie-less sessions are still one row each until #23 | `a_new_begin_replaces_the_previous_ceremony_row` |
+| **Credential id existence oracle** | **Accepted.** `credential_id` is unique across all accounts, so registering an id that exists gets 409. The WebAuthn spec says a relying party should reject a credential id already registered to any user; ids are random, chosen by the authenticator, and only ever sent to their owner (in `excludeCredentials`) | `add_list_and_remove_passkeys_but_never_the_last_way_in` |
 
 ## Creating the Google OAuth client
 

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO auth_ceremonies (id, kind, user_id, state, expires_at, state_hash)\n         VALUES ($1, $2, $3, $4, $5, $6)",
+  "query": "INSERT INTO auth_ceremonies (id, kind, user_id, state, expires_at)\n         VALUES ($1, $2, $3, $4, $5)",
   "describe": {
     "columns": [],
     "parameters": {
@@ -22,11 +22,10 @@
         },
         "Uuid",
         "Jsonb",
-        "Timestamptz",
-        "Bytea"
+        "Timestamptz"
       ]
     },
     "nullable": []
   },
-  "hash": "d5a3e7d5a49634c1fd57b92d49700af6b86b7c9793bdcbdc375c3be7dedbac67"
+  "hash": "08bd334b370737d0e9e4a0489af205980f228a89bd732ac750983a73cbb2671b"
 }

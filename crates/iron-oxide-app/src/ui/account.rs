@@ -361,11 +361,25 @@ async fn handle_google_event(auth: Auth, event: GoogleEvent) {
 
 /// Starts the Google flow. Must run synchronously in the tap's handler: the popup is opened
 /// before anything is awaited (iOS Safari blocks popups opened later).
-fn start_google(mut auth: Auth, intent: GoogleIntent) {
+fn start_google(auth: Auth, intent: GoogleIntent) {
+    start_google_in(auth, intent, GooglePopup::open());
+}
+
+/// Restarts the Google flow as a full-page redirect in this window: for when the popup cannot
+/// finish it (in an installed iOS web app the popup may not share the app's cookies).
+fn restart_google_here(mut auth: Auth) {
+    let Some(intent) = auth.google.peek().as_ref().copied() else {
+        return;
+    };
+    auth.end_google();
+    auth.busy.set(None);
+    start_google_in(auth, intent, GooglePopup::this_window());
+}
+
+fn start_google_in(mut auth: Auth, intent: GoogleIntent, popup: GooglePopup) {
     if !auth.start(Busy::Google) {
         return;
     }
-    let popup = GooglePopup::open();
     auth.google.set(Some(intent));
     spawn(async move {
         let url = match google_begin(intent, popup.is_open()).await {
@@ -419,7 +433,12 @@ fn GoogleWaiting(auth: Auth) -> Element {
     }
     rsx! {
         div { class: "io-waiting", role: "status",
-            p { "Continue in the Google window. If you closed it, cancel and try again." }
+            p { "Continue in the Google window. If it does not bring you back signed in, continue in this window instead." }
+            button {
+                class: "io-button io-button-secondary",
+                onclick: move |_| restart_google_here(auth),
+                "Continue in this window"
+            }
             button {
                 class: "io-button io-button-secondary",
                 onclick: move |_| cancel_google(auth),
@@ -752,6 +771,16 @@ mod tests {
             passkeys: vec![],
             google_linked: true,
         }
+    }
+
+    #[test]
+    fn google_is_complete_once_signed_in_or_linked() {
+        let mut account = me();
+        assert!(google_complete(GoogleIntent::SignIn, &account));
+        assert!(google_complete(GoogleIntent::Link, &account));
+        account.google_linked = false;
+        assert!(google_complete(GoogleIntent::SignIn, &account));
+        assert!(!google_complete(GoogleIntent::Link, &account));
     }
 
     fn server_error(code: u16, message: &str) -> ServerFnError {
