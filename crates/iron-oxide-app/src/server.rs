@@ -241,14 +241,8 @@ mod tests {
     use tower::ServiceExt;
 
     fn state(db: PgPool) -> AppState {
-        let config = Config::from_lookup(|name| match name {
-            "DATABASE_URL" => Ok("postgres://u:p@127.0.0.1:1/db".to_owned()),
-            "APP_BASE_URL" => Ok("http://localhost:8080".to_owned()),
-            _ => Err(std::env::VarError::NotPresent),
-        })
-        .unwrap();
         AppState {
-            config: Arc::new(config),
+            config: Arc::new(auth::test_support::config()),
             db,
         }
     }

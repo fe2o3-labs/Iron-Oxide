@@ -343,9 +343,10 @@ mod tests {
             expiry_date: OffsetDateTime::UNIX_EPOCH,
         };
         assert_eq!(record_user(&record), None);
-        record
-            .data
-            .insert(keys::USER_ID.to_owned(), serde_json::to_value(user).unwrap());
+        record.data.insert(
+            keys::USER_ID.to_owned(),
+            serde_json::to_value(user).unwrap(),
+        );
         assert_eq!(record_user(&record), Some(user.as_uuid()));
         record
             .data

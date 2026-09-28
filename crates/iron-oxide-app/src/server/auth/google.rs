@@ -166,7 +166,9 @@ fn state_matches(expected: &str, actual: &str) -> bool {
 
 fn check_param(value: &str) -> Result<(), AuthError> {
     if value.is_empty() || value.len() > MAX_PARAM_LEN {
-        return Err(AuthError::Google("missing or oversized code/state".to_owned()));
+        return Err(AuthError::Google(
+            "missing or oversized code/state".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -205,7 +207,9 @@ pub async fn finish(ctx: &AuthContext, code: &str, state: &str) -> Result<(), Au
             let user = sign_in_or_create(ctx, subject).await?;
             ctx.sign_in(user).await
         }
-        _ => Err(AuthError::Internal(format!("unexpected Google ceremony {kind:?}"))),
+        _ => Err(AuthError::Internal(format!(
+            "unexpected Google ceremony {kind:?}"
+        ))),
     }
 }
 
@@ -350,7 +354,9 @@ async fn callback_outcome(
         return Err(AuthError::Google(format!("Google returned {error:.64}")));
     }
     let (Some(code), Some(state)) = (params.code, params.state) else {
-        return Err(AuthError::Google("callback without code or state".to_owned()));
+        return Err(AuthError::Google(
+            "callback without code or state".to_owned(),
+        ));
     };
     if has_ceremony(ctx).await? {
         finish(ctx, &code, &state).await?;
@@ -443,7 +449,10 @@ fn callback_page(origin: &str, message: &GoogleCallbackMessage, redirect_home: b
         HeaderValue::from_static("text/html; charset=utf-8"),
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -478,9 +487,15 @@ mod tests {
     fn script_safe_json_cannot_close_the_script_element() {
         let value = serde_json::json!({ "code": "</script><script>alert(1)</script>&" });
         let json = script_safe_json(&value);
-        assert!(!json.contains('<') && !json.contains('>') && !json.contains('&'), "{json}");
+        assert!(
+            !json.contains('<') && !json.contains('>') && !json.contains('&'),
+            "{json}"
+        );
         // Still the same JSON once parsed.
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&json).unwrap(), value);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            value
+        );
     }
 
     #[test]
@@ -511,12 +526,21 @@ mod tests {
         let headers = response.headers().clone();
         assert_eq!(headers[header::CACHE_CONTROL], "no-store");
         assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
-        let csp = headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap().to_owned();
-        assert!(csp.starts_with("default-src 'none'; script-src 'sha256-"), "{csp}");
+        let csp = headers[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            csp.starts_with("default-src 'none'; script-src 'sha256-"),
+            "{csp}"
+        );
         assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
         let body = page_text(response).await;
         assert_eq!(body.matches("</script>").count(), 2, "{body}");
-        assert!(body.contains(r#""origin":"https://iron-oxyde.com""#), "{body}");
+        assert!(
+            body.contains(r#""origin":"https://iron-oxyde.com""#),
+            "{body}"
+        );
         assert!(body.contains(CALLBACK_SCRIPT));
     }
 

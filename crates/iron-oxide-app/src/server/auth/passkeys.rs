@@ -107,7 +107,14 @@ pub async fn sign_up_begin(
         display_name,
         registration,
     };
-    ceremony::start(ctx.db(), &ctx.session, CeremonyKind::PasskeySignUp, None, &state).await?;
+    ceremony::start(
+        ctx.db(),
+        &ctx.session,
+        CeremonyKind::PasskeySignUp,
+        None,
+        &state,
+    )
+    .await?;
     Ok(require_discoverable(ccr))
 }
 
@@ -223,10 +230,13 @@ pub async fn add_begin(
             "You can have at most {MAX_PASSKEYS_PER_USER} passkeys."
         )));
     }
-    let display_name = sqlx::query_scalar!("SELECT display_name FROM users WHERE id = $1", user.as_uuid())
-        .fetch_optional(ctx.db())
-        .await?
-        .ok_or(AuthError::Unauthenticated)?;
+    let display_name = sqlx::query_scalar!(
+        "SELECT display_name FROM users WHERE id = $1",
+        user.as_uuid()
+    )
+    .fetch_optional(ctx.db())
+    .await?
+    .ok_or(AuthError::Unauthenticated)?;
     let label = display_name.as_deref().unwrap_or(DEFAULT_ACCOUNT_NAME);
     let exclude = existing.iter().map(|p| p.cred_id().clone()).collect();
     let (ccr, registration) = ctx.auth.webauthn().start_passkey_registration(
@@ -317,10 +327,13 @@ async fn lock_user_and_count_passkeys(
     tx: &mut Transaction<'_, Postgres>,
     user: UserId,
 ) -> Result<i64, AuthError> {
-    sqlx::query_scalar!("SELECT id FROM users WHERE id = $1 FOR UPDATE", user.as_uuid())
-        .fetch_optional(&mut **tx)
-        .await?
-        .ok_or(AuthError::Unauthenticated)?;
+    sqlx::query_scalar!(
+        "SELECT id FROM users WHERE id = $1 FOR UPDATE",
+        user.as_uuid()
+    )
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(AuthError::Unauthenticated)?;
     Ok(sqlx::query_scalar!(
         r#"SELECT count(*) AS "count!" FROM passkeys WHERE user_id = $1"#,
         user.as_uuid()
@@ -435,27 +448,39 @@ mod tests {
     fn registration_requires_a_discoverable_credential_and_user_verification() {
         let ccr = require_discoverable(ccr());
         let selection = ccr.public_key.authenticator_selection.unwrap();
-        assert_eq!(selection.resident_key, Some(ResidentKeyRequirement::Required));
+        assert_eq!(
+            selection.resident_key,
+            Some(ResidentKeyRequirement::Required)
+        );
         assert!(selection.require_resident_key);
-        assert_eq!(selection.user_verification, UserVerificationPolicy::Required);
+        assert_eq!(
+            selection.user_verification,
+            UserVerificationPolicy::Required
+        );
     }
 
     #[test]
     fn require_discoverable_leaves_a_missing_selection_alone() {
         let mut ccr = ccr();
         ccr.public_key.authenticator_selection = None;
-        assert!(require_discoverable(ccr).public_key.authenticator_selection.is_none());
+        assert!(
+            require_discoverable(ccr)
+                .public_key
+                .authenticator_selection
+                .is_none()
+        );
         let _unused: Option<AuthenticatorSelectionCriteria> = None;
     }
 
     fn registration_with_rk(rk: Option<bool>) -> RegisterPublicKeyCredential {
-        let mut credential: RegisterPublicKeyCredential = serde_json::from_value(serde_json::json!({
-            "id": "AA",
-            "rawId": "AA",
-            "response": { "attestationObject": "AA", "clientDataJSON": "AA" },
-            "type": "public-key"
-        }))
-        .unwrap();
+        let mut credential: RegisterPublicKeyCredential =
+            serde_json::from_value(serde_json::json!({
+                "id": "AA",
+                "rawId": "AA",
+                "response": { "attestationObject": "AA", "clientDataJSON": "AA" },
+                "type": "public-key"
+            }))
+            .unwrap();
         credential.extensions.cred_props = rk.map(|rk| CredProps { rk: Some(rk) });
         credential
     }
@@ -496,7 +521,10 @@ mod tests {
     #[test]
     fn nickname_defaults_and_validation() {
         assert_eq!(nickname_or("  Phone ", || "x".to_owned()).unwrap(), "Phone");
-        assert_eq!(nickname_or("", || "Passkey 2".to_owned()).unwrap(), "Passkey 2");
+        assert_eq!(
+            nickname_or("", || "Passkey 2".to_owned()).unwrap(),
+            "Passkey 2"
+        );
         assert!(matches!(
             nickname_or(&"a".repeat(65), || "x".to_owned()),
             Err(AuthError::Invalid(_))

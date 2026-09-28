@@ -129,7 +129,10 @@ mod tests {
 
     #[test]
     fn safe_methods_are_never_checked() {
-        let cross = headers(&[("sec-fetch-site", b"cross-site"), ("origin", b"https://evil.example")]);
+        let cross = headers(&[
+            ("sec-fetch-site", b"cross-site"),
+            ("origin", b"https://evil.example"),
+        ]);
         for method in [Method::GET, Method::HEAD, Method::OPTIONS, Method::TRACE] {
             assert_eq!(policy().check(&method, &cross), Ok(()), "{method}");
         }
@@ -138,7 +141,10 @@ mod tests {
     #[test]
     fn same_origin_post_is_allowed() {
         let p = policy();
-        let both = headers(&[("sec-fetch-site", b"same-origin"), ("origin", b"https://iron-oxyde.com")]);
+        let both = headers(&[
+            ("sec-fetch-site", b"same-origin"),
+            ("origin", b"https://iron-oxyde.com"),
+        ]);
         assert_eq!(p.check(&Method::POST, &both), Ok(()));
         // Older browsers: only one of the two headers.
         let origin_only = headers(&[("origin", b"https://iron-oxyde.com")]);
@@ -160,7 +166,13 @@ mod tests {
     #[test]
     fn cross_site_and_same_site_are_refused() {
         let p = policy();
-        for site in [&b"cross-site"[..], b"same-site", b"none", b"SAME-ORIGIN", b""] {
+        for site in [
+            &b"cross-site"[..],
+            b"same-site",
+            b"none",
+            b"SAME-ORIGIN",
+            b"",
+        ] {
             let h = headers(&[("sec-fetch-site", site)]);
             assert!(p.check(&Method::POST, &h).is_err(), "{site:?}");
         }

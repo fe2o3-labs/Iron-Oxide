@@ -27,6 +27,11 @@ pub mod google;
 pub mod passkeys;
 pub mod session;
 
+#[cfg(test)]
+mod integration_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use std::sync::Arc;
 
 use dioxus::prelude::ServerFnError;
@@ -137,10 +142,7 @@ pub fn install(router: Router, auth: AuthState, db: PgPool) -> Router {
         auth.inner.cookie_secure,
     );
     router
-        .route(
-            config_callback_path(),
-            get(google::callback),
-        )
+        .route(config_callback_path(), get(google::callback))
         .layer(session_layer)
         .layer(middleware::from_fn_with_state(
             auth.inner.csrf.clone(),

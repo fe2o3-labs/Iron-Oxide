@@ -315,7 +315,9 @@ impl Config {
         let shutdown_grace = env.optional(vars::SHUTDOWN_GRACE_SECS, parse_grace);
         let auth = load_auth(&mut env);
         let auth = match (&app_base_url, auth) {
-            (Some(app_base_url), Some(auth)) => check_auth_against_base_url(&mut env, app_base_url, auth),
+            (Some(app_base_url), Some(auth)) => {
+                check_auth_against_base_url(&mut env, app_base_url, auth)
+            }
             _ => None,
         };
 
@@ -389,7 +391,9 @@ fn check_auth_against_base_url(
     {
         env.errors.push(ConfigError::Invalid {
             var: vars::GOOGLE_REDIRECT_URL,
-            reason: format!("must be the origin of APP_BASE_URL followed by {GOOGLE_CALLBACK_PATH}"),
+            reason: format!(
+                "must be the origin of APP_BASE_URL followed by {GOOGLE_CALLBACK_PATH}"
+            ),
         });
     }
     match app_base_url.scheme() {
@@ -675,7 +679,10 @@ mod tests {
         assert_eq!(config.app_base_url.as_str(), "http://localhost:8080/");
         assert_eq!(config.log_filter, None);
         assert_eq!(config.shutdown_grace, Duration::from_secs(20));
-        assert!(!config.auth.cookie_secure, "http://localhost is local development");
+        assert!(
+            !config.auth.cookie_secure,
+            "http://localhost is local development"
+        );
         assert_eq!(config.database_url.redacted(), "localhost:5433/iron_oxide");
     }
 
@@ -886,7 +893,11 @@ mod tests {
 
     #[test]
     fn plain_http_is_only_allowed_on_loopback_hosts() {
-        for base in ["http://127.0.0.1:8080", "http://[::1]:8080", "http://LOCALHOST:8080"] {
+        for base in [
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+            "http://LOCALHOST:8080",
+        ] {
             let host = Url::parse(base).unwrap().host_str().unwrap().to_owned();
             let host: &'static str = Box::leak(host.into_boxed_str());
             let redirect: &'static str =
@@ -908,7 +919,10 @@ mod tests {
                 Ok(config) => assert!(!config.auth.cookie_secure, "{base}"),
                 // WebAuthn RP IDs are domains: an IP address is rejected there, not here.
                 Err(errors) => assert!(
-                    errors.errors().iter().all(|e| e.var() == vars::WEBAUTHN_RP_ID),
+                    errors
+                        .errors()
+                        .iter()
+                        .all(|e| e.var() == vars::WEBAUTHN_RP_ID),
                     "{base}: {errors:?}"
                 ),
             }

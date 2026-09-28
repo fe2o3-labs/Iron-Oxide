@@ -149,8 +149,14 @@ mod tests {
 
     #[test]
     fn normalize_name_trims_and_accepts_normal_names() {
-        assert_eq!(normalize_name("  Jules  ").unwrap(), Some("Jules".to_owned()));
-        assert_eq!(normalize_name("Élodie 💪").unwrap(), Some("Élodie 💪".to_owned()));
+        assert_eq!(
+            normalize_name("  Jules  ").unwrap(),
+            Some("Jules".to_owned())
+        );
+        assert_eq!(
+            normalize_name("Élodie 💪").unwrap(),
+            Some("Élodie 💪".to_owned())
+        );
     }
 
     #[test]
@@ -201,7 +207,10 @@ mod tests {
             state: "s".to_owned(),
         });
         assert_eq!(json, r#"{"type":"code","code":"c","state":"s"}"#);
-        assert_eq!(serde_json_like(&GoogleCallbackMessage::Done), r#"{"type":"done"}"#);
+        assert_eq!(
+            serde_json_like(&GoogleCallbackMessage::Done),
+            r#"{"type":"done"}"#
+        );
     }
 
     fn serde_json_like<T: Serialize>(value: &T) -> String {

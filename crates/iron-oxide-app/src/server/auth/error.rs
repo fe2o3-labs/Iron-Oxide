@@ -71,12 +71,14 @@ impl AuthError {
                  phone or computer's built-in passkeys.",
             ),
             Self::PasskeyAlreadyRegistered => (409, "This passkey is already registered."),
-            Self::GoogleLinkedElsewhere => {
-                (409, "This Google account is already used by another account.")
-            }
-            Self::GoogleAlreadyLinked => {
-                (409, "A different Google account is already linked to your account.")
-            }
+            Self::GoogleLinkedElsewhere => (
+                409,
+                "This Google account is already used by another account.",
+            ),
+            Self::GoogleAlreadyLinked => (
+                409,
+                "A different Google account is already linked to your account.",
+            ),
             Self::LastSignInMethod => (
                 409,
                 "This is your last way to sign in. Add another passkey or link Google first.",
@@ -132,7 +134,10 @@ mod tests {
     #[test]
     fn unauthenticated_is_401() {
         let error = ServerFnError::from(AuthError::Unauthenticated);
-        assert!(matches!(error, ServerFnError::ServerError { code: 401, .. }));
+        assert!(matches!(
+            error,
+            ServerFnError::ServerError { code: 401, .. }
+        ));
     }
 
     #[test]
