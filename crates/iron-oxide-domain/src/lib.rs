@@ -11,11 +11,15 @@
 //!   increment and display helpers.
 //! - [`Reps`], [`Percent`] and [`Seconds`].
 //! - [`ValueError`] for every rejected value.
+//! - The rest timer lives in [`time`] and [`timer`].
 //!
 //! # Plate calculator
 //!
 //! [`calculate_plates`] loads a target on a bar from a [`PlateInventory`], exactly or as close as
 //! possible from below and above.
+
+pub mod time;
+pub mod timer;
 
 mod display;
 mod duration;
