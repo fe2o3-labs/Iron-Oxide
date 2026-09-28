@@ -1,23 +1,35 @@
 //! User interface components.
 
+mod account;
+
 use dioxus::CapturedError;
 use dioxus::fullstack::RequestError;
 use dioxus::prelude::*;
 
 use crate::api::server_time;
 
-/// Root component: a hello-world page with one server function round-trip.
+/// Styles of the app shell and the account panel.
+const AUTH_CSS: Asset = asset!("/assets/auth.css");
+
+/// Root component: the account panel, and one server function round-trip.
 #[component]
 pub fn App() -> Element {
     let mut time = use_action(server_time);
 
     rsx! {
         document::Title { "Iron Oxide" }
-        main {
-            h1 { "Iron Oxide" }
-            p { "Zero-cost gains. The only overhead is the barbell." }
+        document::Meta { name: "viewport", content: "width=device-width, initial-scale=1" }
+        document::Stylesheet { href: AUTH_CSS }
+        main { class: "io-app",
+            header { class: "io-header",
+                h1 { "Iron Oxide" }
+                p { class: "io-muted", "Zero-cost gains. The only overhead is the barbell." }
+            }
+            account::Account {}
+            section { class: "io-card io-demo",
             button {
                 id: "server-time",
+                class: "io-button io-button-secondary",
                 disabled: time.pending(),
                 onclick: move |_| {
                     time.call();
@@ -29,6 +41,7 @@ pub fn App() -> Element {
                 None => rsx! {},
                 Some(Ok(seconds)) => rsx! { p { id: "server-time-result", "Server time: {seconds} seconds since the Unix epoch" } },
                 Some(Err(error)) => rsx! { p { id: "server-time-error", role: "alert", "{CallFailure::from_error(&error)}" } },
+            }
             }
         }
     }
@@ -49,24 +62,28 @@ enum CallFailure {
 impl CallFailure {
     fn from_error(error: &CapturedError) -> Self {
         match error.downcast_ref::<ServerFnError>() {
-            Some(ServerFnError::ServerError { message, code, .. }) => Self::ServerError {
+            Some(error) => Self::from_server_fn_error(error),
+            None => Self::Unexpected(error.to_string()),
+        }
+    }
+
+    fn from_server_fn_error(error: &ServerFnError) -> Self {
+        match error {
+            ServerFnError::ServerError { message, code, .. } => Self::ServerError {
                 status: *code,
                 message: message.clone(),
             },
-            Some(ServerFnError::Request(RequestError::Status(message, code))) => {
-                Self::ServerError {
-                    status: *code,
-                    message: message.clone(),
-                }
-            }
-            Some(ServerFnError::Request(
+            ServerFnError::Request(RequestError::Status(message, code)) => Self::ServerError {
+                status: *code,
+                message: message.clone(),
+            },
+            ServerFnError::Request(
                 RequestError::Request(_)
                 | RequestError::Connect(_)
                 | RequestError::Timeout(_)
                 | RequestError::Redirect(_),
-            )) => Self::Unreachable,
-            Some(other) => Self::Unexpected(other.to_string()),
-            None => Self::Unexpected(error.to_string()),
+            ) => Self::Unreachable,
+            other => Self::Unexpected(other.to_string()),
         }
     }
 }
