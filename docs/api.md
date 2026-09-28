@@ -200,8 +200,9 @@ not exist.
 - **Uploads are untrusted.** `target` is `{"kind": "new_program", "creation_id": …}` (named after
   the document's `name`) or `{"kind": "new_version", "program_id": …}` (the program keeps its own
   name). In order:
-  1. A middleware on the route reads the whole body before Dioxus does and refuses it with `413`
-     past `UPLOAD_BODY_LIMIT` (2 × `MAX_DOCUMENT_BYTES` + 16 KiB: the document travels as a JSON
+  1. A middleware on the route first checks the session (a signed-out client gets its `401`
+     without the body being read), then reads the whole body before Dioxus does and refuses it
+     with `413` past `UPLOAD_BODY_LIMIT` (2 × `MAX_DOCUMENT_BYTES` + 16 KiB: the document travels as a JSON
      string, where `"`, `\` and line breaks take two bytes). It checks `Content-Length` first and
      then counts the bytes actually read, so a missing or lying header does not get past it.
   2. A document over `MAX_DOCUMENT_BYTES` (256 KiB) is refused with `413`, before parsing.
@@ -209,10 +210,16 @@ not exist.
      (`{errors: [{path, message, line?, column?}], omitted}`) as the error details: a parse error
      is one entry with its line and column; broken rules are at most `MAX_REPORTED_ERRORS` entries,
      the rest counted in `omitted`. Read them on the client with `ProgramProblems::from_error`.
+     The rules include texts: names must not contain any C0 control character (U+0000 to
+     U+001F), descriptions and notes none but tab, line feed and carriage return. Postgres cannot
+     store U+0000, so this also keeps such a document from reaching the database.
   4. The document is stored as uploaded (like the built-ins), not re-serialized.
 - **Archive, never delete.** Archiving hides a program from `list_programs` (unless
   `include_archived`) and keeps its versions and the sessions run from them; it can still be read
   and get new versions, and `archived: false` restores it. The active program cannot be archived and
-  an archived program cannot be made active (`409`), so the active program is never hidden.
+  an archived program cannot be made active (`409`), so the active program is never hidden. Both
+  calls check and write in one transaction that first locks the program's row, so concurrent calls
+  on the same program run one after the other (one wins, the other gets `409`). Triggers enforce
+  the rule in the database too (migration `20260928220000_active_program_never_archived`).
 - **Timestamps.** `created_at` in `ProgramView` and `VersionView` is a `Timestamp` (milliseconds,
   see [Layout](#layout)).
