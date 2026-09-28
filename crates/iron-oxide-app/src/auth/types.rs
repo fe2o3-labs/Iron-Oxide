@@ -135,22 +135,8 @@ pub enum GoogleCallbackMessage {
     /// The callback finished the sign-in itself (the popup shares the app's cookies): reload the
     /// signed-in user.
     Done,
-    /// The callback ran without the app's session (a popup with its own cookie jar, e.g. from an
-    /// installed iOS web app) and left the code on the server: the app must call
-    /// `google_finish()`. The app also calls it when it becomes visible again, since this message
-    /// may not reach it at all in that case.
-    Relayed,
     /// Google or the server refused; `message` is safe to show.
     Error { message: String },
-}
-
-/// Where a Google sign-in stands, as seen by the app that started it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GoogleProgress {
-    /// Google has not come back yet: keep waiting.
-    Pending,
-    /// Done; the account as it now is. For a link, check `google_linked`.
-    Finished(Me),
 }
 
 /// The `BroadcastChannel` name the callback page also posts its message on, for when the popup
@@ -219,8 +205,10 @@ mod tests {
     #[test]
     fn callback_messages_have_a_stable_json_shape() {
         assert_eq!(
-            serde_json_like(&GoogleCallbackMessage::Relayed),
-            r#"{"type":"relayed"}"#
+            serde_json_like(&GoogleCallbackMessage::Error {
+                message: "m".to_owned()
+            }),
+            r#"{"type":"error","message":"m"}"#
         );
         assert_eq!(
             serde_json_like(&GoogleCallbackMessage::Done),

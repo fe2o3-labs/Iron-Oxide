@@ -98,12 +98,6 @@ CREATE TABLE auth_ceremonies (
     state      jsonb              NOT NULL,
     created_at timestamptz        NOT NULL DEFAULT now(),
     expires_at timestamptz        NOT NULL,
-    -- Google only: SHA-256 of the `state` sent to Google, so a callback that arrives without the
-    -- starting session (a popup with its own cookie jar) can find the ceremony, and the
-    -- authorization code it leaves for that session to redeem. The code is useless without this
-    -- row's PKCE verifier.
-    state_hash bytea              UNIQUE CHECK (octet_length(state_hash) = 32),
-    relay_code text               CHECK (char_length(relay_code) BETWEEN 1 AND 2048),
     CHECK ((kind IN ('passkey_add', 'google_link')) = (user_id IS NOT NULL))
 );
 

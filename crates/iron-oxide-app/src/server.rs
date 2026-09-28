@@ -4,6 +4,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod dotenv;
+pub mod logging;
 pub mod state;
 
 use std::{future::IntoFuture, process::ExitCode, sync::Arc, time::Duration};
@@ -77,8 +78,8 @@ pub fn serve(config: Config) -> ExitCode {
 }
 
 async fn run(config: Arc<Config>) -> Result<(), ServeError> {
-    // The same logger `dioxus::serve` sets up (honours RUST_LOG).
-    dioxus::logger::initialize_default();
+    // The same output as the Dioxus logger (honours RUST_LOG), with sign-in material capped.
+    logging::init(config.log_filter.as_deref());
     tracing::info!(
         bind_addr = %config.bind_addr,
         app_base_url = %config.app_base_url,

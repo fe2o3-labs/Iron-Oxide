@@ -54,10 +54,6 @@ mod tests {
             Some(GoogleCallbackMessage::Done)
         );
         assert_eq!(
-            accept_callback_message(ORIGIN, ORIGIN, Some(r#"{"type":"relayed"}"#)),
-            Some(GoogleCallbackMessage::Relayed)
-        );
-        assert_eq!(
             accept_callback_message(ORIGIN, ORIGIN, Some(r#"{"type":"error","message":"no"}"#)),
             Some(GoogleCallbackMessage::Error {
                 message: "no".to_owned()
@@ -102,6 +98,7 @@ mod tests {
             Some(""),
             Some("done"),
             Some(r#"{"type":"unknown"}"#),
+            Some(r#"{"type":"relayed"}"#),
             Some(r#"{"type":"error"}"#),
             Some(r#"["done"]"#),
         ] {

@@ -4,19 +4,17 @@
 //!    random `state`, `nonce` and PKCE verifier, and returns the authorization URL. The client
 //!    opens it in a popup (started synchronously from the tap, for iOS) or, if popups are
 //!    blocked, in the current window.
-//! 2. Google redirects to `GET /auth/google/callback?code&state` ([`callback`]). Google's pages
-//!    send `Cross-Origin-Opener-Policy: same-origin`, so by then the popup has usually lost its
-//!    `window.opener`: nothing here relies on it.
-//!    - If this request carries the session that started the flow (full redirect, or a popup
-//!      sharing the app's cookies), the callback finishes the flow itself. In a popup the page
-//!      announces it on a same-origin `BroadcastChannel` and closes; after a full redirect it
-//!      goes back to `/`.
-//!    - Otherwise (a popup with its own cookie jar, as an installed iOS web app may get), the
-//!      callback finds the ceremony by the hash of `state` and leaves the code on it
-//!      ([`ceremony::relay_google_code`]). The app redeems it with `google_finish()` in its own
-//!      session when it becomes visible again ([`progress`]). The code is useless to anyone
-//!      else: it needs the PKCE verifier, which never leaves the server; and only the browser
-//!      that went to Google knows `state`.
+//! 2. Google redirects to `GET /auth/google/callback?code&state` ([`callback`]). The callback
+//!    completes the flow only in the browser context that holds the session that started it:
+//!    the popup when it shares the app's cookies, or the app's own window after a full-page
+//!    redirect. It takes the session's ceremony only if `state` matches it, so a forged callback
+//!    (wrong `state`, or `?error=`) neither uses nor cancels a flow in progress. Without a
+//!    matching ceremony in its own session it shows an error: an authorization URL forwarded to
+//!    someone else lands in *their* browser, which holds no ceremony for it, so the flow cannot
+//!    complete for the person who started it (see docs/auth.md).
+//!    Google's pages send `Cross-Origin-Opener-Policy: same-origin`, so the popup has usually
+//!    lost its `window.opener` by then: the page announces the result on a same-origin
+//!    `BroadcastChannel` and closes itself; after a full redirect it goes back to `/`.
 //! 3. [`finish`] checks `state` (constant time) against the ceremony, exchanges the code with
 //!    the PKCE verifier, and verifies the ID token: signature against Google's current JWKS
 //!    (fetched per sign-in, so key rotation needs no restart), issuer, audience (our client id),
@@ -48,7 +46,7 @@ use super::{
     passkeys::lock_user_and_count_methods,
 };
 use crate::auth::types::{
-    GOOGLE_CALLBACK_CHANNEL, GoogleCallbackMessage, GoogleIntent, GoogleProgress, Me, UserId,
+    GOOGLE_CALLBACK_CHANNEL, GoogleCallbackMessage, GoogleIntent, Me, UserId,
 };
 
 /// Google's OpenID Connect issuer.
@@ -130,20 +128,20 @@ struct GoogleState {
     popup: bool,
 }
 
-/// The key under which a ceremony can be found from the callback's `state`.
-fn state_hash(state: &str) -> Vec<u8> {
-    Sha256::digest(state.as_bytes()).to_vec()
-}
-
 /// Starts a Google sign-in (or link) and returns the authorization URL.
+///
+/// A signed-in user always links: "Continue with Google" from a signed-in session never
+/// switches to (or creates) another account. Signed out, an unknown Google account creates a new
+/// account.
 pub async fn begin(
     ctx: &AuthContext,
     intent: GoogleIntent,
     popup: bool,
 ) -> Result<String, AuthError> {
-    let (kind, user) = match intent {
-        GoogleIntent::SignIn => (CeremonyKind::GoogleSignIn, None),
-        GoogleIntent::Link => (CeremonyKind::GoogleLink, Some(ctx.require_user().await?)),
+    let (kind, user) = match (intent, ctx.current_user().await?) {
+        (_, Some(user)) => (CeremonyKind::GoogleLink, Some(user)),
+        (GoogleIntent::SignIn, None) => (CeremonyKind::GoogleSignIn, None),
+        (GoogleIntent::Link, None) => return Err(AuthError::Unauthenticated),
     };
     let client = ctx.auth.google().client().await?;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
@@ -157,24 +155,14 @@ pub async fn begin(
         // Let the user pick the account, rather than silently reusing the last one.
         .add_prompt(CoreAuthPrompt::SelectAccount)
         .url();
-    let hash = state_hash(state.secret());
     let state = GoogleState {
         state: state.secret().clone(),
         nonce: nonce.secret().clone(),
         pkce_verifier: verifier.secret().clone(),
         popup,
     };
-    ceremony::start_with_state_hash(ctx.db(), &ctx.session, kind, user, &state, Some(hash)).await?;
+    ceremony::start(ctx.db(), &ctx.session, kind, user, &state).await?;
     Ok(url.to_string())
-}
-
-/// Whether the session has a Google ceremony in flight.
-pub async fn has_ceremony(ctx: &AuthContext) -> Result<bool, AuthError> {
-    Ok(ctx
-        .session
-        .get::<uuid::Uuid>(CeremonyKind::GoogleSignIn.session_key())
-        .await?
-        .is_some())
 }
 
 /// Constant-time comparison of the returned `state` with the stored one.
@@ -198,39 +186,16 @@ pub async fn finish(ctx: &AuthContext, code: &str, state: &str) -> Result<bool, 
     check_param(code)?;
     check_param(state)?;
     let current = ctx.current_user().await?;
-    let taken = ceremony::take_google(ctx.db(), &ctx.session, current).await?;
+    let taken = ceremony::take_google(ctx.db(), &ctx.session, current, state).await?;
     let (kind, owner) = (taken.kind, taken.user);
     let stored: GoogleState = taken.state()?;
+    // Already matched by the database; checked again here, in constant time.
     if !state_matches(&stored.state, state) {
         return Err(AuthError::Ceremony("state mismatch"));
     }
     let popup = stored.popup;
     complete(ctx, kind, owner, stored, code).await?;
     Ok(popup)
-}
-
-/// `google_finish()`: redeems a code relayed by a callback that ran without this session, or
-/// reports that Google has not come back yet.
-pub async fn progress(ctx: &AuthContext) -> Result<GoogleProgress, AuthError> {
-    let current = ctx.current_user().await?;
-    if has_ceremony(ctx).await? {
-        let Some((taken, code)) =
-            ceremony::take_relayed_google(ctx.db(), &ctx.session, current).await?
-        else {
-            return Ok(GoogleProgress::Pending);
-        };
-        let (kind, owner) = (taken.kind, taken.user);
-        complete(ctx, kind, owner, taken.state()?, &code).await?;
-    } else if current.is_none() {
-        // Nothing in flight, not signed in: the flow failed or was never started here.
-        return Err(AuthError::Ceremony("none in this session"));
-    }
-    // Finished here, or by a callback that shared this session (a popup with the app's
-    // cookies): report the account as it now is.
-    let user = ctx.require_user().await?;
-    Ok(GoogleProgress::Finished(
-        super::passkeys::me(ctx, user).await?,
-    ))
 }
 
 /// Exchanges `code` and verifies the ID token for a taken ceremony, then signs in or links.
@@ -425,10 +390,15 @@ async fn callback_outcome(
     params: CallbackParams,
 ) -> Result<(GoogleCallbackMessage, AfterMessage), AuthError> {
     if let Some(error) = params.error {
-        // e.g. `access_denied` when the user cancels. Clear the ceremony.
-        if has_ceremony(ctx).await? {
+        // e.g. `access_denied` when the user cancels. The ceremony is only dropped when the
+        // callback carries its `state`: anyone can send a browser to this URL.
+        if let Some(state) = params
+            .state
+            .as_deref()
+            .filter(|state| check_param(state).is_ok())
+        {
             let current = ctx.current_user().await?;
-            let _ = ceremony::take_google(ctx.db(), &ctx.session, current).await;
+            let _ = ceremony::take_google(ctx.db(), &ctx.session, current, state).await;
         }
         return Err(AuthError::Google(format!("Google returned {error:.64}")));
     }
@@ -437,23 +407,13 @@ async fn callback_outcome(
             "callback without code or state".to_owned(),
         ));
     };
-    if has_ceremony(ctx).await? {
-        let popup = finish(ctx, &code, &state).await?;
-        let after = if popup {
-            AfterMessage::Close
-        } else {
-            AfterMessage::GoHome
-        };
-        Ok((GoogleCallbackMessage::Done, after))
+    let popup = finish(ctx, &code, &state).await?;
+    let after = if popup {
+        AfterMessage::Close
     } else {
-        check_param(&code)?;
-        check_param(&state)?;
-        if ceremony::relay_google_code(ctx.db(), &state_hash(&state), &code).await? {
-            Ok((GoogleCallbackMessage::Relayed, AfterMessage::Close))
-        } else {
-            Err(AuthError::Ceremony("no ceremony for this state"))
-        }
-    }
+        AfterMessage::GoHome
+    };
+    Ok((GoogleCallbackMessage::Done, after))
 }
 
 /// The callback page's script. Static, so the CSP can allow exactly it by hash.
@@ -509,9 +469,6 @@ fn callback_page(origin: &str, message: &GoogleCallbackMessage, after: AfterMess
     });
     let text = match message {
         GoogleCallbackMessage::Done => "Signed in. You can close this window.".to_owned(),
-        GoogleCallbackMessage::Relayed => {
-            "Signed in with Google. Close this window and return to Iron Oxide.".to_owned()
-        }
         GoogleCallbackMessage::Error { message } => message.clone(),
     };
     let body = format!(
@@ -652,16 +609,9 @@ mod tests {
         for (message, after, expected) in [
             (GoogleCallbackMessage::Done, AfterMessage::Close, "close"),
             (GoogleCallbackMessage::Done, AfterMessage::GoHome, "home"),
-            (GoogleCallbackMessage::Relayed, AfterMessage::Close, "close"),
         ] {
             let body = page_text(callback_page("http://localhost:8080", &message, after)).await;
             assert!(body.contains(&format!(r#""after":"{expected}""#)), "{body}");
         }
-    }
-
-    #[test]
-    fn state_hash_is_sha256() {
-        assert_eq!(state_hash("abc").len(), 32);
-        assert_ne!(state_hash("abc"), state_hash("abd"));
     }
 }

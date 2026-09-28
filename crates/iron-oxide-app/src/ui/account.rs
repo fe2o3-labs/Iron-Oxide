@@ -11,21 +11,20 @@ use dioxus::prelude::*;
 
 use super::CallFailure;
 use crate::auth::api::{
-    google_begin, google_finish, google_unlink, is_unauthorized, me, passkey_add_begin,
-    passkey_add_finish, passkey_remove, passkey_sign_in_begin, passkey_sign_in_finish,
-    passkey_sign_up_begin, passkey_sign_up_finish, sign_out,
+    google_begin, google_unlink, is_unauthorized, me, passkey_add_begin, passkey_add_finish,
+    passkey_remove, passkey_sign_in_begin, passkey_sign_in_finish, passkey_sign_up_begin,
+    passkey_sign_up_finish, sign_out,
 };
 use crate::auth::browser::{
     self, BrowserError, GoogleCallbackListener, GoogleNavigation, GooglePopup,
 };
 use crate::auth::types::{
-    GoogleCallbackMessage, GoogleIntent, GoogleProgress, MAX_NAME_CHARS, Me, PasskeyId,
-    PasskeyInfo, normalize_name,
+    GoogleCallbackMessage, GoogleIntent, MAX_NAME_CHARS, Me, PasskeyId, PasskeyInfo, normalize_name,
 };
 
-/// How often the app asks the server whether a Google sign-in has come back, while waiting.
-/// The callback's message cannot always reach the app (a popup with its own cookie jar), and
-/// timers pause while the app is in the background, so this also fires soon after returning.
+/// How often the app re-checks `me()` while waiting for Google. The popup's `done` message is the
+/// fast path; this catches a popup that finished in the app's cookie jar without the message
+/// getting through (timers pause in the background, so it also fires soon after returning).
 const GOOGLE_POLL_MS: i32 = 2_000;
 
 /// What the panel shows.
@@ -218,9 +217,9 @@ pub fn Account() -> Element {
     // The Google callback messages, handled one at a time inside the Dioxus runtime (the
     // browser listeners run outside it and only forward).
     let messages = use_coroutine(
-        move |mut messages: UnboundedReceiver<GoogleCallbackMessage>| async move {
-            while let Ok(message) = messages.recv().await {
-                handle_google_message(auth, message).await;
+        move |mut events: UnboundedReceiver<GoogleEvent>| async move {
+            while let Ok(event) = events.recv().await {
+                handle_google_event(auth, event).await;
             }
         },
     );
@@ -228,7 +227,7 @@ pub fn Account() -> Element {
         let sender = messages.tx();
         Rc::new(GoogleCallbackListener::install(move |message| {
             // Only fails once the panel is gone.
-            let _ = sender.unbounded_send(message);
+            let _ = sender.unbounded_send(GoogleEvent::Message(message));
         }))
     });
     // While waiting for Google, check with the server regularly (see `GOOGLE_POLL_MS`). Client
@@ -240,9 +239,7 @@ pub fn Account() -> Element {
                 loop {
                     browser::sleep(GOOGLE_POLL_MS).await;
                     if auth.google.peek().is_some()
-                        && sender
-                            .unbounded_send(GoogleCallbackMessage::Relayed)
-                            .is_err()
+                        && sender.unbounded_send(GoogleEvent::Check).is_err()
                     {
                         break;
                     }
@@ -285,42 +282,75 @@ pub fn Account() -> Element {
     }
 }
 
-/// Handles one Google callback message, if this window is waiting for one.
-async fn handle_google_message(auth: Auth, message: GoogleCallbackMessage) {
+/// Something for the Google flow to react to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GoogleEvent {
+    /// The callback page's message.
+    Message(GoogleCallbackMessage),
+    /// Time to re-check `me()` (see `GOOGLE_POLL_MS`).
+    Check,
+}
+
+/// Whether the account now shows the Google flow as complete.
+fn google_complete(intent: GoogleIntent, me: &Me) -> bool {
+    match intent {
+        // Waiting started signed out: any account now means the sign-in went through.
+        GoogleIntent::SignIn => true,
+        GoogleIntent::Link => me.google_linked,
+    }
+}
+
+/// Handles one Google event, if this window is waiting for Google.
+async fn handle_google_event(auth: Auth, event: GoogleEvent) {
     let Some(intent) = auth.google.peek().as_ref().copied() else {
         // Not waiting (already handled, or the user pressed Cancel). A late `done` still means
         // the session changed server-side: reload so the panel matches it.
-        if message == GoogleCallbackMessage::Done && auth.busy.peek().is_none() {
+        if event == GoogleEvent::Message(GoogleCallbackMessage::Done) && auth.busy.peek().is_none()
+        {
             auth.load().await;
         }
         return;
     };
-    if let GoogleCallbackMessage::Error { message } = message {
-        auth.end_google();
-        auth.fail(Notice::Error(message));
-        return;
-    }
-    // `done` (finished by a popup sharing our session) or `relayed` / a poll (the code may be
-    // waiting on the server): ask the server where the flow stands.
-    let progress = google_finish().await;
+    let announced_done = match event {
+        GoogleEvent::Message(GoogleCallbackMessage::Error { message }) => {
+            auth.end_google();
+            auth.fail(Notice::Error(message));
+            return;
+        }
+        GoogleEvent::Message(GoogleCallbackMessage::Done) => true,
+        GoogleEvent::Check => false,
+    };
+    // The callback completes the flow in the browser context that holds our session cookie;
+    // all the app has to do is look at the account again.
+    let result = me().await;
     if auth.google.peek().is_none() {
         // Cancelled meanwhile.
         return;
     }
-    match progress {
-        Ok(GoogleProgress::Pending) => {}
-        Ok(GoogleProgress::Finished(me)) => {
+    let success = match intent {
+        GoogleIntent::SignIn => None,
+        GoogleIntent::Link => Some("Google account linked."),
+    };
+    match result {
+        Ok(me) if google_complete(intent, &me) => {
             auth.end_google();
-            match intent {
-                GoogleIntent::Link if !me.google_linked => {
-                    auth.finish(Ok(me), None);
-                    auth.notice.clone().set(Some(Notice::Error(
-                        "Google was not linked. Please try again.".to_owned(),
-                    )));
-                }
-                GoogleIntent::Link => auth.finish(Ok(me), Some("Google account linked.")),
-                GoogleIntent::SignIn => auth.finish(Ok(me), None),
-            }
+            auth.finish(Ok(me), success);
+        }
+        // Not there yet: keep waiting, unless the popup said it was done.
+        _ if !announced_done => {}
+        Ok(me) => {
+            auth.end_google();
+            auth.finish(Ok(me), None);
+            let mut notice = auth.notice;
+            notice.set(Some(Notice::Error(
+                "Google was not linked. Please try again.".to_owned(),
+            )));
+        }
+        Err(error) if is_signed_out_error(&error) => {
+            auth.end_google();
+            auth.fail(Notice::Error(
+                "Google sign-in did not complete. Please try again.".to_owned(),
+            ));
         }
         Err(error) => {
             auth.end_google();
