@@ -4,14 +4,13 @@
 //! The server maps every failure to a status and a short message that is safe to show
 //! (`crate::server::api::ApiError`), in one body shape for every `/api/` route
 //! (`crate::server::api::errors_layer`). The Dioxus client decodes it as
-//! `ServerFnError::ServerError { code, message, details }`, with our message in
-//! `details.ServerError.message`. A response from anything else (a proxy, a gateway) can also
-//! arrive as a bare `ServerFnError::Request(RequestError::Status(_, code))`.
+//! `ServerFnError::ServerError { message, code, details }`: our message and our details are that
+//! variant's own fields. A response that is not ours (a proxy, a gateway, a panic) arrives with
+//! `message` = `HTTP {code}: {text}`, or as a bare `RequestError::Status(_, code)`.
 //!
 //! [`ApiFailure::classify`] handles all of them, plus network failures, which never reached the
-//! server. It only shows our structured message, never the `message` or `Display` text of the
-//! `ServerFnError`, which can be Dioxus's own text (`error running server function: …`) or a
-//! proxy's page.
+//! server. It shows our message for 4xx and 503 answers and a generic one otherwise: never a
+//! `HTTP …` text or the `Display` of the error.
 
 use dioxus::fullstack::RequestError;
 use dioxus::prelude::ServerFnError;
@@ -76,8 +75,8 @@ pub struct ApiFailure {
     pub kind: FailureKind,
     /// The message to show the user.
     pub message: String,
-    /// Structured details some errors carry for the UI (e.g. the list of problems in a program
-    /// document), from `details.ServerError.details`.
+    /// Structured details some errors carry for the UI (the list of problems in a program
+    /// document, a 429's `retry_after_secs`).
     pub details: Option<Value>,
 }
 
@@ -87,23 +86,25 @@ impl ApiFailure {
     #[must_use]
     pub fn classify(error: &ServerFnError) -> Self {
         match error {
-            ServerFnError::ServerError { code, details, .. } => {
+            ServerFnError::ServerError {
+                code,
+                message,
+                details,
+            } => {
                 let kind = FailureKind::from_status(*code);
-                let ours = details
-                    .as_ref()
-                    .and_then(|details| details.get("ServerError"));
-                let message = match (kind, ours.and_then(|inner| inner.get("message"))) {
+                let not_ours = message.starts_with(&format!("HTTP {code}:"));
+                let message = if kind == FailureKind::Other {
                     // A 500's message is generic on our server; anything else's is unknown.
-                    (FailureKind::Other, _) => GENERIC_MESSAGE.to_owned(),
-                    (_, Some(Value::String(message))) if !message.trim().is_empty() => {
-                        message.clone()
-                    }
-                    _ => default_message(kind).to_owned(),
+                    GENERIC_MESSAGE.to_owned()
+                } else if not_ours || message.trim().is_empty() {
+                    default_message(kind).to_owned()
+                } else {
+                    message.clone()
                 };
                 Self {
                     kind,
                     message,
-                    details: ours.and_then(|inner| inner.get("details")).cloned(),
+                    details: if not_ours { None } else { details.clone() },
                 }
             }
             ServerFnError::Request(RequestError::Status(_, code)) => {
@@ -124,6 +125,20 @@ impl ApiFailure {
             kind,
             message: default_message(kind).to_owned(),
             details: None,
+        }
+    }
+
+    /// For a `429`, how long to wait before retrying, from the details
+    /// (`{"retry_after_secs": n}`, see `docs/api.md`).
+    #[must_use]
+    pub fn retry_after_secs(&self) -> Option<u64> {
+        match self.kind {
+            FailureKind::RateLimited => self
+                .details
+                .as_ref()
+                .and_then(|details| details.get("retry_after_secs"))
+                .and_then(Value::as_u64),
+            _ => None,
         }
     }
 
@@ -159,15 +174,13 @@ const fn default_message(kind: FailureKind) -> &'static str {
 mod tests {
     use super::*;
 
-    /// A failure as the Dioxus client decodes our server's body: Dioxus's own text in
-    /// `message`, ours in `details.ServerError.message`.
+    /// A failure from our server as the Dioxus client decodes it (see
+    /// `server::api::errors_layer::tests`, which goes through the real decoder).
     fn server(code: u16, message: &str) -> ServerFnError {
         ServerFnError::ServerError {
-            message: format!("error running server function: {message} (details: None)"),
+            message: message.to_owned(),
             code,
-            details: Some(
-                serde_json::json!({ "ServerError": { "message": message, "code": code } }),
-            ),
+            details: None,
         }
     }
 
@@ -202,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_servers_structured_message_is_shown() {
+    fn our_message_is_shown_for_4xx_and_503_only() {
         assert_eq!(
             ApiFailure::classify(&server(409, "This session has already ended.")).message,
             "This session has already ended."
@@ -211,7 +224,6 @@ mod tests {
             ApiFailure::classify(&server(422, "Invalid request.")).message,
             "Invalid request."
         );
-        // A 500 message is generic on our server, but a proxy's could be anything.
         assert_eq!(
             ApiFailure::classify(&server(500, "stack trace")).message,
             GENERIC_MESSAGE
@@ -224,38 +236,40 @@ mod tests {
             ApiFailure::classify(&status(401)).message,
             "Please sign in."
         );
-        // Without our structured message, the raw text is never shown.
-        let raw = ServerFnError::ServerError {
-            message: "HTTP 502: <html>Bad gateway</html>".to_owned(),
-            code: 502,
-            details: None,
-        };
+        // Not ours: a proxy's page or a panic, decoded by the client's fallback.
+        let raw = server(502, "HTTP 502: <html>Bad gateway</html>");
         assert_eq!(ApiFailure::classify(&raw).message, TRANSIENT_MESSAGE);
         let raw = ServerFnError::ServerError {
-            message: "error running server function: Taken. (details: None)".to_owned(),
+            message: "HTTP 409: plain text".to_owned(),
             code: 409,
-            details: Some(serde_json::json!({ "other": 1 })),
+            details: Some(serde_json::json!("x")),
         };
+        let failure = ApiFailure::classify(&raw);
         assert_eq!(
-            ApiFailure::classify(&raw).message,
+            failure.message,
             "This conflicts with data that is already saved."
         );
+        assert_eq!(failure.details, None);
     }
 
     #[test]
-    fn structured_details_are_passed_on() {
+    fn details_and_retry_after_are_passed_on() {
         let error = ServerFnError::ServerError {
-            message: "x".to_owned(),
+            message: "Invalid program.".to_owned(),
             code: 422,
-            details: Some(serde_json::json!({
-                "ServerError": { "message": "Invalid program.", "code": 422, "details": ["a"] }
-            })),
+            details: Some(serde_json::json!(["a"])),
         };
         let failure = ApiFailure::classify(&error);
-        assert_eq!(failure.message, "Invalid program.");
         assert_eq!(failure.details, Some(serde_json::json!(["a"])));
+        assert_eq!(failure.retry_after_secs(), None);
+        let limited = ServerFnError::ServerError {
+            message: "Too many requests.".to_owned(),
+            code: 429,
+            details: Some(serde_json::json!({ "retry_after_secs": 12 })),
+        };
+        assert_eq!(ApiFailure::classify(&limited).retry_after_secs(), Some(12));
         assert_eq!(
-            ApiFailure::classify(&server(404, "Not found.")).details,
+            ApiFailure::classify(&server(429, "x")).retry_after_secs(),
             None
         );
     }
