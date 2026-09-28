@@ -219,8 +219,8 @@ jobs:
           isolation=$(grep -cE '^test server::db::\w+::tests::\w*(another_users|users_only|nobody_can|two_users|only_the_users)\w* \.\.\. ok$' "$RUNNER_TEMP/server-tests.log" || true)
           echo "schema tests passed: $schema, isolation tests passed: $isolation"
           # Floors: today's counts. Raise them when adding tests; lowering one needs a reason.
-          if [ "$schema" -lt 20 ] || [ "$isolation" -lt 9 ]; then
-            echo "::error::isolation or schema tests missing (schema $schema < 20 or isolation $isolation < 9)"; exit 1
+          if [ "$schema" -lt 20 ] || [ "$isolation" -lt 10 ]; then
+            echo "::error::isolation or schema tests missing (schema $schema < 20 or isolation $isolation < 10)"; exit 1
           fi
 
   # Builds the release bundle exactly as the Dockerfile (#7) will, then runs the server and checks

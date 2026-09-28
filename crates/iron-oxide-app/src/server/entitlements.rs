@@ -52,8 +52,8 @@ pub enum EntitlementError {
 impl EntitlementError {
     /// The HTTP status and the message shown to the user.
     ///
-    // TODO(#68): map to `ApiError::Forbidden` (403) / `Unauthorized` / `Transient` / `Internal`
-    // once #68's API conventions land, and drop this local mapping.
+    // TODO(#68): map to `ApiError::Forbidden(message)` (403) / `Unauthorized` / `Transient` /
+    // `Internal` once #68's API conventions (PR #71) land, and drop this local mapping.
     #[must_use]
     pub fn public(&self) -> (u16, String) {
         match self {
