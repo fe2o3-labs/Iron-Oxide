@@ -18,12 +18,15 @@ const ASSETS_PREFIX: &str = "/assets/";
 
 /// Axum middleware: replaces the SSR fallback page served under `/assets/` with a 404.
 ///
+/// The 404 is `Cache-Control: no-store`: the asset may appear once the deploy has finished rolling
+/// out, so no browser or proxy should remember its absence.
+///
 /// Apply it to the whole router with `axum::middleware::from_fn(missing_assets_are_not_found)`.
 pub async fn missing_assets_are_not_found(request: Request, next: Next) -> Response {
     let is_asset_path = request.uri().path().starts_with(ASSETS_PREFIX);
     let response = next.run(request).await;
     if is_asset_path && is_html(&response) {
-        StatusCode::NOT_FOUND.into_response()
+        (StatusCode::NOT_FOUND, [(header::CACHE_CONTROL, "no-store")]).into_response()
     } else {
         response
     }
@@ -66,11 +69,15 @@ mod tests {
             .layer(from_fn(missing_assets_are_not_found))
     }
 
-    async fn get_status(path: &str) -> (StatusCode, Option<HeaderValue>) {
-        let response = app()
+    async fn request(path: &str) -> Response {
+        app()
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    async fn get_status(path: &str) -> (StatusCode, Option<HeaderValue>) {
+        let response = request(path).await;
         (
             response.status(),
             response.headers().get(header::CONTENT_TYPE).cloned(),
@@ -81,6 +88,26 @@ mod tests {
     async fn unknown_asset_is_404() {
         let (status, _) = get_status("/assets/app-dxh999.js").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn unknown_asset_404_is_not_stored() {
+        let response = request("/assets/app-dxh999.js").await;
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+    }
+
+    #[tokio::test]
+    async fn known_asset_and_app_pages_are_not_marked_no_store() {
+        for path in ["/assets/app-dxh123.js", "/"] {
+            let response = request(path).await;
+            assert!(
+                response.headers().get(header::CACHE_CONTROL).is_none(),
+                "{path}"
+            );
+        }
     }
 
     #[tokio::test]

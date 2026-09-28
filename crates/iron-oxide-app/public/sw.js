@@ -48,17 +48,25 @@ const HASHED_PREFIXES = ["/assets/"];
 // qualifies:
 //   * status 200 exactly: `ok` also covers 206 Partial Content, which `cache.put` rejects;
 //   * not redirected: an auth middleware may redirect to a login page;
-//   * never HTML: the Dioxus server answers unknown paths, /assets/ included, with the SSR page
-//     (200 text/html). During a deploy, a request for a new asset can reach an old server. Caching
-//     that page under a JS or wasm URL would break the app until the next deploy, and the page may
-//     contain the user's data.
+//   * a Content-Type that is present and not HTML/XHTML: the Dioxus server answers unknown paths
+//     with the SSR page (200 text/html). The server now 404s unknown /assets/ paths, but during a
+//     deploy a request for a new asset can reach an old server or a proxy that still does this.
+//     Caching that page under a JS or wasm URL would break the app until the next deploy, and the
+//     page may contain the user's data. A response without a Content-Type is not trusted either.
+const HTML_MEDIA_TYPES = ["text/html", "application/xhtml+xml"];
+
 function isCacheable(response) {
-  const contentType = response.headers.get("Content-Type") || "";
+  const contentType = response.headers.get("Content-Type");
+  if (!contentType) {
+    return false;
+  }
+  const mediaType = contentType.split(";")[0].trim().toLowerCase();
   return (
     response.status === 200 &&
     !response.redirected &&
     response.type === "basic" &&
-    !contentType.toLowerCase().startsWith("text/html")
+    mediaType !== "" &&
+    !HTML_MEDIA_TYPES.includes(mediaType)
   );
 }
 

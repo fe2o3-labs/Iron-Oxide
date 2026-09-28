@@ -113,11 +113,12 @@ unhashed file in `public/` (icons, manifest) changes. What the service worker ca
   responses are never cached.
 - Anything that is not a same-origin `GET`, and everything under `/api/` or `/auth/`: network-only,
   never cached.
-- Only complete, direct, non-HTML responses are cached (status 200, not redirected). `Range`
-  requests go straight to the network.
+- Only complete, direct responses with a non-HTML `Content-Type` are cached (status 200, not
+  redirected; a missing `Content-Type` is not cached). `Range` requests go straight to the network.
+  Unit tests: `node --test crates/iron-oxide-app/tests/sw`.
 
-The server answers `404` for unknown `/assets/…` paths (`src/pwa/missing_assets.rs`) instead of the
-SSR page that Dioxus serves for every other unknown path.
+The server answers `404` (with `Cache-Control: no-store`) for unknown `/assets/…` paths
+(`src/pwa/missing_assets.rs`) instead of the SSR page that Dioxus serves for every other unknown path.
 
 ## Release build
 
