@@ -149,9 +149,10 @@ Rules:
   - A retry (same id, same `started_at`) returns the session it created, even after it ended. The
     day is never recomputed.
   - The same id with another `started_at` is `409`.
-  - `409` when another session is in progress: the user must finish or abandon it first. Two
-    devices starting at the same instant can both get through. The user then ends one of the two
-    sessions.
+  - `409` when another session is in progress: the user must finish or abandon it first. The
+    database enforces it too, with a partial unique index (`workout_sessions_one_in_progress_idx`):
+    of two devices starting different sessions at the same instant, exactly one succeeds and the
+    other gets the same `409`.
   - `409` with no active program.
   - `409` for a rotation that repeats a day. Programs allow it, but `next_day` does not support it
     yet.

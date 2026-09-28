@@ -205,6 +205,11 @@ types mirror them field for field, and switch to them once they are merged.
 | `sessions` | `start` (idempotent), `finish` (idempotent), `get`, `get_in_progress`, `list` (history pages by `(started_at, id)`, optionally for one program) |
 | `sets` | `upsert_idempotent`, `list_for_session`, `completed_for_exercise` (sets of one exercise after a time, in completed sessions of any version of a program: the progression input of #57, served by the `(user_id, exercise_id, completed_at)` index) |
 
+A user has at most one session in progress: the partial unique index
+`workout_sessions_one_in_progress_idx` on `workout_sessions (user_id) WHERE status =
+'in_progress'` refuses a second one (`RepoError::SessionInProgress`, a 409), even for concurrent
+starts.
+
 Rules that span rows and are checked by the domain (`SessionLog`, #54) before a write, not by the
 database: a set completed before its session started or after it ended.
 

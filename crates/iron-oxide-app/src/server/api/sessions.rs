@@ -32,7 +32,7 @@ use iron_oxide_domain::{
 };
 use sqlx::PgPool;
 
-use super::{ApiError, offset_date_time, timestamp};
+use super::{ApiError, error::SESSION_IN_PROGRESS, offset_date_time, timestamp};
 use crate::api::sessions::{
     NextSessionPlan, PlannedExercise, SessionPlan, SessionSummary, SessionView, SessionWithSets,
 };
@@ -66,14 +66,12 @@ pub async fn start(
         Err(RepoError::NotFound) => {}
         Err(error) => return Err(error.into()),
     }
-    // Two devices starting two different sessions at the same moment can both pass this check;
-    // the sessions then both exist and the user ends one of them.
+    // Two devices starting two different sessions at the same moment can both pass this check:
+    // the database's one-in-progress index then refuses the second insert, with the same 409.
     if let Some(current) = db::sessions::get_in_progress(pool, owner).await?
         && current.id != id.into()
     {
-        return Err(ApiError::conflict(
-            "Another session is in progress. Finish or abandon it first.",
-        ));
+        return Err(ApiError::conflict(SESSION_IN_PROGRESS));
     }
     let next = Next::load(pool, owner).await?;
     let new = db::sessions::NewSession {
@@ -1654,6 +1652,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(all.len(), 1);
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn concurrent_starts_of_different_sessions_let_exactly_one_through(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let a = api.user("A").await;
+        active_program(&api, &a).await;
+        for round in 0..5 {
+            let tasks: Vec<_> = (0..2)
+                .map(|_| {
+                    let mut user = a.clone();
+                    tokio::spawn(
+                        async move { start(&mut user, SessionId::new_v7(), t(round)).await },
+                    )
+                })
+                .collect();
+            let mut started = Vec::new();
+            for task in tasks {
+                match task.await.unwrap() {
+                    Ok(view) => started.push(view),
+                    Err(error) => assert_eq!(
+                        error,
+                        CallError {
+                            status: StatusCode::CONFLICT,
+                            message: SESSION_IN_PROGRESS.to_owned(),
+                        }
+                    ),
+                }
+            }
+            assert_eq!(started.len(), 1, "round {round}");
+            let in_progress: Vec<_> = db::sessions::list(&api.db, a.id, None, None, 100)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|session| session.status == db::sessions::SessionStatus::InProgress)
+                .collect();
+            assert_eq!(in_progress.len(), 1);
+            let mut user = a.clone();
+            finish(
+                &mut user,
+                started[0].id,
+                SessionOutcome::Abandoned,
+                t(round + 1),
+            )
+            .await
+            .unwrap();
+        }
     }
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]

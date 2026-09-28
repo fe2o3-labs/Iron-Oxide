@@ -388,6 +388,11 @@ mod tests {
     #[ignore = "needs Postgres"]
     async fn same_id_and_content_is_one_row_and_different_content_conflicts(pool: PgPool) {
         let user = testing::user(&pool).await;
+        // An earlier, ended session (one session in progress at a time).
+        let other_session = testing::session(&pool, user).await;
+        sessions::finish(&pool, user, other_session, SessionOutcome::Abandoned, at(1))
+            .await
+            .unwrap();
         let session = testing::session(&pool, user).await;
         let set = new_set(session);
         assert_eq!(
@@ -400,7 +405,6 @@ mod tests {
                 Change::Unchanged
             );
         }
-        let other_session = testing::session(&pool, user).await;
         for different in [
             LoggedSet {
                 reps: 4,
@@ -750,8 +754,9 @@ mod tests {
         let (_, other_squat) = log(other_version, "back-squat", 4, done).await;
         let (_, _abandoned) = log(v2, "back-squat", 5, Some(SessionOutcome::Abandoned)).await;
         let (_, _skipped) = log(v2, "back-squat", 6, Some(SessionOutcome::Skipped)).await;
-        let (current, _in_progress) = log(v2, "back-squat", 7, None).await;
+        // Logged before the one in progress: one session in progress at a time.
         let (_, _later) = log(v1, "back-squat", 8, done).await;
+        let (current, _in_progress) = log(v2, "back-squat", 7, None).await;
 
         let in_program = completed_in_program(&pool, user, program).await.unwrap();
         assert_eq!(
@@ -931,7 +936,12 @@ mod tests {
             let (pool_2, set_2) = (pool.clone(), set.clone());
             let save = tokio::spawn(async move { upsert_idempotent(&pool_2, user, &set_2).await });
             assert_eq!(start.await.unwrap().unwrap(), Change::Applied);
-            match save.await.unwrap() {
+            let saved = save.await.unwrap();
+            // Ended, so the next round can start one (one session in progress at a time).
+            sessions::finish(&pool, user, session.id, SessionOutcome::Abandoned, at(120))
+                .await
+                .unwrap();
+            match saved {
                 Ok(change) => {
                     assert_eq!(change, Change::Applied);
                     assert_eq!(

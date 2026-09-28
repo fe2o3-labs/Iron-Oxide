@@ -20,6 +20,10 @@ pub enum RepoError {
     /// The session has ended: no new set can be added to it.
     #[error("the session has already ended")]
     SessionEnded,
+    /// The user already has another session in progress (at most one at a time, enforced by the
+    /// `workout_sessions_one_in_progress_idx` index).
+    #[error("another session is in progress")]
+    SessionInProgress,
     /// A concurrent write got in the way and nothing was saved: retrying the same request is safe
     /// and expected to succeed (a client retry queue treats it as transient, like a timeout).
     #[error("please try again")]
