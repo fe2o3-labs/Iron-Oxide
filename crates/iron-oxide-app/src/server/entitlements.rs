@@ -2,9 +2,8 @@
 //!
 //! The policy itself lives in `iron_oxide_domain::entitlements` (`allows`, `limit`, `can_add`);
 //! this module reads the signed-in user's plan from `users.plan` and turns a refusal into a
-//! `403`. Server functions gate with [`require`] / [`require_quota`], or, inside a transaction,
-//! read the plan with `db::users::plan` and call [`check`] / [`check_quota`]. Nothing else
-//! looks at a plan.
+//! `403`. Server functions gate a feature with [`require`], and every write that takes a quota
+//! slot with [`reserve_quota`], inside the transaction that writes. Nothing else looks at a plan.
 //!
 //! The plan is read on every call and never cached, so flipping `users.plan` (billing, or an
 //! operator in SQL) changes what the user may do on their next request.
@@ -20,7 +19,7 @@
 use dioxus::logger::tracing;
 use dioxus::prelude::ServerFnError;
 use iron_oxide_domain::entitlements::{self as policy, Entitlements, Feature, Limit, Plan, Quota};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use super::{
     auth::AuthUser,
@@ -129,6 +128,9 @@ pub fn check(plan: Plan, feature: Feature) -> Result<(), EntitlementError> {
 }
 
 /// Succeeds when a user on `plan` who already has `used` of `quota` may add one more.
+///
+/// The pure check. A write that takes a slot uses [`reserve_quota`], which counts `used` under the
+/// user's row lock.
 pub fn check_quota(plan: Plan, quota: Quota, used: u32) -> Result<(), EntitlementError> {
     if policy::can_add(plan, quota, used) {
         Ok(())
@@ -157,20 +159,36 @@ pub async fn require(
     Ok(plan)
 }
 
-/// Fails with `403` unless the signed-in user, who already has `used` of `quota`, may add one
-/// more. Returns the plan.
+/// Takes one slot of `quota` for the signed-in user, or fails with `403` when their plan's limit
+/// is reached. Returns the plan.
 ///
-/// Count `used` and write in the same transaction, locking the user's row first (`SELECT … FOR
-/// UPDATE` on `users`), or two concurrent requests can both pass the check. `db::users::plan`
-/// takes a transaction for that; call [`check_quota`] with the result.
+/// Call it inside the transaction that then adds the row, **before** writing: it locks the user's
+/// row (`SELECT … FROM users … FOR UPDATE`, held until the transaction ends), reads the plan, and
+/// counts what the quota counts, all under that lock. Two concurrent requests for the same user
+/// are therefore serialised: the second one counts the first one's row and is refused at the cap.
+/// Counting on a pool outside such a transaction is always racy, so there is no pool variant.
+///
+/// Every write that raises a quota's count must go through it. For
+/// [`Quota::CustomPrograms`] (unarchived programs the user owns): creating or uploading a new
+/// program, copying a built-in, and **unarchiving** a program. Archiving, renaming, adding a
+/// version to an existing program and an idempotent replay (the same creation id, answered from
+/// the existing row) take no slot: check for the replay first, so a retry is never refused.
+///
+/// A user over the cap (a downgrade from pro) keeps every program and can use and archive them,
+/// but cannot add or unarchive one until they are under the cap.
 #[allow(dead_code, reason = "called by the program server functions of #19")]
-pub async fn require_quota(
-    db: &PgPool,
+pub async fn reserve_quota(
+    tx: &mut PgConnection,
     user: AuthUser,
     quota: Quota,
-    used: u32,
 ) -> Result<Plan, EntitlementError> {
-    let plan = plan_of(db, user).await?;
+    let id = db::ids::UserId::from_uuid(user.user_id().as_uuid());
+    let plan = db::users::lock_plan(&mut *tx, id)
+        .await?
+        .ok_or(EntitlementError::UnknownUser)?;
+    let used = match quota {
+        Quota::CustomPrograms => db::users::unarchived_programs(&mut *tx, id).await?,
+    };
     check_quota(plan, quota, used)?;
     Ok(plan)
 }
@@ -283,13 +301,13 @@ mod tests {
         let id = testing::user(&pool).await;
         let user = auth_user(id);
         let q = Quota::CustomPrograms;
-        let full = FREE_CUSTOM_PROGRAMS;
+        add_programs(&pool, id, FREE_CUSTOM_PROGRAMS, false).await;
 
         assert_eq!(
             entitlements_of(&pool, user).await.unwrap(),
             Entitlements::of(Plan::Free)
         );
-        let (status, _) = code(require_quota(&pool, user, q, full).await.unwrap_err());
+        let (status, _) = code(reserve(&pool, user, q).await.unwrap_err());
         assert_eq!(status, 403);
 
         set_plan(&pool, id, Plan::Pro).await;
@@ -297,14 +315,133 @@ mod tests {
             entitlements_of(&pool, user).await.unwrap(),
             Entitlements::of(Plan::Pro)
         );
-        assert_eq!(
-            require_quota(&pool, user, q, full).await.unwrap(),
-            Plan::Pro
-        );
+        assert_eq!(reserve(&pool, user, q).await.unwrap(), Plan::Pro);
 
         set_plan(&pool, id, Plan::Free).await;
         assert_eq!(plan_of(&pool, user).await.unwrap(), Plan::Free);
-        assert!(require_quota(&pool, user, q, full).await.is_err());
+        assert!(reserve(&pool, user, q).await.is_err());
+    }
+
+    /// Adds `n` programs owned by `user`, as the program server functions will (#19).
+    async fn add_programs(pool: &PgPool, user: db::ids::UserId, n: u32, archived: bool) {
+        for _ in 0..n {
+            insert_program(&mut pool.acquire().await.unwrap(), user, archived).await;
+        }
+    }
+
+    async fn insert_program(conn: &mut PgConnection, user: db::ids::UserId, archived: bool) {
+        sqlx::query(
+            "INSERT INTO programs (user_id, creation_id, name, archived)
+             VALUES ($1, $2, 'Program', $3)",
+        )
+        .bind(user.as_uuid())
+        .bind(testing::random_uuid())
+        .bind(archived)
+        .execute(conn)
+        .await
+        .unwrap();
+    }
+
+    /// [`reserve_quota`] in a transaction of its own, rolled back.
+    async fn reserve(
+        pool: &PgPool,
+        user: AuthUser,
+        quota: Quota,
+    ) -> Result<Plan, EntitlementError> {
+        let mut tx = pool.begin().await.unwrap();
+        let result = reserve_quota(&mut tx, user, quota).await;
+        tx.rollback().await.unwrap();
+        result
+    }
+
+    /// The recipe for every quota write (#19): reserve, then insert, in one transaction. Two
+    /// concurrent "create" requests of a free user at 9 programs end at 10, never 11.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn two_concurrent_reservations_cannot_both_take_the_last_slot(pool: PgPool) {
+        let id = testing::user(&pool).await;
+        let user = auth_user(id);
+        add_programs(&pool, id, FREE_CUSTOM_PROGRAMS - 1, false).await;
+
+        // A reserves the last slot and holds the user's row lock.
+        let mut a = pool.begin().await.unwrap();
+        reserve_quota(&mut a, user, Quota::CustomPrograms)
+            .await
+            .unwrap();
+
+        // B, concurrently, must wait for A's lock rather than count 9 too.
+        let b = tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                let mut b = pool.begin().await.unwrap();
+                let result = reserve_quota(&mut b, user, Quota::CustomPrograms).await;
+                if result.is_ok() {
+                    insert_program(&mut b, id, false).await;
+                }
+                b.commit().await.unwrap();
+                result
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!b.is_finished(), "B must block on A's row lock");
+
+        insert_program(&mut a, id, false).await;
+        a.commit().await.unwrap();
+
+        let error = b.await.unwrap().unwrap_err();
+        assert!(
+            matches!(error, EntitlementError::QuotaReached { used: 10, .. }),
+            "{error:?}"
+        );
+        let count = db::users::unarchived_programs(&pool, id).await.unwrap();
+        assert_eq!(count, FREE_CUSTOM_PROGRAMS);
+    }
+
+    /// Unarchiving takes a slot; archived programs do not count; a downgraded user over the cap
+    /// keeps everything but cannot add or unarchive until under the cap.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn only_unarchived_programs_count_and_a_downgrade_keeps_everything(pool: PgPool) {
+        let id = testing::user(&pool).await;
+        let user = auth_user(id);
+        let q = Quota::CustomPrograms;
+        add_programs(&pool, id, 5, true).await;
+        add_programs(&pool, id, FREE_CUSTOM_PROGRAMS - 1, false).await;
+        assert_eq!(
+            db::users::unarchived_programs(&pool, id).await.unwrap(),
+            FREE_CUSTOM_PROGRAMS - 1
+        );
+        // One slot left: unarchiving one is allowed, a second is not.
+        assert!(reserve(&pool, user, q).await.is_ok());
+        sqlx::query(
+            "UPDATE programs SET archived = false
+             WHERE id = (SELECT id FROM programs WHERE user_id = $1 AND archived LIMIT 1)",
+        )
+        .bind(id.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(reserve(&pool, user, q).await.is_err());
+
+        // Pro goes over the cap, then is downgraded: nothing is removed, nothing more is allowed.
+        set_plan(&pool, id, Plan::Pro).await;
+        add_programs(&pool, id, 3, false).await;
+        set_plan(&pool, id, Plan::Free).await;
+        assert_eq!(
+            db::users::unarchived_programs(&pool, id).await.unwrap(),
+            FREE_CUSTOM_PROGRAMS + 3
+        );
+        assert!(reserve(&pool, user, q).await.is_err());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn nobody_can_reserve_without_an_account(pool: PgPool) {
+        let ghost = auth_user(db::ids::UserId::from_uuid(testing::random_uuid()));
+        let error = reserve(&pool, ghost, Quota::CustomPrograms)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, EntitlementError::UnknownUser));
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]

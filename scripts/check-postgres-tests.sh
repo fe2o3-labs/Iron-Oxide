@@ -21,7 +21,7 @@ schema=$(grep -cE '^test server::db::schema_tests::\S+ \.\.\. ok$' "$log" || tru
 isolation=$(grep -cE '^test server::db::\w+::tests::\w*(another_users|users_only|nobody_can|two_users|only_the_users)\w* \.\.\. ok$' "$log" || true)
 echo "schema tests passed: $schema, isolation tests passed: $isolation"
 # Floors: today's counts. Raise them when adding tests; lowering one needs a reason.
-if [ "$schema" -lt 20 ] || [ "$isolation" -lt 10 ]; then
-  echo "::error::isolation or schema tests missing (schema $schema < 20 or isolation $isolation < 10)"
+if [ "$schema" -lt 20 ] || [ "$isolation" -lt 11 ]; then
+  echo "::error::isolation or schema tests missing (schema $schema < 20 or isolation $isolation < 11)"
   exit 1
 fi

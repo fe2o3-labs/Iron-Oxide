@@ -72,7 +72,8 @@ impl FromStr for Plan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
-    /// Uploading your own `program.json` (#19, #35). Copying a built-in program is never gated.
+    /// Uploading your own `program.json` (#19, #35). Copying a built-in is not behind a feature,
+    /// but the copy counts toward [`Quota::CustomPrograms`] like an upload.
     UploadPrograms,
     /// Per-exercise progress charts in the history (#33). The session list is never gated.
     ExerciseCharts,
@@ -87,8 +88,9 @@ impl Feature {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Quota {
-    /// Programs the user owns and has not archived (uploaded, or copied from a built-in).
-    /// Programs are archived, never deleted, so archiving one frees a slot.
+    /// Programs the user owns and has not archived: uploaded ones and copies of built-ins alike.
+    /// Programs are archived, never deleted, so archiving one frees a slot and unarchiving one
+    /// takes a slot.
     CustomPrograms,
 }
 
