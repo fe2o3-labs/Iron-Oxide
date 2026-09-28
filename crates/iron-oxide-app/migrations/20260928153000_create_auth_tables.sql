@@ -2,6 +2,9 @@
 -- Every row that belongs to a user is deleted with the user (ON DELETE CASCADE, #22).
 -- See docs/auth.md for the design.
 --
+-- Row ids are UUIDv7 (`uuidv7()`, Postgres 18; #65). Nothing secret is a UUIDv7: session ids and the
+-- OAuth state, nonce and PKCE verifier are cryptographically random.
+--
 -- Like every user-owned table (#17): `user_id` cascades from `users`, is indexed, and never
 -- changes once written (trigger `forbid_owner_change`).
 
@@ -20,7 +23,7 @@ $$;
 
 -- WebAuthn credentials (passkeys). A user may have several.
 CREATE TABLE passkeys (
-    id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    id              uuid        PRIMARY KEY DEFAULT uuidv7(),
     user_id         uuid        NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     -- The raw credential ID chosen by the authenticator. Unique across all users: a credential
     -- can never be registered to two accounts.
@@ -45,7 +48,7 @@ CREATE TRIGGER passkeys_owner BEFORE UPDATE OF user_id ON passkeys
 CREATE TYPE oauth_provider AS ENUM ('google');
 
 CREATE TABLE oauth_identities (
-    id         uuid           PRIMARY KEY DEFAULT gen_random_uuid(),
+    id         uuid           PRIMARY KEY DEFAULT uuidv7(),
     user_id    uuid           NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     provider   oauth_provider NOT NULL,
     subject    text           NOT NULL CHECK (char_length(subject) BETWEEN 1 AND 255),

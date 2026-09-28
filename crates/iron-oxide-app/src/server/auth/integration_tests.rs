@@ -69,6 +69,12 @@ async fn sign_up_then_sign_out_then_sign_in_with_the_passkey(db: PgPool) {
 
     let (me1, credential_id) = sign_up(&mut browser, &mut passkey, " Jules ").await;
     assert_eq!(me1.display_name.as_deref(), Some("Jules"));
+    assert_eq!(
+        me1.user_id.as_uuid().get_version_num(),
+        7,
+        "UUIDv7 ids (#65)"
+    );
+    assert_eq!(me1.passkeys[0].id.as_uuid().get_version_num(), 7);
     assert_eq!(me1.passkeys.len(), 1);
     assert!(!me1.google_linked);
     assert_eq!(me(&mut browser).await.unwrap(), me1);
@@ -690,6 +696,11 @@ async fn google_sign_in_creates_then_finds_the_account_by_sub(db: PgPool) {
         .await
         .unwrap();
     let first = me(&mut browser).await.unwrap();
+    assert_eq!(
+        first.user_id.as_uuid().get_version_num(),
+        7,
+        "UUIDv7 ids (#65)"
+    );
     assert!(first.google_linked);
     assert!(first.passkeys.is_empty());
 

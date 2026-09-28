@@ -96,7 +96,7 @@ pub async fn sign_up_begin(
 ) -> Result<CreationChallengeResponse, AuthError> {
     let display_name = normalize_name(display_name)
         .map_err(|reason| AuthError::Invalid(format!("The name {reason}.")))?;
-    let user_id = Uuid::new_v4();
+    let user_id = Uuid::now_v7();
     let label = display_name.as_deref().unwrap_or(DEFAULT_ACCOUNT_NAME);
     let (ccr, registration) = ctx
         .auth
@@ -439,7 +439,7 @@ mod tests {
     fn ccr() -> CreationChallengeResponse {
         let webauthn = super::super::tests::webauthn();
         let (ccr, _) = webauthn
-            .start_passkey_registration(Uuid::new_v4(), "a", "a", None)
+            .start_passkey_registration(Uuid::now_v7(), "a", "a", None)
             .unwrap();
         ccr
     }

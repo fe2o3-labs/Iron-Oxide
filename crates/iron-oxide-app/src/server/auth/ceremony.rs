@@ -86,7 +86,7 @@ pub async fn start<T: Serialize>(
             .execute(pool)
             .await?;
     }
-    let id = Uuid::new_v4();
+    let id = Uuid::now_v7();
     let expires_at = OffsetDateTime::now_utc() + kind.ttl();
     sqlx::query!(
         "INSERT INTO auth_ceremonies (id, kind, user_id, state, expires_at)

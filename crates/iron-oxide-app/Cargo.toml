@@ -85,7 +85,7 @@ server = [
   "dep:tracing-subscriber",
   "dep:url",
   "dep:webauthn-rs",
-  "uuid/v4",
+  "uuid/v7",
 ]
 
 [lints]

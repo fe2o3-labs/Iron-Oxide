@@ -261,7 +261,7 @@ async fn sign_in_or_create(ctx: &AuthContext, subject: &str) -> Result<UserId, A
     }
 
     let mut tx = ctx.db().begin().await?;
-    let user = sqlx::query_scalar!("INSERT INTO users DEFAULT VALUES RETURNING id")
+    let user = sqlx::query_scalar!("INSERT INTO users (id) VALUES (uuidv7()) RETURNING id")
         .fetch_one(&mut *tx)
         .await?;
     let linked = sqlx::query_scalar!(
