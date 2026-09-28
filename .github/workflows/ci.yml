@@ -184,6 +184,7 @@ jobs:
     env:
       DATABASE_URL: postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide_test
       # Must match the `sqlx` version in Cargo.toml (held back on 0.8, see there).
+      # renovate: datasource=crate depName=sqlx-cli
       SQLX_CLI_VERSION: 0.8.6
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

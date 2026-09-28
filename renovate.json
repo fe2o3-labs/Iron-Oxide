@@ -42,6 +42,13 @@
       "groupName": "dioxus",
       "groupSlug": "dioxus",
       "automerge": false
+    },
+    {
+      "description": "sqlx is held on 0.8: tower-sessions-sqlx-store (Postgres sessions) depends on sqlx 0.8 and must share the app's PgPool. The sqlx crates and sqlx-cli (pinned in CI and the README) move together. Lift the cap once the store supports a newer sqlx.",
+      "matchPackageNames": ["sqlx", "/^sqlx-/"],
+      "allowedVersions": "<0.9",
+      "groupName": "sqlx",
+      "groupSlug": "sqlx"
     }
   ]
 }

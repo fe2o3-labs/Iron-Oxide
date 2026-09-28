@@ -107,6 +107,7 @@ The CLI is only needed to add migrations or refresh the query data below. Instal
 matches the `sqlx` crate:
 
 ```sh
+# renovate: datasource=crate depName=sqlx-cli
 cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features postgres,rustls
 sqlx migrate add <name> --source crates/iron-oxide-app/migrations
 sqlx migrate run --source crates/iron-oxide-app/migrations   # optional: the server does it too
@@ -124,8 +125,12 @@ cargo sqlx prepare --workspace -- --all-targets --features iron-oxide-app/server
 git add .sqlx
 ```
 
-CI fails if `.sqlx/` is missing a query or holds a stale one. To compile locally without a
-database, set `SQLX_OFFLINE=true`.
+CI fails if `.sqlx/` is missing a query or holds a stale one.
+
+Whenever `DATABASE_URL` is set (including from `.env`), the macros check queries against that live
+database instead of `.sqlx/`, so its schema must be migrated. On a fresh database, either run
+`sqlx migrate run --source crates/iron-oxide-app/migrations` before the first build, or build with
+`SQLX_OFFLINE=true`, which compiles from `.sqlx/` without a database.
 
 ### Tests that need Postgres
 
