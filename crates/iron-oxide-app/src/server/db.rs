@@ -36,6 +36,7 @@ pub mod settings;
 pub(crate) mod testing;
 #[allow(dead_code, reason = "called by the server functions of #18-#22")]
 pub mod training_maxes;
+pub mod users;
 
 /// The migrations in `crates/iron-oxide-app/migrations`, embedded in the binary at compile time.
 pub static MIGRATOR: Migrator = sqlx::migrate!();

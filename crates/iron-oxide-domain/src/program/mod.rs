@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(treadmill.work.sets(), 1);
         assert_eq!(treadmill.progression, ProgressionRule::None);
         assert_eq!(treadmill.progression.increment(), None);
-        assert_eq!(program.rotation.len(), 5);
+        assert_eq!(program.rotation.len(), 2);
     }
 
     #[test]

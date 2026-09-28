@@ -274,6 +274,12 @@ impl AuthUser {
     pub fn owner(&self) -> super::db::ids::UserId {
         self.user_id.into()
     }
+
+    /// An authenticated user without a request, for tests of code that takes an `AuthUser`.
+    #[cfg(test)]
+    pub(crate) fn for_tests(user_id: UserId) -> Self {
+        Self { user_id }
+    }
 }
 
 impl<S: Send + Sync> FromRequestParts<S> for AuthUser {
