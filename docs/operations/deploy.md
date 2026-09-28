@@ -49,8 +49,12 @@ This creates an empty app; nothing runs until the first deploy. Use `fly apps cr
 
 ### 3. Set the secrets
 
-Every secret is set in one command, so the app restarts only once. Values come from Neon, Google
-Cloud and a generator, never from a file in the repo.
+The variables are described in `.env.example` (from the config ticket, #3), which is the
+reference if this page and it ever disagree. The server validates them at startup and exits with
+a message naming each missing or invalid one.
+
+Set them in one command, so the app restarts only once. Values come from Neon, Google Cloud and a
+generator, never from a file in the repo.
 
 ```sh
 fly secrets set --stage \
@@ -58,23 +62,23 @@ fly secrets set --stage \
   APP_BASE_URL='https://iron-oxide.fly.dev'
 ```
 
-`--stage` stores them without restarting anything (the app has no machine yet); the first deploy
-picks them up. After the first deploy, drop `--stage` to update a secret and restart the app.
+`--stage` stores them without deploying (the app has no machine yet); the first deploy picks them
+up. After the first deploy, drop `--stage`: `fly secrets set` then restarts the machines.
 
-| Key | What | Needed from |
+| Key | Required | What |
 |---|---|---|
-| `DATABASE_URL` | Neon **direct** (non-pooled) connection string, with `sslmode=require` (decision #39). The pooled `-pooler` host breaks sqlx prepared statements and migrations. | #3 / #4 |
-| `APP_BASE_URL` | Public URL of the app: `https://iron-oxide.fly.dev` until the custom domain is live, then `https://iron-oxyde.com`. | #3 |
-| `WEBAUTHN_RP_ID` | Passkey relying party id: the bare domain (`iron-oxyde.com`). Passkeys are bound to it, so set it once the custom domain is live. | #5 |
-| `WEBAUTHN_ORIGIN` | `https://iron-oxyde.com` | #5 |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | OAuth client from Google Cloud Console. | #5 |
-| `GOOGLE_REDIRECT_URL` | The OAuth callback on the public URL, also registered in the Google client. | #5 |
-| Session key | Random key for the session cookies, e.g. `openssl rand -base64 64`. | #3 / #5 |
+| `DATABASE_URL` | yes | Neon **direct** connection string (host without `-pooler`) with `?sslmode=require` (decision #39). The pooled endpoint breaks sqlx prepared statements and migrations. |
+| `APP_BASE_URL` | yes | Public URL: `https://iron-oxide.fly.dev` until the custom domain is live, then `https://iron-oxyde.com`. |
+| `WEBAUTHN_RP_ID` | sign-in | Passkey relying party id: the bare domain, `iron-oxyde.com`. Passkeys are bound to it, so set it once the custom domain is live. |
+| `WEBAUTHN_ORIGIN` | sign-in | `https://iron-oxyde.com` |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | sign-in | OAuth "Web application" client from the Google Cloud console. |
+| `GOOGLE_REDIRECT_URL` | sign-in | `https://iron-oxyde.com/auth/google/callback`, also registered in the Google client. |
+| `SESSION_KEY` | sign-in | Session cookie key, at least 64 random bytes, base64: `openssl rand 64 \| openssl base64 -A`. Use a key that exists nowhere else. |
+| `RUST_LOG` | no | Log filter, e.g. `info,sqlx=warn`. Not a secret: it can go in `[env]` in `fly.toml`. |
 
-The exact variable names are defined by the config ticket (#3) and its `.env.example`; that file
-is the reference once it lands, and this table must be reconciled with it. The hello-world
-scaffold needs no secret at all: only `DATABASE_URL` and `APP_BASE_URL` apply once #3 / #4 are
-merged, and the auth keys once #5 is.
+The six sign-in variables are all-or-nothing: set all of them or none (they are needed once
+sign-in, #5, lands). The hello-world scaffold needs none of these; `DATABASE_URL` and
+`APP_BASE_URL` become required when the config and database work (#3 / #4) is merged.
 
 `IP` and `PORT` are not secrets: they are set in `fly.toml` (`0.0.0.0`, `8080`).
 

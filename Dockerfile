@@ -55,6 +55,9 @@ RUN rustup toolchain install && rustc --version
 
 COPY . .
 
+# sqlx query macros compile from the committed `.sqlx/` metadata, never from a live database.
+ENV SQLX_OFFLINE=true
+
 # Dependency caching uses BuildKit cache mounts rather than cargo-chef: dx builds the server with
 # `--features server` and the client for wasm32 with `--features web`, which `cargo chef cook`
 # does not reproduce. The cargo registry and `target/` persist between builds on the same builder.
