@@ -11,5 +11,21 @@
     reason = "used by the UI screens that call the server functions (#29-#32)"
 )]
 pub mod error;
+#[cfg_attr(
+    not(feature = "server"),
+    allow(
+        dead_code,
+        reason = "the client only decodes them until the history screens (#33) land"
+    )
+)]
+pub mod history;
 pub mod sessions;
+#[cfg_attr(
+    not(feature = "server"),
+    allow(
+        dead_code,
+        reason = "the client only decodes them until the settings screens (#34) land"
+    )
+)]
+pub mod settings;
 pub mod time;

@@ -25,7 +25,7 @@ pub fn view(session: db::sessions::WorkoutSession) -> Result<SessionView, ApiErr
     })
 }
 
-const fn status(status: db::sessions::SessionStatus) -> SessionStatus {
+pub(super) const fn status(status: db::sessions::SessionStatus) -> SessionStatus {
     match status {
         db::sessions::SessionStatus::InProgress => SessionStatus::InProgress,
         db::sessions::SessionStatus::Completed => SessionStatus::Completed,
