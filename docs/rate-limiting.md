@@ -31,8 +31,14 @@ counts against its IP.
 
 The three sign-in groups (`auth_begin`, `auth_finish`, `google_callback`) also limit each **IPv6
 `/48`** as a whole: 120 at once, then 2 a second. That is four `/64`s' worth (see
-[Client IP](#client-ip)). This check runs before the per-`/64` one, so a site over its aggregate
-adds nothing to the per-IP table.
+[Client IP](#client-ip)). All the `/64`s of a `/48` share it, and a `/48` can hold unrelated
+subscribers (a carrier or hosting pool), so together they get 120 sign-ins at once, then 2 a
+second.
+
+A request counts against both limits or neither:
+- a `/64` over its own limit spends nothing of its `/48`, so flooding cannot lock its neighbours
+  out;
+- a `/48` over its aggregate adds no `/64` to the per-IP table.
 
 ### Where the checks run
 
@@ -142,21 +148,32 @@ When a new key arrives and its table is full:
   Evicting it would hand it a fresh burst, and a client cycling through more keys than the table
   holds (easy with the `/64`s of one IPv6 `/48`) would then have no limit at all.
 - **If none has refilled, the new key gets the group's policy:**
-  - `auth_begin`, `auth_finish` and `google_callback` **fail closed**. The new client gets a
-    `429` until the earliest stored key refills. These groups create `sessions` and
-    `auth_ceremonies` rows, so refusing some new clients for a while is safer than letting
+  - `auth_begin`, `auth_finish` and `google_callback` **fail closed**, for their per-IP, per-`/48`
+    and per-user limiters alike. While the table stays full, **every** new client (or, for the
+    per-user limiters, every new user) gets a `429`, until the earliest stored key refills.
+    These groups create `sessions` and `auth_ceremonies` rows, so that is safer than letting
     everyone through untracked.
-  - Filling such a table takes 50,000 keys, each kept limited at once, from 50,000 distinct IPv4
-    addresses or `/64`s. The `/48` aggregate caps what one IPv6 site can put in it at a few
-    `/64`s, so it takes that many distinct IPv4 addresses or IPv6 sites.
+  - This is a possible global "no new sign-ins" lockout, and it costs this much to hold:
+    - A key does not have to be limited to hold its slot: one allowed request keeps it for one
+      period, which is 2 s for the sign-in limits.
+    - Holding a table full takes 50,000 live keys, i.e. about 25,000 allowed requests a second
+      per group, per machine, from 50,000 distinct IPv4 addresses or IPv6 `/64`s.
+    - One IPv6 `/48` can place up to 120 `/64` keys at once (its aggregate burst) and keep about
+      4 alive. Holding the table therefore takes about 12,500 `/48`s sustained, or about 420 for
+      a single 2-second burst.
+    - That is botnet scale. At that rate the `auth_begin` rows hurt the database first.
   - `session`, `account` and `write` **fail open**. The request goes through without its key
     being tracked, and a warning is logged. These only do something for a signed-in user, whose
     sign-in was itself limited. The per-user limits still apply, and locking every new client out
     of them would hurt more than it protects.
 
-The sweep scans the whole table, so it only runs when it can free something. While a table is full,
-the limiter remembers the earliest moment a stored key refills and does not sweep before then. A
-flood of new keys therefore costs one hash lookup each, not a scan.
+The sweep scans the whole table, so it only runs when it can free something:
+
+- While a table is full, the limiter remembers the earliest moment a stored key refills and does
+  not sweep before then, so a new key in between costs one hash lookup.
+- Each time a stored key refills, the next new key pays one scan. Someone holding a full table
+  with staggered keys controls how often that happens, up to the rates above.
+- The "table full" warning is logged at most once a minute per limiter.
 
 This is tested by `cycling_through_more_keys_than_the_table_holds_gains_nothing` (limiter),
 `cycling_through_more_clients_than_the_table_holds_gains_nothing`,
@@ -231,6 +248,7 @@ endpoint cannot silently drop its limit.
   - cycling through more clients (IPv4 addresses, or the `/64`s of one `/48`) than the table
     holds gains nothing;
   - the callback only counts navigations (`Sec-Fetch-Dest`);
+  - a flooding `/64` does not lock out the rest of its `/48`;
   - memory stays bounded under thousands of IPv4 and IPv6 clients, and no limited client is
     evicted;
   - the health checks are never limited;
