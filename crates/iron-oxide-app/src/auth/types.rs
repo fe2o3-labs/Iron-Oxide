@@ -14,6 +14,8 @@ use uuid::Uuid;
 #[serde(transparent)]
 pub struct UserId(Uuid);
 
+// The browser build only receives these ids from the server; it never builds or unwraps one.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 impl UserId {
     /// Wraps an existing UUID (e.g. one read from the database).
     #[must_use]
@@ -39,6 +41,8 @@ impl fmt::Display for UserId {
 #[serde(transparent)]
 pub struct PasskeyId(Uuid);
 
+// The browser build only receives these ids from the server; it never builds or unwraps one.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 impl PasskeyId {
     /// Wraps an existing UUID.
     #[must_use]
@@ -141,6 +145,8 @@ pub enum GoogleCallbackMessage {
 
 /// The `BroadcastChannel` name the callback page also posts its message on, for when the popup
 /// has no `window.opener` (same-origin only by definition).
+// Used by the server (callback page) and the browser (listener) builds only.
+#[cfg_attr(not(any(feature = "server", feature = "web")), allow(dead_code))]
 pub const GOOGLE_CALLBACK_CHANNEL: &str = "iron-oxide-google-sign-in";
 
 #[cfg(test)]
@@ -149,8 +155,14 @@ mod tests {
 
     #[test]
     fn normalize_name_trims_and_accepts_normal_names() {
-        assert_eq!(normalize_name("  Jules  ").unwrap(), Some("Jules".to_owned()));
-        assert_eq!(normalize_name("Élodie 💪").unwrap(), Some("Élodie 💪".to_owned()));
+        assert_eq!(
+            normalize_name("  Jules  ").unwrap(),
+            Some("Jules".to_owned())
+        );
+        assert_eq!(
+            normalize_name("Élodie 💪").unwrap(),
+            Some("Élodie 💪".to_owned())
+        );
     }
 
     #[test]
@@ -201,7 +213,10 @@ mod tests {
             state: "s".to_owned(),
         });
         assert_eq!(json, r#"{"type":"code","code":"c","state":"s"}"#);
-        assert_eq!(serde_json_like(&GoogleCallbackMessage::Done), r#"{"type":"done"}"#);
+        assert_eq!(
+            serde_json_like(&GoogleCallbackMessage::Done),
+            r#"{"type":"done"}"#
+        );
     }
 
     fn serde_json_like<T: Serialize>(value: &T) -> String {
