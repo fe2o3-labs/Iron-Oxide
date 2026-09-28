@@ -53,6 +53,7 @@ fn generous() -> Limits {
     Limits {
         auth_begin: wide,
         auth_finish: wide,
+        google_callback: wide,
         session: wide,
         account: wide,
         write: wide,
@@ -347,6 +348,7 @@ async fn health_checks_and_page_loads_are_never_limited() {
     for group in [
         &mut limits.auth_begin,
         &mut limits.auth_finish,
+        &mut limits.google_callback,
         &mut limits.session,
         &mut limits.account,
         &mut limits.write,
@@ -552,4 +554,46 @@ async fn the_default_limits_let_a_normal_sign_up_and_sign_in_through(db: PgPool)
         let mut browser = app.browser();
         sign_up(&mut browser, &format!("user {i}")).await;
     }
+}
+
+#[tokio::test]
+async fn cross_site_requests_cannot_use_up_a_shared_ips_limits() {
+    let mut limits = generous();
+    limits.auth_begin.per_ip = Some(quota(3, HOUR));
+    limits.google_callback.per_ip = Some(quota(3, HOUR));
+    let app = TestApp::with_rate_limit(
+        db::tests::unreachable_pool(),
+        config(ClientIpSource::Peer, limits),
+    )
+    .await;
+    // A page on another site, opened by someone behind the shared IP.
+    let mut attacker = app.browser();
+    attacker.origin = Some("https://evil.example".to_owned());
+    attacker.fetch_site = Some("cross-site".to_owned());
+    for _ in 0..50 {
+        let status = post_raw(&mut attacker, SIGN_IN_BEGIN, json!({}))
+            .await
+            .status();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    // It can load the Google callback as often as it likes (a cross-site GET, e.g. an <img>):
+    // that uses up the callback's own bucket only.
+    for _ in 0..10 {
+        attacker.get(GOOGLE_CALLBACK_PATH).await;
+    }
+    let (status, headers, _) = attacker.get(GOOGLE_CALLBACK_PATH).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(headers.contains_key(header::RETRY_AFTER));
+    // Someone else on the same IP still reaches the sign-in functions (the unreachable database
+    // then fails them, but they are not rate limited).
+    let mut neighbour = app.browser();
+    assert_eq!(neighbour.peer, attacker.peer);
+    let status = post_raw(&mut neighbour, SIGN_IN_BEGIN, json!({}))
+        .await
+        .status();
+    assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_ne!(status, StatusCode::FORBIDDEN);
+    let finish = "/api/auth/passkey/sign-in/finish";
+    let status = post_raw(&mut neighbour, finish, json!({})).await.status();
+    assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
 }

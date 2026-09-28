@@ -53,7 +53,11 @@ use self::{
     google::GoogleOidc,
     session::{PgSessionStore, keys},
 };
-use super::{AppState, config::Config};
+use super::{
+    AppState,
+    config::Config,
+    rate_limit::{self, RateLimiter},
+};
 use crate::auth::types::UserId;
 
 /// The relying party name shown by some passkey prompts.
@@ -131,11 +135,16 @@ impl AuthState {
 }
 
 /// Adds sign-in to the app router: the Google callback route, then (around everything merged
-/// so far) the session layer, the CSRF check and the [`AuthState`] extension.
+/// so far, innermost first) the session layer, the per-IP rate limit, the CSRF check and the
+/// [`AuthState`] extension.
+///
+/// The per-IP limit sits inside the CSRF check, so cross-site requests (refused anyway) cannot
+/// use up a shared IP's limits, and outside the session layer, so a refused request never loads
+/// or creates a session.
 ///
 /// Call it after merging every route that needs a session: layers only wrap routes already on
 /// the router.
-pub fn install(router: Router, auth: AuthState, db: PgPool) -> Router {
+pub fn install(router: Router, auth: AuthState, db: PgPool, limiter: RateLimiter) -> Router {
     let session_layer = session::layer(
         PgSessionStore::new(db),
         auth.inner.session_key.clone(),
@@ -144,6 +153,7 @@ pub fn install(router: Router, auth: AuthState, db: PgPool) -> Router {
     router
         .route(config_callback_path(), get(google::callback))
         .layer(session_layer)
+        .layer(middleware::from_fn_with_state(limiter, rate_limit::per_ip))
         .layer(middleware::from_fn_with_state(
             auth.inner.csrf.clone(),
             csrf::guard,

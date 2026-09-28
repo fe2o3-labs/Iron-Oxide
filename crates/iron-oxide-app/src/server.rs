@@ -209,8 +209,8 @@ impl ShutdownSignals {
 /// Full server router: the Dioxus application merged with the custom routes, with the shared
 /// state attached to every request (server functions included).
 ///
-/// Layers, outermost first: the per-IP rate limit (before anything touches the session or the
-/// database), the state, the CSRF check, the session, then the per-user rate limit.
+/// Layers, outermost first: the state, the CSRF check, the per-IP rate limit (before anything
+/// touches the session or the database), the session, then the per-user rate limit.
 pub fn router(state: AppState, auth: auth::AuthState) -> Router {
     let limiter = rate_limit::RateLimiter::new(&state.config.rate_limit);
     let app = dioxus::server::router(App)
@@ -218,9 +218,7 @@ pub fn router(state: AppState, auth: auth::AuthState) -> Router {
         .layer(from_fn(missing_assets_are_not_found))
         .layer(from_fn_with_state(limiter.clone(), rate_limit::per_user));
     // Sign-in (#5): sessions, the CSRF check and the Google callback around the app.
-    auth::install(app, auth, state.db.clone())
-        .layer(Extension(state))
-        .layer(from_fn_with_state(limiter, rate_limit::per_ip))
+    auth::install(app, auth, state.db.clone(), limiter).layer(Extension(state))
 }
 
 /// Routes served by axum directly, outside of Dioxus. They read [`AppState`] from the

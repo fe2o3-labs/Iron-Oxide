@@ -16,7 +16,8 @@ group's limit does not affect another's.
 | Group | Routes | Per IP | Per signed-in user |
 |---|---|---|---|
 | `auth_begin` | `passkey/sign-up/begin`, `passkey/sign-in/begin`, `passkey/add/begin`, `google/begin` | 30 at once, then 1 every 2 s | 10 at once, then 1 a minute |
-| `auth_finish` | `passkey/sign-up/finish`, `passkey/sign-in/finish`, `passkey/add/finish`, `GET`/`HEAD /auth/google/callback` | 30 at once, then 1 every 2 s | 10 at once, then 1 a minute |
+| `auth_finish` | `passkey/sign-up/finish`, `passkey/sign-in/finish`, `passkey/add/finish` | 30 at once, then 1 every 2 s | 10 at once, then 1 a minute |
+| `google_callback` | `GET`/`HEAD /auth/google/callback` | 30 at once, then 1 every 2 s | none |
 | `session` | `auth/me`, `auth/sign-out` | 300 at once, then 5 a second | none |
 | `account` | `passkey/remove`, `google/unlink` | 60 at once, then 1 a second | 10 at once, then 1 a minute |
 | `write` | every other `POST`, `PUT`, `PATCH` or `DELETE`, on any path | 600 at once, then 10 a second | 120 at once, then 2 a second |
@@ -28,6 +29,26 @@ Route paths are under `/api/auth/` unless shown in full. Requests with a safe me
 The per-user limits only apply to requests whose session holds a user. A signed-out request only
 counts against its IP.
 
+### Where the checks run
+
+The layers, from the outside in:
+
+1. the CSRF check;
+2. the per-IP limit;
+3. the session layer;
+4. the per-user limit;
+5. the handler.
+
+- **Before the session and the database.** The per-IP limit runs before any of them, so a refused
+  request loads no session, writes no row and sets no cookie.
+- **After the CSRF check.** Otherwise a cross-site page, opened by anyone behind a shared IP, could
+  fire no-cors `POST`s at the begin functions. The CSRF check refuses them anyway, but they would
+  use up the whole IP's sign-in limits and lock everyone behind it out.
+- **The Google callback.** It is a cross-site `GET` by design, so such a page can still hit it
+  (with an `<img>`, say). That is why the callback has its own bucket: the worst such a page can
+  do is slow down Google callbacks for that IP, never passkey sign-ins. This is tested by
+  `cross_site_requests_cannot_use_up_a_shared_ips_limits`.
+
 ### Why these numbers
 
 - **Shared IPs.** A gym's Wi-Fi or a mobile carrier's NAT puts a whole room behind one IP address.
@@ -37,7 +58,9 @@ counts against its IP.
 - **The known exposure (#59's reviews).** Each cookie-less begin creates one `sessions` row and one
   `auth_ceremonies` row, and the cleanup runs only every 6 hours. Without limits, 1,000 requests a
   second meant about 21.6 M rows of each between two cleanups. Now each IP can create at most 30
-  rows at once, then 1 every 2 s: about 10,800 per IP between two cleanups. The per-IP check runs
+  rows at once, then 1 every 2 s: about 10,800 per IP between two cleanups. An IPv6 "IP" here is a
+`/64` (see below); a client that holds a bigger block, such as a `/48`, has one set of limits per
+`/64` in it. The per-IP check runs
   before the session is loaded, so a refused request writes nothing and sets no cookie (tested by
   `a_limited_begin_creates_no_session_and_no_ceremony`).
 - **Google polling.** While a Google sign-in is open, the UI calls `me` every 2 s. That is 0.5 a
@@ -145,7 +168,8 @@ endpoint that needs stricter ones (an import, an upload, deleting the account), 
 
 1. add a variant to `RouteGroup` (and to `RouteGroup::ALL`);
 2. add its `GroupLimits` to `Limits` and set them in `Limits::default()`. Set `per_user` for a
-   per-user limit, and keep a `per_ip` limit as well;
+   per-user limit, and keep a `per_ip` limit as well. Declare each quota as a `const` there, so an
+   invalid one fails the build instead of panicking at startup;
 3. map the endpoint's path to the group in `ROUTES`;
 4. add a test that bursts past the new limit (see `rate_limit/integration_tests.rs`).
 
@@ -160,6 +184,7 @@ endpoint cannot silently drop its limit.
 - `rate_limit::integration_tests`:
   - a burst past the limit gets 429 with `Retry-After` until the bucket refills (paused clock);
   - limits are per IP and per group;
+  - cross-site requests cannot use up a shared IP's limits;
   - a spoofed `Fly-Client-IP` is ignored in `peer` mode, and in `fly` mode from a public peer;
   - memory stays bounded under thousands of IPv4 and IPv6 clients;
   - the health checks are never limited;

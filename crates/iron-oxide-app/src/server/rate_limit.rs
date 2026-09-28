@@ -3,8 +3,10 @@
 //! `docs/rate-limiting.md`.
 //!
 //! Two middlewares share one [`RateLimiter`]:
-//! - [`per_ip`] is the outermost layer: it runs before the session is loaded, the CSRF check or
-//!   any handler, so a refused request touches neither the database nor the session table;
+//! - [`per_ip`] runs just inside the CSRF check and before the session is loaded or any handler
+//!   runs, so a refused request touches neither the database nor the session table. Being inside
+//!   the CSRF check matters: a cross-site page opened by someone behind a shared IP must not be
+//!   able to use up that IP's sign-in limits with requests the CSRF check refuses anyway;
 //! - [`per_user`] runs inside the session layer and keys signed-in requests by their user id.
 //!
 //! Each request belongs to at most one [`RouteGroup`] ([`classify`]); each group has its own
@@ -57,8 +59,11 @@ const MINUTE: Duration = Duration::from_secs(60);
 pub enum RouteGroup {
     /// Starting a ceremony: each call can create a session row and a ceremony row.
     AuthBegin,
-    /// Finishing a ceremony (WebAuthn verification, Google's token exchange).
+    /// Finishing a passkey ceremony (WebAuthn verification).
     AuthFinish,
+    /// The Google callback: a `GET` that any page can trigger (e.g. with an `<img>`), so it has
+    /// its own bucket and cannot use up the passkey finishes'.
+    GoogleCallback,
     /// `me` (polled by the UI while waiting for Google) and sign-out: read-only or harmless.
     Session,
     /// Removing a passkey or unlinking Google.
@@ -68,9 +73,10 @@ pub enum RouteGroup {
 }
 
 impl RouteGroup {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::AuthBegin,
         Self::AuthFinish,
+        Self::GoogleCallback,
         Self::Session,
         Self::Account,
         Self::Write,
@@ -80,9 +86,10 @@ impl RouteGroup {
         match self {
             Self::AuthBegin => 0,
             Self::AuthFinish => 1,
-            Self::Session => 2,
-            Self::Account => 3,
-            Self::Write => 4,
+            Self::GoogleCallback => 2,
+            Self::Session => 3,
+            Self::Account => 4,
+            Self::Write => 5,
         }
     }
 
@@ -90,6 +97,7 @@ impl RouteGroup {
         match self {
             Self::AuthBegin => "auth_begin",
             Self::AuthFinish => "auth_finish",
+            Self::GoogleCallback => "google_callback",
             Self::Session => "session",
             Self::Account => "account",
             Self::Write => "write",
@@ -117,7 +125,7 @@ pub const ROUTES: &[(&str, RouteGroup)] = &[
 pub fn classify(method: &Method, path: &str) -> Option<RouteGroup> {
     // A cross-site GET by design, finishing a ceremony (axum also answers HEAD with it).
     if path == GOOGLE_CALLBACK_PATH && matches!(*method, Method::GET | Method::HEAD) {
-        return Some(RouteGroup::AuthFinish);
+        return Some(RouteGroup::GoogleCallback);
     }
     if matches!(
         *method,
@@ -145,6 +153,7 @@ pub struct GroupLimits {
 pub struct Limits {
     pub auth_begin: GroupLimits,
     pub auth_finish: GroupLimits,
+    pub google_callback: GroupLimits,
     pub session: GroupLimits,
     pub account: GroupLimits,
     pub write: GroupLimits,
@@ -155,11 +164,22 @@ pub struct Limits {
 impl Default for Limits {
     /// The production limits. Rationale in `docs/rate-limiting.md`.
     fn default() -> Self {
+        // Every quota is a constant, so an invalid one fails the build (see `Quota::per`).
+        //
         // A gym's Wi-Fi or a carrier NAT puts a whole room behind one IP: a class signing in at
         // once must fit. One sign-in takes one or two begins.
         const SIGN_IN_PER_IP: Quota = Quota::per(30, MINUTE);
         // Adding a passkey, linking or unlinking Google: a handful per session at most.
         const ACCOUNT_PER_USER: Quota = Quota::per(10, Duration::from_secs(10 * 60));
+        // The UI polls `me` every 2 s during a Google sign-in, for every user behind the IP:
+        // 5 per second on average.
+        const SESSION_PER_IP: Quota = Quota::per(300, MINUTE);
+        const ACCOUNT_PER_IP: Quota = Quota::per(60, MINUTE);
+        // The offline queue flushes a whole workout at once, for every user behind the IP:
+        // 10 per second on average, 600 at once.
+        const WRITE_PER_IP: Quota = Quota::per(600, MINUTE);
+        // One user: a long workout's sets in one burst, then 2 per second.
+        const WRITE_PER_USER: Quota = Quota::per(120, MINUTE);
         Self {
             auth_begin: GroupLimits {
                 per_ip: Some(SIGN_IN_PER_IP),
@@ -169,22 +189,22 @@ impl Default for Limits {
                 per_ip: Some(SIGN_IN_PER_IP),
                 per_user: Some(ACCOUNT_PER_USER),
             },
+            // Per IP only: the per-user layer does not wrap this route (see `server::router`).
+            google_callback: GroupLimits {
+                per_ip: Some(SIGN_IN_PER_IP),
+                per_user: None,
+            },
             session: GroupLimits {
-                // The UI polls `me` every 2 s during a Google sign-in, for every user behind
-                // the IP: 5 per second on average.
-                per_ip: Some(Quota::per(300, MINUTE)),
+                per_ip: Some(SESSION_PER_IP),
                 per_user: None,
             },
             account: GroupLimits {
-                per_ip: Some(Quota::per(60, MINUTE)),
+                per_ip: Some(ACCOUNT_PER_IP),
                 per_user: Some(ACCOUNT_PER_USER),
             },
             write: GroupLimits {
-                // The offline queue flushes a whole workout at once, for every user behind the
-                // IP: 10 per second on average, 600 at once.
-                per_ip: Some(Quota::per(600, MINUTE)),
-                // One user: a long workout's sets in one burst, then 2 per second.
-                per_user: Some(Quota::per(120, MINUTE)),
+                per_ip: Some(WRITE_PER_IP),
+                per_user: Some(WRITE_PER_USER),
             },
             capacity: DEFAULT_CAPACITY,
         }
@@ -197,6 +217,7 @@ impl Limits {
         match group {
             RouteGroup::AuthBegin => self.auth_begin,
             RouteGroup::AuthFinish => self.auth_finish,
+            RouteGroup::GoogleCallback => self.google_callback,
             RouteGroup::Session => self.session,
             RouteGroup::Account => self.account,
             RouteGroup::Write => self.write,
@@ -267,7 +288,8 @@ impl RateLimiter {
     }
 }
 
-/// The per-IP middleware. Install it outside everything else (see `server::router`).
+/// The per-IP middleware. Install it just inside the CSRF check, outside the session layer (see
+/// `auth::install`).
 pub async fn per_ip(State(limiter): State<RateLimiter>, request: Request, next: Next) -> Response {
     let Some(group) = classify(request.method(), request.uri().path()) else {
         return next.run(request).await;
@@ -390,11 +412,11 @@ mod tests {
         );
         assert_eq!(
             classify(&Method::GET, GOOGLE_CALLBACK_PATH),
-            Some(RouteGroup::AuthFinish)
+            Some(RouteGroup::GoogleCallback)
         );
         assert_eq!(
             classify(&Method::HEAD, GOOGLE_CALLBACK_PATH),
-            Some(RouteGroup::AuthFinish)
+            Some(RouteGroup::GoogleCallback)
         );
     }
 
@@ -444,6 +466,7 @@ mod tests {
         assert!(limits.write.per_user.is_some());
         assert!(limits.auth_begin.per_user.is_some());
         assert!(limits.session.per_user.is_none());
+        assert!(limits.google_callback.per_user.is_none());
         assert_eq!(limits.capacity, DEFAULT_CAPACITY);
     }
 
@@ -493,8 +516,12 @@ mod tests {
         let limited = Limited {
             retry_after: Duration::from_secs(90),
         };
-        let response =
-            too_many_requests(RouteGroup::AuthFinish, "ip", GOOGLE_CALLBACK_PATH, limited);
+        let response = too_many_requests(
+            RouteGroup::GoogleCallback,
+            "ip",
+            GOOGLE_CALLBACK_PATH,
+            limited,
+        );
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers()[header::RETRY_AFTER], "90");
         assert!(
