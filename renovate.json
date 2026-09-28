@@ -10,11 +10,12 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Versions pinned on the line after a `# renovate: datasource=… depName=…` comment (dx CLI, gitleaks) in CI, the README and the Dockerfile. rust-toolchain.toml is handled by the built-in manager. `semver` versioning because these are exact pins: with the crate datasource's default `cargo` versioning, `0.7.9` would be read as the range `^0.7.9` and never bumped",
+      "description": "Versions pinned on the line after a `# renovate: datasource=… depName=…` comment (dx CLI, gitleaks, cargo-sweep) in CI, the README, the Dockerfile and scripts/. rust-toolchain.toml is handled by the built-in manager. `semver` versioning because these are exact pins: with the crate datasource's default `cargo` versioning, `0.7.9` would be read as the range `^0.7.9` and never bumped",
       "managerFilePatterns": [
         "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/",
         "/(^|/)README\\.md$/",
-        "/(^|/)Dockerfile$/"
+        "/(^|/)Dockerfile$/",
+        "/(^|/)scripts/[^/]+\\.sh$/"
       ],
       "versioningTemplate": "semver",
       "matchStrings": [

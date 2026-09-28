@@ -79,6 +79,7 @@ Mobile
 
 Misc
   clean            Delete the build output: cargo's target dir (the one in use) and dx's output
+  prune            Delete build artefacts older than PRUNE_DAYS (14), of removed toolchains (PRUNE_MAXSIZE=10GB caps)
   clean-all        clean, and delete the local Postgres data (CONFIRM=1)
 ```
 
@@ -435,6 +436,20 @@ make tailscale-serve                   # ...then publish it over HTTPS to the ta
 
 Step-by-step setups (simulators, real phones over Tailscale or mkcert, passkeys, debugging) are in
 docs/dev/mobile-testing.md, added by #63.
+
+## Disk usage
+
+Rust build output grows fast, so the defaults keep it lean:
+
+- Dev builds (including dx's `server-dev` and `wasm-dev`) keep only line tables for our crates
+  (backtraces still show file:line) and no debug info for dependencies (`[profile.dev]` in
+  `Cargo.toml`).
+- CI and the CI-like make targets (`check`, `lint`, `test`, `build`, ...) build with
+  `CARGO_INCREMENTAL=0`; `compile` and `dev` keep incremental compilation for fast rebuilds.
+- `make prune` deletes build artefacts older than 14 days (`PRUNE_DAYS`) or made by toolchains
+  that are no longer installed, from the target dir in use (`cargo sweep`, installed by
+  `make setup`); `PRUNE_MAXSIZE=10GB` also caps its size. It never touches sources or `.sqlx/`.
+  `make clean` deletes everything.
 
 ## Security
 

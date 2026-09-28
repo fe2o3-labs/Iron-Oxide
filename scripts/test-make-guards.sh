@@ -7,7 +7,7 @@
 # run, a successful fetch and a clean `main` at exactly origin/main (not ahead, behind or
 # diverged), both before and after its `make check`, and deploys from a pristine export of the
 # commit; `make clean` and `make clean-all CONFIRM=1` refuse a target dir outside the checkout
-# without CONFIRM_SHARED=1. And the suite itself passes when its caller sets CONFIRM=1 or
+# without CONFIRM_SHARED=1; `make prune` refuses a target dir holding tracked files. And the suite itself passes when its caller sets CONFIRM=1 or
 # SKIP_SECRETS=1.
 set -euo pipefail
 
@@ -154,6 +154,15 @@ run fail "refuses a main behind origin/main" "HEAD is not origin/main" -- "${dep
 
 git -C "$work" commit --quiet --allow-empty -m diverged
 run fail "refuses a main diverged from origin/main" "HEAD is not origin/main" -- "${deploy[@]}" CONFIRM=1
+
+echo "make prune"
+mkdir -p "$work/tracked-target"; echo x >"$work/tracked-target/file"
+git -C "$work" add tracked-target && git -C "$work" commit --quiet -m tracked
+run fail "prune refuses the checkout itself as target dir" "refusing to sweep it" -- \
+  prune CARGO_TARGET_DIR="$work"
+run fail "prune refuses a target dir holding tracked files" "refusing to sweep it" -- \
+  prune CARGO_TARGET_DIR="$work/tracked-target"
+git -C "$work" rm --quiet -r tracked-target && git -C "$work" commit --quiet -m untracked
 
 echo "make clean / clean-all"
 shared=$scratch/shared-target

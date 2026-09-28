@@ -94,6 +94,11 @@ APP_PORT ?= 8080
 # and `test-db` (its `prepare --check` step) compile against the live database.
 export SQLX_OFFLINE ?= true
 
+# The CI-like targets build without incremental compilation, as CI does: incremental caches take
+# many GB and only help the edit-compile loop (`compile`, `dev`), which keeps them. Sub-makes of
+# `check` inherit it. Set CARGO_INCREMENTAL yourself to override.
+check fmt-check lint test sqlx-check test-db smoke build deploy: export CARGO_INCREMENTAL ?= 0
+
 # --- Local Postgres (docker compose) ------------------------------------------------------------
 # Use another project name and port to run a second, independent database:
 # `make test-db COMPOSE_PROJECT=my-branch PG_PORT=5444`.
@@ -156,7 +161,7 @@ need-compose = $(need-docker)
 	compile test test-make test-db test-all fmt fmt-check lint sqlx-check smoke secrets check \
 	build docker-build docker-run deploy logs \
 	adb-reverse android-open ios-open tailscale-serve tailscale-reset \
-	clean clean-all
+	clean clean-all prune
 
 ##@ Setup
 
@@ -429,6 +434,23 @@ clean: ## Delete the build output: cargo's target dir (the one in use) and dx's 
 	$(Q)$(call step,cargo clean ($(TARGET_DIR)))
 	$(Q)$(CARGO) clean
 	$(Q)rm -rf dist
+
+# cargo sweep only deletes build artefacts in the target dir: never sources, `.sqlx/` or anything
+# tracked. Artefacts are rebuilt when needed.
+prune: ## Delete build artefacts older than PRUNE_DAYS (14), of removed toolchains (PRUNE_MAXSIZE=10GB caps)
+	$(Q)test "$(TARGET_DIR)" != "$(CURDIR)" && test -z "$$(git ls-files -- "$(TARGET_DIR)" 2>/dev/null)" \
+		|| { echo "make $@: $(TARGET_DIR) holds tracked files: refusing to sweep it." >&2; exit 1; }
+	$(Q)$(call need-cmd,cargo-sweep,Run 'make setup'.)
+	$(Q)$(call step,cargo sweep $(TARGET_DIR) (older than $(PRUNE_DAYS) days$(comma) then other toolchains))
+	$(Q)before="$$(du -sk "$(TARGET_DIR)" 2>/dev/null | cut -f1 || echo 0)"; \
+		$(CARGO) sweep $(if $(filter 1,$(DRY_RUN)),--dry-run) --time $(PRUNE_DAYS) . ; \
+		$(CARGO) sweep $(if $(filter 1,$(DRY_RUN)),--dry-run) --installed . ; \
+		$(if $(PRUNE_MAXSIZE),$(CARGO) sweep $(if $(filter 1,$(DRY_RUN)),--dry-run) --maxsize $(PRUNE_MAXSIZE) . ;) \
+		after="$$(du -sk "$(TARGET_DIR)" 2>/dev/null | cut -f1 || echo 0)"; \
+		echo "$(TARGET_DIR): $$((before / 1024)) MB -> $$((after / 1024)) MB"
+PRUNE_DAYS ?= 14
+# Optional size cap, e.g. PRUNE_MAXSIZE=10GB: then the oldest artefacts go until the dir fits.
+PRUNE_MAXSIZE ?=
 
 clean-all: ## clean, and delete the local Postgres data (CONFIRM=1)
 	$(Q)$(call need-confirm,deletes the build output and every database of compose project '$(COMPOSE_PROJECT)')
