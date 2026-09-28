@@ -82,14 +82,12 @@ There are two ways to run the app. The service worker is only registered in rele
 anything about offline, caching or installing needs the second one.
 
 ```sh
-docker compose up -d --wait
+# Development: hot reload, no service worker. Also starts Postgres and applies the migrations.
+make dev              # dx serve on http://127.0.0.1:8080
 
-# Development: hot reload, no service worker.
-dx serve --web -p iron-oxide-app                 # http://127.0.0.1:8080
-
-# Release: service worker on. Run it from the repository root so it reads ./.env.
-dx bundle --web --release -p iron-oxide-app
-target/dx/iron-oxide-app/release/web/server      # binds IP:PORT from .env, default 127.0.0.1:8080
+# Release: service worker on. Builds the bundle, then runs its server from the repository root,
+# so it reads ./.env.
+make run-release      # binds IP:PORT from .env, default 127.0.0.1:8080
 ```
 
 **Keep the app on `127.0.0.1:8080`** in every setup in this document. The phone reaches it through
@@ -105,9 +103,12 @@ needs `IP=0.0.0.0`. What each forwarder exposes:
 Switching setups is a copy and a restart:
 
 ```sh
-cp .env.tailscale.example .env      # or .env.localhost.example / .env.lan.example
+make env PRESET=tailscale FORCE=1   # or PRESET=localhost / lan; the old .env is kept as .env.bak
 $EDITOR .env                        # fill in the placeholders, then restart dx or the server
 ```
+
+`make env` generates a fresh `SESSION_KEY` in the new `.env`; the other placeholders are yours to
+fill in. Without `FORCE=1` it never replaces an existing `.env`.
 
 `.env` and `.env.*` are git-ignored. The `*.example` templates hold placeholders only.
 
@@ -132,14 +133,14 @@ lands, no valid `.env` can use an IP origin. Stop dx when done; it is exposed to
 The simulator uses the Mac's network, so `localhost` is the Mac.
 
 ```sh
-cp .env.localhost.example .env      # fill it in
-dx serve --web -p iron-oxide-app
+make env PRESET=localhost FORCE=1   # then fill in .env
+make dev
 ```
 
 Start an iPhone from MiniSim (or `xcrun simctl boot "<device name>" && open -a Simulator`), then:
 
 ```sh
-xcrun simctl openurl booted http://localhost:8080
+make ios-open                       # xcrun simctl openurl booted http://localhost:8080
 ```
 
 - Install: Safari → Share → **Add to Home Screen**.
@@ -154,12 +155,12 @@ secure context. Forward the port instead, so Chrome sees `http://localhost:8080`
 
 ```sh
 adb devices                          # the emulator shows as emulator-5554
-adb reverse tcp:8080 tcp:8080        # add -s <serial> when several devices are attached
-adb reverse --list
-adb shell am start -a android.intent.action.VIEW -d http://localhost:8080
+make adb-reverse                     # adb reverse tcp:8080 tcp:8080, then lists the forwards;
+                                     # SERIAL=<serial> when several devices are attached
+make android-open                    # opens http://localhost:8080 in the device's browser
 ```
 
-The forward lasts until the emulator or adb restarts: run `adb reverse` again after a reboot.
+The forward lasts until the emulator or adb restarts: run `make adb-reverse` again after a reboot.
 Install from Chrome's menu → **Add to home screen** / **Install app**. Debug with
 [`chrome://inspect`](#chrome-devtools-android).
 
@@ -171,7 +172,8 @@ The same `adb reverse`, over USB:
    → Developer options → **USB debugging** on.
 2. Plug it in, accept the "Allow USB debugging?" prompt, and check `adb devices` shows `device`
    (not `unauthorized`).
-3. `adb reverse tcp:8080 tcp:8080`, then open `http://localhost:8080` in Chrome on the phone.
+3. `make adb-reverse`, then open `http://localhost:8080` in Chrome on the phone (or
+   `make android-open`).
 
 Wireless debugging (Android 11+, same Wi-Fi) works too: Developer options → **Wireless
 debugging** → **Pair device with pairing code**, then `adb pair <ip>:<pairing port>` and
@@ -228,16 +230,16 @@ Once per Mac and tailnet:
    Console verification is needed while the app is in "Testing". Then create a new **Web
    application** client, e.g. "Iron Oxide (tailscale)", with the authorized redirect URI
    `https://<machine>.<tailnet>.ts.net/auth/google/callback`.
-6. `cp .env.tailscale.example .env` and fill it in with that host and client.
+6. `make env PRESET=tailscale FORCE=1` and fill in `.env` with that host and client.
 
 Each session:
 
 ```sh
-dx serve --web -p iron-oxide-app                   # or the release server
-tailscale serve --bg --https=443 localhost:8080    # the first run fetches the certificate
-tailscale serve status
+make dev                # or make run-release
+make tailscale-serve    # tailscale serve --bg --https=443 localhost:8080, then its status;
+                        # the first run fetches the certificate
 # ... test on https://<machine>.<tailnet>.ts.net ...
-tailscale serve reset                              # stop publishing
+make tailscale-reset    # tailscale serve reset: stop publishing
 ```
 
 `--bg` makes the serve config **persistent**: it survives reboots and `tailscale down`/`up`, so
@@ -288,11 +290,11 @@ https://$(scutil --get LocalHostName).local:8443 {
 EOF
 ```
 
-Then `cp .env.lan.example .env` in the repository, replace `<mac>` with the `LocalHostName`, and
-each session:
+Then `make env PRESET=lan FORCE=1` in the repository, replace `<mac>` in `.env` with the
+`LocalHostName`, and each session:
 
 ```sh
-dx serve --web -p iron-oxide-app                         # or the release server
+make dev                                                 # or make run-release
 cd ~/.iron-oxide-dev && caddy run --config Caddyfile     # Ctrl-C to stop
 ```
 

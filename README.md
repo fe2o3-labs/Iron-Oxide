@@ -174,7 +174,7 @@ host), stops the server with "unsupported parameter".
 | `IP`, `PORT` | no | Bind address, default `127.0.0.1:8080`. `dx serve` sets them itself |
 | `RUST_LOG` | no | Log filter, e.g. `info,sqlx=warn` |
 | `SHUTDOWN_GRACE_SECS` | no | Time in-flight requests get after a shutdown signal, 1 to 300, default 20. Keep it below the platform's kill timeout |
-| `WEBAUTHN_RP_ID` | yes | Passkeys: our domain, e.g. `iron-oxyde.com` (`localhost` locally) |
+| `WEBAUTHN_RP_ID` | yes | Passkeys: the relying party domain (`localhost` locally; production: see docs/auth.md). The app is served at `https://app.iron-oxyde.com` |
 | `WEBAUTHN_ORIGIN` | yes | Passkeys: the origin of `APP_BASE_URL` (must be equal) |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | yes | Sign in with Google: the OAuth client (secret) |
 | `GOOGLE_REDIRECT_URL` | yes | `APP_BASE_URL`'s origin + `/auth/google/callback` (must be equal) |
