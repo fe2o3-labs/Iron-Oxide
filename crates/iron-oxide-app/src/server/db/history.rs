@@ -94,6 +94,14 @@ impl TryFrom<EntryRow> for HistoryEntry {
     }
 }
 
+/// One page of [`page`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page {
+    pub entries: Vec<HistoryEntry>,
+    /// Whether more sessions follow the last entry (continue from its cursor).
+    pub more: bool,
+}
+
 /// A page of the user's ended sessions, most recently finished first (ties broken by descending
 /// id). `after` continues from the last entry of the previous page ([`HistoryEntry::cursor`]).
 /// `limit` is clamped to `1..=MAX_PAGE`.
@@ -102,9 +110,11 @@ pub async fn page(
     user: UserId,
     after: Option<HistoryCursor>,
     limit: u32,
-) -> Result<Vec<HistoryEntry>, RepoError> {
-    let limit = i64::from(limit.clamp(1, MAX_PAGE));
-    sqlx::query_as!(
+) -> Result<Page, RepoError> {
+    let limit = limit.clamp(1, MAX_PAGE);
+    // One row more than the page, to know whether another page follows.
+    let probe = i64::from(limit) + 1;
+    let mut entries = sqlx::query_as!(
         EntryRow,
         r#"SELECT s.id, v.program_id, p.name AS program_name, s.program_version_id,
                   v.version AS program_version, s.day_id, s.status, s.started_at, s.finished_at,
@@ -121,13 +131,17 @@ pub async fn page(
         user.as_uuid(),
         after.map(|cursor| cursor.finished_at),
         after.map(|cursor| cursor.id.as_uuid()),
-        limit,
+        probe,
     )
     .fetch_all(pool)
     .await?
     .into_iter()
     .map(HistoryEntry::try_from)
-    .collect()
+    .collect::<Result<Vec<_>, _>>()?;
+    let limit = usize::try_from(limit).map_err(|_| RepoError::Corrupt("page limit"))?;
+    let more = entries.len() > limit;
+    entries.truncate(limit);
+    Ok(Page { entries, more })
 }
 
 /// One of the user's sessions (ended or in progress), as the history shows it.
@@ -284,9 +298,11 @@ mod tests {
         let mut after = None;
         loop {
             let page = page(pool, user, after, limit).await.unwrap();
-            let Some(last) = page.last() else { break };
-            after = last.cursor();
-            seen.extend(page.iter().map(|entry| entry.id));
+            seen.extend(page.entries.iter().map(|entry| entry.id));
+            if !page.more {
+                break;
+            }
+            after = page.entries.last().and_then(HistoryEntry::cursor);
         }
         seen
     }
@@ -314,7 +330,7 @@ mod tests {
         )
         .await;
 
-        let entries = page(&pool, user, None, 10).await.unwrap();
+        let entries = page(&pool, user, None, 10).await.unwrap().entries;
         assert_eq!(
             entries.iter().map(|e| e.id).collect::<Vec<_>>(),
             vec![early, late]
@@ -336,7 +352,10 @@ mod tests {
         );
         // The in-progress session joins the history once it ends.
         finish(&pool, user, running, at(300)).await;
-        assert_eq!(page(&pool, user, None, 10).await.unwrap()[0].id, running);
+        assert_eq!(
+            page(&pool, user, None, 10).await.unwrap().entries[0].id,
+            running
+        );
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -386,8 +405,32 @@ mod tests {
             );
         }
         // The limit is clamped to 1..=MAX_PAGE.
-        assert_eq!(page(&pool, user, None, 0).await.unwrap().len(), 1);
-        assert_eq!(page(&pool, user, None, u32::MAX).await.unwrap().len(), 6);
+        let first = page(&pool, user, None, 0).await.unwrap();
+        assert_eq!((first.entries.len(), first.more), (1, true));
+        let all = page(&pool, user, None, u32::MAX).await.unwrap();
+        assert_eq!((all.entries.len(), all.more), (6, false));
+        // Exactly one full page: nothing more.
+        let exact = page(&pool, user, None, 6).await.unwrap();
+        assert_eq!((exact.entries.len(), exact.more), (6, false));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn a_full_page_of_the_largest_size_still_reports_more(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (_, version) = testing::program(&pool, user).await;
+        for n in 0..=i64::from(MAX_PAGE) {
+            let id = start(&pool, user, version, at(n)).await;
+            finish(&pool, user, id, at(n + 1)).await;
+        }
+        let first = page(&pool, user, None, MAX_PAGE).await.unwrap();
+        assert_eq!(first.entries.len(), 100);
+        assert!(first.more);
+        let rest = page(&pool, user, first.entries[99].cursor(), MAX_PAGE)
+            .await
+            .unwrap();
+        assert_eq!((rest.entries.len(), rest.more), (1, false));
+        assert_eq!(rest.entries[0].started_at, at(0));
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -518,7 +561,7 @@ mod tests {
         log(&pool, a, new_set(session)).await;
         finish(&pool, a, session, at(60)).await;
 
-        assert!(page(&pool, b, None, 100).await.unwrap().is_empty());
+        assert!(page(&pool, b, None, 100).await.unwrap().entries.is_empty());
         let result = entry(&pool, b, session).await;
         assert!(matches!(result, Err(RepoError::NotFound)), "{result:?}");
         assert!(
@@ -534,6 +577,12 @@ mod tests {
             finished_at: at(1_000_000),
             ..cursor.unwrap()
         };
-        assert!(page(&pool, b, Some(later), 100).await.unwrap().is_empty());
+        assert!(
+            page(&pool, b, Some(later), 100)
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
     }
 }

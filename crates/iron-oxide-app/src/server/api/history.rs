@@ -31,10 +31,7 @@ pub async fn page(
         )));
     }
     let after = cursor.map(repo_cursor).transpose()?;
-    // One more than asked, to know whether there is a next page.
-    let mut entries = repo::page(pool, owner, after, limit + 1).await?;
-    let more = entries.len() > usize::try_from(limit).unwrap_or(usize::MAX);
-    entries.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    let repo::Page { entries, more } = repo::page(pool, owner, after, limit).await?;
     let next = if more {
         entries
             .last()
@@ -101,11 +98,19 @@ fn wire_cursor(cursor: repo::HistoryCursor) -> Result<HistoryCursor, ApiError> {
     Ok(HistoryCursor::new(finished_at_us, cursor.id.into()))
 }
 
-/// A cursor sent back by the client. `422` if its time is out of range (it was tampered with).
+/// The earliest time a `timestamptz` holds (4714-11-24 00:00 UTC BC), in microseconds since the
+/// epoch. Every stored finish time is at or after it.
+const EARLIEST_TIMESTAMPTZ_US: i64 = -210_866_803_200_000_000;
+
+/// A cursor sent back by the client. `422` if its time is outside what can be stored (it was
+/// tampered with): Postgres' `timestamptz` from below, `OffsetDateTime`'s year 9999 from above.
 fn repo_cursor(cursor: HistoryCursor) -> Result<repo::HistoryCursor, ApiError> {
+    let invalid = || ApiError::invalid("Invalid history cursor.");
+    if cursor.finished_at_us() < EARLIEST_TIMESTAMPTZ_US {
+        return Err(invalid());
+    }
     let nanos = i128::from(cursor.finished_at_us()) * NANOS_PER_MICRO;
-    let finished_at = OffsetDateTime::from_unix_timestamp_nanos(nanos)
-        .map_err(|_| ApiError::invalid("Invalid history cursor."))?;
+    let finished_at = OffsetDateTime::from_unix_timestamp_nanos(nanos).map_err(|_| invalid())?;
     Ok(repo::HistoryCursor {
         finished_at,
         id: cursor.id().into(),
@@ -281,11 +286,36 @@ mod tests {
             repo_cursor(wire_cursor(before_epoch).unwrap()).unwrap(),
             before_epoch
         );
-        let tampered = HistoryCursor::new(i64::MAX, SessionId::from_uuid(Uuid::from_u128(9)));
-        assert_eq!(
-            repo_cursor(tampered).unwrap_err().public(),
-            (422, "Invalid history cursor.")
-        );
+        let id = SessionId::from_uuid(Uuid::from_u128(9));
+        for accepted in [
+            EARLIEST_TIMESTAMPTZ_US,
+            -1,
+            0,
+            // 9999-12-31 23:59:59.999999 UTC.
+            253_402_300_799_999_999,
+        ] {
+            assert!(
+                repo_cursor(HistoryCursor::new(accepted, id)).is_ok(),
+                "{accepted}"
+            );
+        }
+        for tampered in [
+            i64::MIN,
+            -377_705_116_800_000_001,
+            -377_705_116_800_000_000,
+            -300_000_000_000_000_000,
+            EARLIEST_TIMESTAMPTZ_US - 1,
+            253_402_300_800_000_000,
+            i64::MAX,
+        ] {
+            assert_eq!(
+                repo_cursor(HistoryCursor::new(tampered, id))
+                    .unwrap_err()
+                    .public(),
+                (422, "Invalid history cursor."),
+                "{tampered}"
+            );
+        }
     }
 
     #[test]
@@ -526,12 +556,41 @@ mod tests {
             .call(PAGE, json!({ "limit": MAX_PAGE_SIZE }))
             .await
             .unwrap();
-        let tampered = json!({ "cursor": { "finished_at_us": i64::MAX, "id": Uuid::now_v7() } });
-        let error = a.call_err(PAGE, tampered).await;
-        assert_eq!(
-            (error.status.as_u16(), error.message.as_str()),
-            (422, "Invalid history cursor.")
-        );
+        let cursor = |finished_at_us: i64| json!({ "cursor": { "finished_at_us": finished_at_us, "id": Uuid::now_v7() } });
+        for tampered in [
+            i64::MIN,
+            -377_705_116_800_000_000,
+            -300_000_000_000_000_000,
+            -210_866_803_200_000_001,
+            253_402_300_800_000_000,
+            i64::MAX,
+        ] {
+            let error = a.call_err(PAGE, cursor(tampered)).await;
+            assert_eq!(
+                (error.status.as_u16(), error.message.as_str()),
+                (422, "Invalid history cursor."),
+                "{tampered}"
+            );
+        }
+        // The extremes that can be stored are valid positions (nothing is before or after them).
+        for edge in [-210_866_803_200_000_000, 253_402_300_799_999_999] {
+            let page: HistoryPage = a.call(PAGE, cursor(edge)).await.unwrap();
+            assert!(page.sessions.is_empty(), "{edge}");
+        }
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn the_largest_page_size_still_reaches_every_session(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let mut a = api.user("A").await;
+        let (_, version) = db_testing::program(&api.db, a.id).await;
+        for n in 0..=i64::from(MAX_PAGE_SIZE) {
+            seed(&api.db, a.id, version, n * 10, &[], Some(1)).await;
+        }
+        let pages = all_pages(&mut a, MAX_PAGE_SIZE).await;
+        let sizes: Vec<usize> = pages.iter().map(Vec::len).collect();
+        assert_eq!(sizes, vec![100, 1]);
     }
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
