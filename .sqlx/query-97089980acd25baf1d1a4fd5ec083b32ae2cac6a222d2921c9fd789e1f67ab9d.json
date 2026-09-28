@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO active_program (user_id, program_id) VALUES ($1, $2)\n         ON CONFLICT (user_id) DO UPDATE SET program_id = EXCLUDED.program_id, updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "97089980acd25baf1d1a4fd5ec083b32ae2cac6a222d2921c9fd789e1f67ab9d"
+}

@@ -6,21 +6,11 @@
 -- is a UUIDv7: session ids, WebAuthn user handles and the OAuth state, nonce and PKCE verifier are
 -- cryptographically random.
 --
--- Like every user-owned table (#17): `user_id` cascades from `users`, is indexed, and never
--- changes once written (trigger `forbid_owner_change`).
-
--- Rejects any change of `user_id`: a row never moves to another user. Same definition as in the
--- training schema migration (#17); `OR REPLACE` so either migration can come first.
-CREATE OR REPLACE FUNCTION forbid_owner_change() RETURNS trigger
-    LANGUAGE plpgsql AS $$
-BEGIN
-    IF NEW.user_id IS DISTINCT FROM OLD.user_id THEN
-        RAISE EXCEPTION 'the owner of a % row cannot change', TG_TABLE_NAME
-            USING ERRCODE = 'integrity_constraint_violation';
-    END IF;
-    RETURN NEW;
-END;
-$$;
+-- Like every user-owned table (#17, #58): `user_id` cascades from `users` and is indexed, it never
+-- changes once written (trigger `forbid_owner_change`), and the table cannot be truncated
+-- (`forbid_direct_delete` on TRUNCATE). Both functions come from the training schema migration.
+-- Rows are deleted directly here (sign-out, used ceremonies, removed passkeys), so there is no
+-- row-level delete guard.
 
 -- The WebAuthn user handle of each user who has registered a passkey. Random (UUIDv4 from the OS
 -- CSPRNG), never the user id: authenticators store it, and a UUIDv7 user id would tell them when
@@ -33,6 +23,8 @@ CREATE TABLE webauthn_user_handles (
 
 CREATE TRIGGER webauthn_user_handles_owner BEFORE UPDATE OF user_id ON webauthn_user_handles
     FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
+CREATE TRIGGER webauthn_user_handles_no_truncate BEFORE TRUNCATE ON webauthn_user_handles
+    FOR EACH STATEMENT EXECUTE FUNCTION forbid_direct_delete();
 
 -- WebAuthn credentials (passkeys). A user may have several.
 CREATE TABLE passkeys (
@@ -55,6 +47,8 @@ CREATE TABLE passkeys (
 CREATE INDEX passkeys_user_id_idx ON passkeys (user_id);
 CREATE TRIGGER passkeys_owner BEFORE UPDATE OF user_id ON passkeys
     FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
+CREATE TRIGGER passkeys_no_truncate BEFORE TRUNCATE ON passkeys
+    FOR EACH STATEMENT EXECUTE FUNCTION forbid_direct_delete();
 
 -- External identities (Sign in with Google). Linked by the provider's stable subject (`sub`),
 -- never by email.
@@ -75,6 +69,8 @@ CREATE TABLE oauth_identities (
 
 CREATE TRIGGER oauth_identities_owner BEFORE UPDATE OF user_id ON oauth_identities
     FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
+CREATE TRIGGER oauth_identities_no_truncate BEFORE TRUNCATE ON oauth_identities
+    FOR EACH STATEMENT EXECUTE FUNCTION forbid_direct_delete();
 
 -- Server-side sessions (tower-sessions, through our own store in server/auth/session.rs).
 -- The cookie holds a random session ID; only its SHA-256 is stored here, so a copy of this table
@@ -94,6 +90,8 @@ CREATE INDEX sessions_expires_at_idx ON sessions (expires_at);
 CREATE INDEX sessions_user_id_idx ON sessions (user_id);
 CREATE TRIGGER sessions_owner BEFORE UPDATE OF user_id ON sessions
     FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
+CREATE TRIGGER sessions_no_truncate BEFORE TRUNCATE ON sessions
+    FOR EACH STATEMENT EXECUTE FUNCTION forbid_direct_delete();
 
 -- In-flight sign-in ceremonies: the WebAuthn challenge state, or the Google state, nonce and PKCE
 -- verifier. Short-lived and single-use: consumed with DELETE ... RETURNING, so two concurrent
@@ -125,3 +123,5 @@ CREATE INDEX auth_ceremonies_google_state_idx ON auth_ceremonies ((state ->> 'st
     WHERE kind IN ('google_sign_in', 'google_link');
 CREATE TRIGGER auth_ceremonies_owner BEFORE UPDATE OF user_id ON auth_ceremonies
     FOR EACH ROW EXECUTE FUNCTION forbid_owner_change();
+CREATE TRIGGER auth_ceremonies_no_truncate BEFORE TRUNCATE ON auth_ceremonies
+    FOR EACH STATEMENT EXECUTE FUNCTION forbid_direct_delete();

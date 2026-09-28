@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.table_name AS \"table_name!\" FROM information_schema.tables t\n           WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE'\n             AND NOT EXISTS (\n                 SELECT 1 FROM information_schema.columns c\n                 WHERE c.table_schema = t.table_schema AND c.table_name = t.table_name\n                   AND c.column_name = 'user_id')\n           ORDER BY 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "table_name!",
+        "type_info": "Name"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "1735ccdf2ca3ae07c7c53fab0b7357e670e1510dd9625a3cc3e52aeb97d8ffac"
+}

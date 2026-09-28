@@ -1,0 +1,68 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.id, p.name, p.source_builtin_id, p.archived, p.created_at,\n                  v.id AS \"version_id!\", v.version AS \"version!\", v.document AS \"document!\",\n                  v.created_at AS \"version_created_at!\"\n           FROM programs p\n           JOIN LATERAL (\n               SELECT id, version, document, created_at FROM program_versions\n               WHERE program_id = p.id ORDER BY version DESC LIMIT 1\n           ) v ON true\n           WHERE p.user_id IS NULL AND NOT p.archived\n           ORDER BY p.name, p.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "source_builtin_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "archived",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "version_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "version!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "document!",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "version_created_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "18ea7090e8c95d339a4a17c7e7f1ac89bf70ac13278a46418cb67bd8cfb681c7"
+}

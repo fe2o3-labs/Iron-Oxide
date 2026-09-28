@@ -39,11 +39,14 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Connects to Postgres (retrying while a cold Neon compute wakes up) and applies the
-    /// pending migrations.
+    /// Connects to Postgres (retrying while a cold Neon compute wakes up), applies the pending
+    /// migrations and upserts the built-in programs.
     pub async fn init(config: Arc<Config>) -> Result<Self, DbError> {
         let db = db::connect(&config.database_url, RetryPolicy::STARTUP).await?;
         db::migrate(&db).await?;
+        db::programs::seed_builtins(&db, db::programs::BUILTIN_PROGRAMS)
+            .await
+            .map_err(DbError::Seed)?;
         Ok(Self { config, db })
     }
 }

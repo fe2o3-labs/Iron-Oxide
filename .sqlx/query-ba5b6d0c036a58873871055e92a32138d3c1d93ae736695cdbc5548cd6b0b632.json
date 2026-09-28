@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO users (id) VALUES (uuidv7()) RETURNING id",
+  "query": "SELECT id FROM programs WHERE id = $1 AND user_id = $2 FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -10,11 +10,14 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "79a41e292ae103ac140ee00b3e958cfc327f17da6bec10c7491feb8db21754a3"
+  "hash": "ba5b6d0c036a58873871055e92a32138d3c1d93ae736695cdbc5548cd6b0b632"
 }
