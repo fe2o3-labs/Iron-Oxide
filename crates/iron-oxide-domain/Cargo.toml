@@ -1,16 +1,18 @@
 [package]
 name = "iron-oxide-domain"
-version = "0.1.0"
+description = "Pure domain logic for Iron Oxide: no Dioxus, web-sys or sqlx dependencies."
+version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-thiserror = "2"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
 
 [dev-dependencies]
-proptest = "1"
-serde_json = "1"
+proptest = "1.11.0"
+serde_json = "1.0.151"
 
 [lints]
 workspace = true

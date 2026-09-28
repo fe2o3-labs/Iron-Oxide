@@ -1,0 +1,210 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  # No branch filter: stacked PRs (whose base is not `main`) get CI too.
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  # sqlx macros must compile from the committed `.sqlx/` metadata, never from a live database.
+  SQLX_OFFLINE: "true"
+
+jobs:
+  # The repo is public and built in the open: a leaked secret must fail CI.
+  # Runs on every push and PR and scans the full git history, not only the diff.
+  # The gitleaks binary is used directly (checksum-verified) because `gitleaks/gitleaks-action`
+  # requires a paid license for organisation-owned repositories.
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+      - name: Scan git history
+        run: '"$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 .'
+
+  # The Rust jobs below are skipped until a root `Cargo.toml` exists (it lands with #2).
+  detect:
+    name: Detect Rust workspace
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.check.outputs.rust }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: check
+        run: |
+          if [ -f Cargo.toml ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi
+
+  fmt:
+    name: rustfmt
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: clippy (no features)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: clippy (app, server)
+        run: cargo clippy -p iron-oxide-app --all-targets --features server --locked -- -D warnings
+      - name: clippy (app, web on wasm32)
+        run: cargo clippy -p iron-oxide-app --target wasm32-unknown-unknown --features web --locked -- -D warnings
+
+  test:
+    name: Unit tests
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Tests that need Postgres are `#[ignore = "needs Postgres"]` and run in the integration job.
+      - name: Test the workspace (no features)
+        run: cargo test --workspace --locked
+      - name: Test the app with the server feature
+        run: cargo test -p iron-oxide-app --features server --locked
+      - name: Domain crate builds and tests with plain cargo
+        run: cargo test -p iron-oxide-domain --locked
+
+  # Builds the whole workspace with SQLX_OFFLINE=true (set globally above), so a query whose
+  # `.sqlx/` metadata is missing or stale fails CI without needing a database.
+  sqlx-offline:
+    name: sqlx offline build
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo check --workspace --all-targets --locked
+
+  integration:
+    name: Integration tests (Postgres)
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        # Throwaway credentials for an ephemeral CI container; not a secret.
+        env:
+          POSTGRES_USER: iron_oxide
+          POSTGRES_PASSWORD: iron_oxide
+          POSTGRES_DB: iron_oxide_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U iron_oxide -d iron_oxide_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://iron_oxide:iron_oxide@localhost:5432/iron_oxide_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Once migrations exist (#4), add `cargo sqlx prepare --workspace --check` here, after
+      # running the migrations against this database.
+      - name: Run the tests that need Postgres
+        run: cargo test --workspace --locked -- --ignored
+
+  # Builds the release bundle exactly as the Dockerfile (#7) will, then runs the server and checks
+  # the page, a server function round-trip and /healthz over HTTP.
+  dx-bundle:
+    name: dx bundle + smoke test
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # Must match the `dioxus` version pinned in Cargo.toml.
+      DX_VERSION: 0.7.10
+      DX_SHA256: 4363e4ed2a3f1eb7f4d38d2d59aed59ce43271c44c16b425e92c89a64761fbe7
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install dx (Dioxus CLI)
+        run: |
+          archive="dx-x86_64-unknown-linux-gnu.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/DioxusLabs/dioxus/releases/download/v${DX_VERSION}/${archive}"
+          echo "${DX_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$HOME/.cargo/bin" dx
+          dx --version
+      - name: dx bundle --web --release
+        run: dx bundle --web --release -p iron-oxide-app
+      - name: Smoke test the bundled server
+        run: |
+          bundle=target/dx/iron-oxide-app/release/web
+          ls -la "$bundle"
+          cd "$bundle"
+          IP=127.0.0.1 PORT=8080 ./server > "$RUNNER_TEMP/server.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
+            sleep 1
+          done
+          set -x
+          test "$(curl -sSf http://127.0.0.1:8080/healthz)" = "ok"
+          curl -sSf http://127.0.0.1:8080/ | grep -q "Iron Oxide"
+          curl -sSf http://127.0.0.1:8080/api/server-time | grep -Eq '^[0-9]+$'
+      - name: Server log
+        if: always()
+        run: cat "$RUNNER_TEMP/server.log" || true

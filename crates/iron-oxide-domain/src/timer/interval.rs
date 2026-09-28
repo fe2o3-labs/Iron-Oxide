@@ -292,7 +292,7 @@ impl IntervalTimer {
             return (IntervalPhase::Done, self.plan.rounds());
         }
         let round = u32::try_from(index / 2 + 1).unwrap_or(u32::MAX);
-        if index % 2 == 0 {
+        if index.is_multiple_of(2) {
             (IntervalPhase::Work, round)
         } else {
             (IntervalPhase::Rest, round)

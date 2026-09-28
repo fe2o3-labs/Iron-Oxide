@@ -1,0 +1,7 @@
+# Pinned to an exact stable release so local builds and CI use the same compiler.
+# Only honoured when `cargo` is the rustup proxy (see README, "Toolchain").
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
