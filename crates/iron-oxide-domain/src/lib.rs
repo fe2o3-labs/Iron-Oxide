@@ -13,6 +13,7 @@
 //! - [`ValueError`] for every rejected value.
 //! - The rest timer lives in [`time`] and [`timer`].
 
+pub mod session;
 pub mod time;
 pub mod timer;
 
@@ -32,5 +33,9 @@ pub use ids::{
 };
 pub use percent::Percent;
 pub use reps::Reps;
+pub use session::{
+    Change, LoggedSet, RotationError, Session, SessionError, SessionLog, SessionOutcome,
+    SessionStatus, next_day,
+};
 pub use units::Unit;
 pub use weight::{Rounding, Weight, WeightDisplay};
