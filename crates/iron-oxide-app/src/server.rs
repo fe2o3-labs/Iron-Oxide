@@ -2,9 +2,10 @@
 
 pub mod config;
 pub mod db;
+pub mod dotenv;
 pub mod state;
 
-use std::{process::ExitCode, sync::Arc};
+use std::{future::IntoFuture, process::ExitCode, sync::Arc, time::Duration};
 
 use dioxus::logger::tracing;
 use dioxus::server::axum::{self, Extension, Router, http::StatusCode, routing::get};
@@ -26,25 +27,42 @@ enum ServeError {
         #[source]
         source: std::io::Error,
     },
+    #[error("cannot install the shutdown signal handlers: {0}")]
+    Signals(#[source] std::io::Error),
     #[error("the HTTP server failed: {0}")]
     Serve(#[source] std::io::Error),
+    #[error("in-flight requests did not finish within the {0:?} shutdown grace period")]
+    DrainTimeout(Duration),
+    #[error("stopped immediately on a second shutdown signal")]
+    Forced,
 }
 
-/// Runs the server until SIGTERM or Ctrl-C, then shuts it down gracefully.
+/// How long closing the connection pool may take once serving has stopped.
+const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Runs the server until SIGINT/Ctrl-C or SIGTERM, then shuts it down gracefully.
 ///
 /// Startup: connect to Postgres (with retries) and apply the migrations, then listen on
 /// `IP`:`PORT` (validated by [`Config`]). On a shutdown signal the server stops accepting
-/// connections, lets in-flight requests finish, then closes the pool. Returns a failure exit
-/// code if startup or serving fails.
+/// connections and lets in-flight requests finish, for at most `SHUTDOWN_GRACE_SECS`
+/// (default 20 s); a second signal stops it at once. Then it closes the pool and exits: status 0
+/// after a clean drain, 1 if startup or serving failed or the drain was cut short.
 ///
 /// This replaces `dioxus::serve`, which has no graceful shutdown. What it adds on top is only
 /// server-side hot-patching (`dx serve --hotpatch`); RSX hot reload in the browser still works.
 pub fn serve(config: Config) -> ExitCode {
-    let result = tokio::runtime::Builder::new_multi_thread()
+    let result = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(ServeError::Runtime)
-        .and_then(|runtime| runtime.block_on(run(Arc::new(config))));
+    {
+        Ok(runtime) => {
+            let result = runtime.block_on(run(Arc::new(config)));
+            // Connection tasks cut off by the grace period may still be parked: do not wait.
+            runtime.shutdown_background();
+            result
+        }
+        Err(error) => Err(ServeError::Runtime(error)),
+    };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -63,57 +81,111 @@ async fn run(config: Arc<Config>) -> Result<(), ServeError> {
         app_base_url = %config.app_base_url,
         database = config.database_url.redacted(),
         log_filter = config.log_filter.as_deref().unwrap_or("(default)"),
+        shutdown_grace_secs = config.shutdown_grace.as_secs(),
         auth_configured = config.auth.is_some(),
         "configuration loaded"
     );
 
     let addr = config.bind_addr;
+    let grace = config.shutdown_grace;
     let state = AppState::init(config).await?;
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|source| ServeError::Bind { addr, source })?;
+    let mut signals = ShutdownSignals::install().map_err(ServeError::Signals)?;
     tracing::info!(%addr, "listening");
 
-    let served = axum::serve(listener, router(state.clone()))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(ServeError::Serve);
+    let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = axum::serve(listener, router(state.clone()))
+        .with_graceful_shutdown(async {
+            // Resolves when told to drain (or if the sender is dropped).
+            let _ = drain_rx.await;
+        })
+        .into_future();
+    tokio::pin!(server);
 
-    state.db.close().await;
+    let served = tokio::select! {
+        result = &mut server => result.map_err(ServeError::Serve),
+        signal = signals.next() => {
+            tracing::info!(
+                signal,
+                grace_secs = grace.as_secs(),
+                "shutdown signal received, finishing in-flight requests"
+            );
+            let _ = drain_tx.send(());
+            tokio::select! {
+                result = &mut server => result.map_err(ServeError::Serve),
+                () = tokio::time::sleep(grace) => {
+                    tracing::warn!(
+                        grace_secs = grace.as_secs(),
+                        "requests still in flight after the grace period, closing them"
+                    );
+                    Err(ServeError::DrainTimeout(grace))
+                }
+                signal = signals.next() => {
+                    tracing::warn!(signal, "second shutdown signal, stopping now");
+                    Err(ServeError::Forced)
+                }
+            }
+        }
+    };
+
+    if tokio::time::timeout(POOL_CLOSE_TIMEOUT, state.db.close())
+        .await
+        .is_err()
+    {
+        tracing::warn!("the database pool did not close in time");
+    }
     tracing::info!("shut down");
     served
 }
 
-/// Resolves on SIGTERM (what Fly and Docker send) or Ctrl-C.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::warn!(%error, "cannot listen for Ctrl-C");
-            std::future::pending::<()>().await;
-        }
-    };
-
+/// The signals that stop the server: SIGINT (Ctrl-C, and Fly's default kill signal) and SIGTERM
+/// (Docker's, and what `fly.toml` sets). Handlers stay installed, so a second signal is seen too.
+struct ShutdownSignals {
     #[cfg(unix)]
-    let terminate = async {
-        use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut sigterm) => {
-                sigterm.recv().await;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "cannot listen for SIGTERM");
-                std::future::pending::<()>().await;
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignals {
+    fn install() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Ok(Self {
+                interrupt: signal(SignalKind::interrupt())?,
+                terminate: signal(SignalKind::terminate())?,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    /// Waits for the next signal and returns its name.
+    async fn next(&mut self) -> &'static str {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                Some(()) = self.interrupt.recv() => "SIGINT",
+                Some(()) = self.terminate.recv() => "SIGTERM",
+                else => std::future::pending().await,
             }
         }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {}
-        () = terminate => {}
+        #[cfg(not(unix))]
+        {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => "Ctrl-C",
+                Err(error) => {
+                    tracing::warn!(%error, "cannot listen for Ctrl-C");
+                    std::future::pending().await
+                }
+            }
+        }
     }
-    tracing::info!("shutdown signal received, finishing in-flight requests");
 }
 
 /// Full server router: the Dioxus application merged with the custom routes, with the shared

@@ -21,14 +21,10 @@ fn main() {
 /// message naming each missing or invalid variable, before anything else starts.
 #[cfg(feature = "server")]
 fn main() -> std::process::ExitCode {
-    // A local `.env` is optional (production sets real environment variables, which win).
-    match dotenvy::dotenv() {
-        Ok(_) => {}
-        Err(error) if error.not_found() => {}
-        Err(error) => {
-            eprintln!("error: cannot read the .env file: {error}");
-            return std::process::ExitCode::FAILURE;
-        }
+    // A local `.env` in the working directory is optional; real environment variables win.
+    if let Err(error) = server::dotenv::load(std::path::Path::new(".env")) {
+        eprintln!("error: {error}");
+        return std::process::ExitCode::FAILURE;
     }
 
     match server::Config::from_env() {

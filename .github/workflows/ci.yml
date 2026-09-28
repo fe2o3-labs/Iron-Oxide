@@ -277,7 +277,8 @@ jobs:
           done
           # The startup migrations ran.
           test "$(PGPASSWORD=iron_oxide psql -h localhost -U iron_oxide -d iron_oxide -tAc "SELECT to_regclass('users')")" = "users"
-          # SIGTERM (what Fly sends on deploy) stops it cleanly with status 0.
+          # SIGTERM (Docker's stop signal, and what fly.toml sets) stops it cleanly with status 0.
+          # SIGINT (Fly's default) is handled the same way; the Postgres tests cover it.
           kill -TERM "$server_pid"
           wait "$server_pid"
           grep -q "shut down" "$RUNNER_TEMP/server.log"

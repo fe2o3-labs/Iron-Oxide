@@ -11,6 +11,7 @@ use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
+    time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -22,6 +23,34 @@ use url::Url;
 const DEFAULT_IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 /// Default port, the same as `dioxus::serve` uses when `PORT` is unset.
 const DEFAULT_PORT: u16 = 8080;
+/// Query parameters accepted in `DATABASE_URL`: those sqlx 0.8 understands, plus Neon's
+/// `channel_binding` (ignored by sqlx).
+const ALLOWED_DATABASE_URL_PARAMS: [&str; 19] = [
+    "sslmode",
+    "ssl-mode",
+    "sslrootcert",
+    "ssl-root-cert",
+    "ssl-ca",
+    "sslcert",
+    "ssl-cert",
+    "sslkey",
+    "ssl-key",
+    "statement-cache-capacity",
+    "host",
+    "hostaddr",
+    "port",
+    "dbname",
+    "user",
+    "password",
+    "application_name",
+    "options",
+    "channel_binding",
+];
+/// Default time in-flight requests get to finish after a shutdown signal. It stays below Fly's
+/// `kill_timeout` (30 s in `fly.toml`), leaving room to close the pool before SIGKILL.
+const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
+/// Upper bound for `SHUTDOWN_GRACE_SECS`.
+const MAX_SHUTDOWN_GRACE_SECS: u64 = 300;
 /// A session key must hold at least this many bytes (the size of a `cookie::Key` master key).
 pub const SESSION_KEY_MIN_BYTES: usize = 64;
 
@@ -32,6 +61,7 @@ pub mod vars {
     pub const IP: &str = "IP";
     pub const PORT: &str = "PORT";
     pub const RUST_LOG: &str = "RUST_LOG";
+    pub const SHUTDOWN_GRACE_SECS: &str = "SHUTDOWN_GRACE_SECS";
     pub const WEBAUTHN_RP_ID: &str = "WEBAUTHN_RP_ID";
     pub const WEBAUTHN_ORIGIN: &str = "WEBAUTHN_ORIGIN";
     pub const GOOGLE_CLIENT_ID: &str = "GOOGLE_CLIENT_ID";
@@ -61,6 +91,9 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     /// Log filter (`RUST_LOG`), already validated. Applied by the Dioxus logger.
     pub log_filter: Option<String>,
+    /// How long in-flight requests may run after a shutdown signal (`SHUTDOWN_GRACE_SECS`,
+    /// default 20). Keep it a few seconds below the platform's kill timeout.
+    pub shutdown_grace: Duration,
     /// Sign-in settings. `None` until all auth variables are set; #5 makes them required.
     pub auth: Option<AuthConfig>,
 }
@@ -97,42 +130,68 @@ pub struct DatabaseUrl {
 impl DatabaseUrl {
     /// Parses and validates a `postgres://` or `postgresql://` URL.
     ///
-    /// Error messages never contain the URL, as it may hold a password.
+    /// Error messages never contain the URL or any part of it, as it may hold a password.
+    ///
+    /// A special character in the password (`/`, `?`, `#`, `@`, ...) must be percent-encoded.
+    /// Unencoded, the URL parser ends the host part early and the rest of the password lands in
+    /// the path, query or fragment, where it would be treated as a database name or parameter
+    /// (and could end up in logs), so such URLs are rejected.
     pub fn parse(raw: &str) -> Result<Self, String> {
+        const ENCODE_HINT: &str = "percent-encode special characters in the user name and \
+                                   password (e.g. / as %2F, @ as %40, # as %23, ? as %3F)";
+
         let url = Url::parse(raw).map_err(|error| format!("not a valid URL ({error})"))?;
         if !matches!(url.scheme(), "postgres" | "postgresql") {
             return Err("the scheme must be postgres:// or postgresql://".to_owned());
         }
-        let host = match url.host_str() {
-            Some(host) if !host.is_empty() => host.to_owned(),
-            _ => return Err("the URL has no host".to_owned()),
-        };
+        if url.host_str().is_none_or(str::is_empty) {
+            return Err("the URL has no host".to_owned());
+        }
+        if url.fragment().is_some() {
+            return Err(format!("it has a #fragment; {ENCODE_HINT}"));
+        }
+        // The path is the database name: one segment, and never an `@` (a sign of a split
+        // password).
+        let database = url.path().trim_start_matches('/');
+        if database.contains('/') || database.contains('@') {
+            return Err(format!(
+                "the database name part is malformed; {ENCODE_HINT}"
+            ));
+        }
+        // Only the parameters sqlx understands (plus Neon's channel_binding, which sqlx ignores).
+        // sqlx logs unknown ones with their key and value, which a split password could be.
+        for (key, _) in url.query_pairs() {
+            if !ALLOWED_DATABASE_URL_PARAMS.contains(&key.as_ref()) {
+                return Err(format!(
+                    "it has an unsupported query parameter (allowed: {}); {ENCODE_HINT}",
+                    ALLOWED_DATABASE_URL_PARAMS.join(", ")
+                ));
+            }
+        }
         // sqlx has its own parser: check it accepts the URL too, without echoing its error,
         // which could quote the URL.
-        PgConnectOptions::from_str(raw)
+        let options = PgConnectOptions::from_str(raw)
             .map_err(|_| "sqlx cannot parse it as a Postgres connection URL".to_owned())?;
 
-        let port = url
-            .port()
-            .map(|port| format!(":{port}"))
-            .unwrap_or_default();
-        let database = url.path().trim_start_matches('/');
+        // Built from what sqlx will actually connect to, never from the raw string.
+        let redacted = format!(
+            "{}:{}/{}",
+            options.get_host(),
+            options.get_port(),
+            options.get_database().unwrap_or("(default database)")
+        );
         Ok(Self {
             secret: SecretString::from(raw),
-            redacted: format!("{}://[redacted]@{host}{port}/{database}", url.scheme()),
+            redacted,
         })
     }
 
     /// Connection options for sqlx.
-    #[allow(
-        dead_code,
-        reason = "TEMP: used by the database pool in the next commit"
-    )]
     pub fn connect_options(&self) -> Result<PgConnectOptions, sqlx::Error> {
         PgConnectOptions::from_str(self.secret.expose_secret())
     }
 
-    /// The URL with credentials and query parameters removed, safe to log.
+    /// `host:port/database`, safe to log: no user name, password or parameters.
     pub fn redacted(&self) -> &str {
         &self.redacted
     }
@@ -249,6 +308,7 @@ impl Config {
         });
         let port = env.optional(vars::PORT, parse_port);
         let log_filter = env.optional(vars::RUST_LOG, parse_log_filter);
+        let shutdown_grace = env.optional(vars::SHUTDOWN_GRACE_SECS, parse_grace);
         let auth = load_auth(&mut env);
 
         match (database_url, app_base_url, env.errors.is_empty()) {
@@ -257,6 +317,7 @@ impl Config {
                 app_base_url,
                 bind_addr: SocketAddr::new(ip.unwrap_or(DEFAULT_IP), port.unwrap_or(DEFAULT_PORT)),
                 log_filter,
+                shutdown_grace: shutdown_grace.unwrap_or(DEFAULT_SHUTDOWN_GRACE),
                 auth,
             }),
             _ => Err(ConfigErrors(env.errors)),
@@ -393,19 +454,41 @@ fn parse_origin(raw: &str) -> Result<Url, String> {
 }
 
 fn parse_rp_id(raw: &str) -> Result<String, String> {
-    let valid = raw
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
-        && !raw.starts_with('.')
-        && !raw.ends_with('.');
-    if valid {
-        Ok(raw.to_ascii_lowercase())
-    } else {
-        Err("must be a bare domain name such as example.com (no scheme, port or path)".to_owned())
+    const BARE_DOMAIN: &str =
+        "must be a bare domain name such as example.com (no scheme, port or path)";
+    let rp_id = raw.to_ascii_lowercase();
+    if rp_id == "localhost" {
+        return Ok(rp_id);
     }
+    let labels: Vec<&str> = rp_id.split('.').collect();
+    let valid_labels = labels.iter().all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    });
+    if !valid_labels {
+        return Err(BARE_DOMAIN.to_owned());
+    }
+    if rp_id.parse::<std::net::IpAddr>().is_ok()
+        || labels
+            .last()
+            .is_some_and(|tld| tld.chars().all(|c| c.is_ascii_digit()))
+    {
+        return Err("must be a domain name, not an IP address".to_owned());
+    }
+    // A single label (`com`, `dev`) is a top-level domain, never our site. Multi-label public
+    // suffixes (`co.uk`) are not caught here; browsers reject them as RP IDs anyway.
+    if labels.len() < 2 {
+        return Err(
+            "must be our site's domain (e.g. example.com), not a top-level domain".to_owned(),
+        );
+    }
+    Ok(rp_id)
 }
 
-/// The RP ID must equal the origin's host or be a registrable parent of it.
+/// The origin's host must equal the RP ID or be a subdomain of it (WebAuthn's rule).
 fn rp_id_matches_origin(rp_id: &str, origin: &Url) -> bool {
     origin.host_str().is_some_and(|host| {
         host == rp_id
@@ -420,6 +503,15 @@ fn parse_port(raw: &str) -> Result<u16, String> {
         Ok(0) => Err("must be between 1 and 65535".to_owned()),
         Ok(port) => Ok(port),
         Err(_) => Err("must be a number between 1 and 65535".to_owned()),
+    }
+}
+
+fn parse_grace(raw: &str) -> Result<Duration, String> {
+    match raw.parse::<u64>() {
+        Ok(secs @ 1..=MAX_SHUTDOWN_GRACE_SECS) => Ok(Duration::from_secs(secs)),
+        _ => Err(format!(
+            "must be a whole number of seconds between 1 and {MAX_SHUTDOWN_GRACE_SECS}"
+        )),
     }
 }
 
@@ -510,11 +602,9 @@ mod tests {
         assert_eq!(config.bind_addr, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(config.app_base_url.as_str(), "http://localhost:8080/");
         assert_eq!(config.log_filter, None);
+        assert_eq!(config.shutdown_grace, Duration::from_secs(20));
         assert!(config.auth.is_none());
-        assert_eq!(
-            config.database_url.redacted(),
-            "postgres://[redacted]@localhost:5433/iron_oxide"
-        );
+        assert_eq!(config.database_url.redacted(), "localhost:5433/iron_oxide");
     }
 
     #[test]
@@ -626,7 +716,7 @@ mod tests {
         let config = load(&set(minimal(), vars::DATABASE_URL, url)).unwrap();
         assert_eq!(
             config.database_url.redacted(),
-            "postgresql://[redacted]@ep-x-123.eu-central-1.aws.neon.tech/neondb"
+            "ep-x-123.eu-central-1.aws.neon.tech:5432/neondb"
         );
         config.database_url.connect_options().unwrap();
     }
@@ -681,6 +771,21 @@ mod tests {
     fn ipv6_bind_address() {
         let config = load(&set(set(minimal(), vars::IP, "::"), vars::PORT, "9000")).unwrap();
         assert_eq!(config.bind_addr, "[::]:9000".parse().unwrap());
+    }
+
+    #[test]
+    fn shutdown_grace_boundaries() {
+        let grace = |value| {
+            load(&set(minimal(), vars::SHUTDOWN_GRACE_SECS, value)).map(|c| c.shutdown_grace)
+        };
+        assert_eq!(grace("1").unwrap(), Duration::from_secs(1));
+        assert_eq!(grace("300").unwrap(), Duration::from_secs(300));
+        for value in ["0", "301", "-1", "2.5", "20s"] {
+            assert_single_invalid(
+                &set(minimal(), vars::SHUTDOWN_GRACE_SECS, value),
+                vars::SHUTDOWN_GRACE_SECS,
+            );
+        }
     }
 
     #[test]
@@ -777,8 +882,29 @@ mod tests {
     }
 
     #[test]
+    fn rp_id_must_not_be_a_top_level_domain_or_an_ip() {
+        for (rp_id, origin) in [
+            ("com", "https://app.example.com"),
+            ("dev", "https://example.dev"),
+            ("127.0.0.1", "https://127.0.0.1"),
+            ("10.0.0.1", "http://10.0.0.1:8080"),
+        ] {
+            let vars = set(
+                set(with_auth(), vars::WEBAUTHN_RP_ID, rp_id),
+                vars::WEBAUTHN_ORIGIN,
+                origin,
+            );
+            assert_single_invalid(&vars, vars::WEBAUTHN_RP_ID);
+        }
+    }
+
+    #[test]
     fn rp_id_must_be_a_bare_domain() {
         for value in [
+            "a..b",
+            "-a.com",
+            "a-.com",
+            "a_b.com",
             "https://localhost",
             "localhost:8080",
             ".example.com",
@@ -827,6 +953,105 @@ mod tests {
             &set(with_auth(), vars::GOOGLE_REDIRECT_URL, "/relative"),
             vars::GOOGLE_REDIRECT_URL,
         );
+    }
+
+    /// Passwords with characters that break naive URL handling, each tried raw (as people
+    /// paste them) and percent-encoded (as they should be). Each holds the marker `SECRETxyz`,
+    /// which must never be shown.
+    const NASTY_PASSWORDS: [&str; 11] = [
+        "/SECRETxyz",
+        "2024/SECRETxyz",
+        "SECRETxyz@at",
+        "@SECRETxyz",
+        "SECRETxyz:colon",
+        "SECRETxyz#hash",
+        "SECRETxyz?query",
+        "2024?SECRETxyz",
+        "2024#SECRETxyz",
+        "SECRETxyz%41pct",
+        "/a@b:c#d?SECRETxyz",
+    ];
+
+    const MARKER: &str = "SECRETxyz";
+
+    fn percent_encode(password: &str) -> String {
+        url::form_urlencoded::byte_serialize(password.as_bytes())
+            .collect::<String>()
+            .replace('+', "%20")
+    }
+
+    fn assert_nothing_leaks(url: &str) {
+        let secret = MARKER;
+        match DatabaseUrl::parse(url) {
+            Ok(parsed) => {
+                let shown = format!("{} {parsed:?}", parsed.redacted());
+                assert!(!shown.contains(secret), "{url} -> {shown}");
+                assert!(!shown.contains('@'), "{url} -> {shown}");
+                // What sqlx will connect to must be the real host and database.
+                let options = parsed.connect_options().unwrap();
+                assert_eq!(options.get_host(), "db.example.com", "{url}");
+                assert_eq!(options.get_database(), Some("appdb"), "{url}");
+            }
+            Err(reason) => assert!(!reason.contains(secret), "{url} -> {reason}"),
+        }
+        // Through the whole config too: its Debug and its error Display.
+        let result = load(&[
+            (vars::DATABASE_URL, url),
+            (vars::APP_BASE_URL, "http://localhost"),
+        ]);
+        let shown = match result {
+            Ok(config) => format!("{config:?}"),
+            Err(errors) => format!("{errors} {errors:?}"),
+        };
+        assert!(!shown.contains(secret), "{url} -> {shown}");
+    }
+
+    #[test]
+    fn nasty_passwords_never_leak_raw_or_encoded() {
+        for password in NASTY_PASSWORDS {
+            for user in ["appuser", "", "2024"] {
+                let raw = format!("postgres://{user}:{password}@db.example.com:5432/appdb");
+                assert_nothing_leaks(&raw);
+                let encoded = format!(
+                    "postgres://{user}:{}@db.example.com:5432/appdb?sslmode=require",
+                    percent_encode(password)
+                );
+                assert_nothing_leaks(&encoded);
+                // Encoded passwords are valid and must be accepted.
+                assert!(DatabaseUrl::parse(&encoded).is_ok(), "{encoded}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_raw_slash_in_the_password_is_rejected() {
+        // The URL parser splits these at the `/`: the host becomes the user name and the rest of
+        // the password lands in the path.
+        for url in [
+            "postgres://u:/PWslash9@127.0.0.1:5461/leakdb",
+            "postgres://u:2024/PWslash9@127.0.0.1:5461/leakdb",
+        ] {
+            let reason = DatabaseUrl::parse(url).unwrap_err();
+            assert!(reason.contains("percent-encode"), "{reason}");
+            assert!(!reason.contains("PWslash9"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn unknown_database_url_parameters_are_rejected_without_naming_them() {
+        let reason =
+            DatabaseUrl::parse("postgres://u@db.example.com/appdb?PWsecret9x=1").unwrap_err();
+        assert!(reason.contains("unsupported query parameter"), "{reason}");
+        assert!(!reason.contains("PWsecret9x"), "{reason}");
+    }
+
+    #[test]
+    fn password_query_parameter_is_accepted_and_hidden() {
+        let parsed =
+            DatabaseUrl::parse("postgres://db.example.com/appdb?user=u&password=PWparam9x")
+                .unwrap();
+        assert_eq!(parsed.redacted(), "db.example.com:5432/appdb");
+        assert!(!format!("{parsed:?}").contains("PWparam9x"));
     }
 
     #[test]
