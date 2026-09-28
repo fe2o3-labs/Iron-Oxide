@@ -8,6 +8,7 @@
 compile_error!("wasm builds need `--cfg=web_sys_unstable_apis` (set in .cargo/config.toml)");
 
 mod api;
+mod auth;
 #[cfg(feature = "server")]
 mod server;
 mod ui;

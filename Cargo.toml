@@ -15,9 +15,26 @@ repository = "https://github.com/guizmaii-opensource/Iron-Oxide"
 dioxus = { version = "=0.7.10" }
 iron-oxide-domain = { path = "crates/iron-oxide-domain" }
 
+# Shared by the server and the wasm client (#5, sign-in).
+serde = { version = "1.0.229", features = ["derive"] }
+uuid = { version = "1.26.1", default-features = false, features = ["std", "serde"] }
+# WebAuthn JSON types exchanged by the server functions. Same version as `webauthn-rs`, which pins
+# it exactly. No `wasm` feature: its conversions unwrap, the client has its own (auth/browser.rs).
+webauthn-rs-proto = { version = "=0.5.5", default-features = false }
+
+# Browser-only dependencies (the app's `web` feature). Same versions as Dioxus already uses.
+js-sys = "0.3.106"
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+web-sys = "0.3.106"
+
 # Server-only dependencies (enabled by the app's `server` feature, never compiled to wasm).
+async-trait = "0.1.92"
 base64 = "0.23.1"
 dotenvy = "0.15.7"
+# Sign in with Google (#5). Its `reqwest` feature needs reqwest 0.12 (0.13 is the latest).
+openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
 secrecy = "0.10.3"
 # Held back on 0.8 (0.9.0 is the latest): `tower-sessions-sqlx-store` 0.15 (Postgres sessions, #5)
 # depends on sqlx 0.8, and the session store must share our `PgPool` type.
@@ -30,9 +47,29 @@ sqlx = { version = "0.8.6", default-features = false, features = [
   "uuid",
   "time",
 ] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+subtle = "2.6.1"
 thiserror = "2.0.21"
+time = "0.3.55"
+# Sessions (#5). Our own Postgres store (server/auth/session.rs) implements its `SessionStore`.
+tower-sessions = { version = "0.15.0", default-features = false, features = ["axum-core", "signed"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter"] }
 url = "2.5.8"
+# Passkeys (#5). 0.5.5 is the latest stable release (0.6 is only published as `-dev`
+# pre-releases). Links the system OpenSSL through webauthn-rs-core.
+# - `danger-allow-state-serialisation`: ceremony state is stored server-side in Postgres, so it
+#   must serialize. It never leaves the server.
+# - `conditional-ui`: enables the discoverable (username-less) authentication API.
+webauthn-rs = { version = "0.5.5", default-features = false, features = [
+  "danger-allow-state-serialisation",
+  "conditional-ui",
+] }
+
+# Test-only: a software passkey for WebAuthn ceremony tests, and OpenSSL (already linked by
+# webauthn-rs-core) to generate the mock Google signing key.
+openssl = "0.10.81"
+webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = ["softpasskey"] }
 
 # tokio: the app adds `time` for its server build; `macros`/`rt` are for tests.
 tokio = { version = "1.53.1", features = ["macros", "rt"] }
