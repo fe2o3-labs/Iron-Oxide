@@ -49,14 +49,20 @@ macro_rules! uuid_id {
             ///   generated before it, across threads, in the same millisecond, and when the clock
             ///   goes backwards. One process-wide lock covers the clock read and a 42-bit counter
             ///   that restarts from a random value each millisecond. When the clock is behind,
-            ///   the last millisecond is reused and the counter incremented, so the embedded time
-            ///   may run slightly ahead of the clock until the clock catches up.
+            ///   the last millisecond is reused and the counter incremented. The embedded time
+            ///   then runs ahead of the clock by the whole step back (hours, if the clock was
+            ///   set back by hours) until the clock catches up, so it is only an approximate
+            ///   creation time.
             /// - Across processes (server and clients), IDs are only ordered to the millisecond of
             ///   their clocks.
             ///
-            /// The last 32 bits are random. Works on every target: on `wasm32-unknown-unknown` the
-            /// clock is `Date.now()` and the randomness `crypto.getRandomValues` (uuid's `js`
-            /// feature); elsewhere it is `SystemTime` and the OS RNG.
+            /// IDs are unique and ordered but **not unguessable**: the timestamp is readable, the
+            /// counter is predictable after the first ID of a millisecond, and only the last 32
+            /// bits are fresh randomness. Never use them as secrets, tokens or capability URLs.
+            ///
+            /// Works on every target: on `wasm32-unknown-unknown` the clock is `Date.now()` and the
+            /// randomness `crypto.getRandomValues` (uuid's `js` feature); elsewhere it is
+            /// `SystemTime` and the OS RNG.
             #[cfg(feature = "uuid")]
             #[must_use]
             pub fn new_v7() -> Self {

@@ -44,17 +44,19 @@ impl Generator {
     /// - `now_ms` equal to or behind it (a burst, or a clock that went backwards): keep the last
     ///   millisecond and increment the counter.
     /// - Counter exhausted: move to the next millisecond with a fresh counter.
+    ///
+    /// The new pair is computed first and stored in one assignment, so if `seed` panics the state
+    /// is left exactly as it was.
     pub(super) fn advance(&mut self, now_ms: u64, seed: impl FnOnce() -> u64) -> (u64, u64) {
-        if now_ms > self.last_ms {
-            self.last_ms = now_ms;
-            self.counter = seed() & SEED_MASK;
+        let (last_ms, counter) = if now_ms > self.last_ms {
+            (now_ms, seed() & SEED_MASK)
         } else if self.counter < MAX_COUNTER {
-            self.counter += 1;
+            (self.last_ms, self.counter + 1)
         } else {
-            self.last_ms = self.last_ms.saturating_add(1);
-            self.counter = seed() & SEED_MASK;
-        }
-        (self.last_ms, self.counter)
+            (self.last_ms.saturating_add(1), seed() & SEED_MASK)
+        };
+        *self = Self { last_ms, counter };
+        (last_ms, counter)
     }
 }
 
@@ -92,7 +94,9 @@ static GENERATOR: Mutex<Generator> = Mutex::new(Generator::new());
 /// Generates the next id. The clock is read while the lock is held, so the order of the ids is
 /// the order in which callers took the lock.
 pub(super) fn next() -> Uuid {
-    // `advance` cannot leave the state half-updated, so a poisoned lock is still usable.
+    // A poisoned lock is still usable: `advance` either stores a complete new `(ms, counter)` or,
+    // if the RNG panics, leaves the previous one untouched, so the state is always one that was
+    // actually emitted.
     let mut generator = GENERATOR.lock().unwrap_or_else(PoisonError::into_inner);
     let (ms, counter) = generator.advance(now_ms(), random_seed);
     drop(generator);
@@ -139,6 +143,18 @@ mod tests {
         assert_eq!(generator.advance(5, || 10), (5, 10));
         assert_eq!(generator.advance(5, || unreachable!()), (5, 11));
         assert_eq!(generator.advance(5, || unreachable!()), (5, 12));
+    }
+
+    #[test]
+    fn a_panicking_seed_leaves_the_state_unchanged() {
+        let mut generator = Generator::new();
+        assert_eq!(generator.advance(5, || 10), (5, 10));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            generator.advance(9, || panic!("rng failure"))
+        }));
+        assert!(result.is_err());
+        assert_eq!((generator.last_ms, generator.counter), (5, 10));
+        assert_eq!(generator.advance(5, || unreachable!()), (5, 11));
     }
 
     #[test]
