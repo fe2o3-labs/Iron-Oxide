@@ -23,7 +23,9 @@ use super::set::LoggedSet;
 ///   [`SessionError::SetConflict`];
 /// - ending the session again with the same outcome and time is a no-op.
 ///
-/// Serializes as `{"session": {...}, "sets": [...]}`.
+/// Serializes as `{"session": {...}, "sets": [...]}`. Unknown fields, here and in the nested
+/// session and sets, are ignored on load, so a localStorage entry written by a newer version of the
+/// app still loads in an older one (the extra fields are dropped when it is saved again).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     try_from = "SessionLogRepr<T>",
@@ -129,16 +131,22 @@ impl<T: Ord + Copy> SessionLog<T> {
     ///
     /// # Errors
     /// - [`SessionError::AlreadyEnded`] when it has already ended with another outcome or time.
-    /// - [`SessionError::EndBeforeStart`] when `at` is before the start.
+    /// - [`SessionError::EndBeforeStart`] when `at` is before the start (checked before the sets).
     /// - [`SessionError::EndBeforeSet`] when `at` is before a logged set was completed.
     pub fn end(&mut self, outcome: SessionOutcome, at: T) -> Result<Change, SessionError> {
-        if !self.session.is_ended()
-            && let Some(set) = self.sets.iter().find(|set| set.completed_at > at)
-        {
-            return Err(SessionError::EndBeforeSet {
-                session_id: self.session.id(),
-                set_id: set.id,
-            });
+        // Once ended, the session alone decides: a retry is a no-op, anything else `AlreadyEnded`.
+        if !self.session.is_ended() {
+            if at < self.session.started_at() {
+                return Err(SessionError::EndBeforeStart {
+                    session_id: self.session.id(),
+                });
+            }
+            if let Some(set) = self.sets.iter().find(|set| set.completed_at > at) {
+                return Err(SessionError::EndBeforeSet {
+                    session_id: self.session.id(),
+                    set_id: set.id,
+                });
+            }
         }
         self.session.end(outcome, at)
     }
@@ -344,6 +352,48 @@ mod tests {
         assert_eq!(log.abandon(6_000), already);
         // Even a time that would otherwise be invalid reports the session as already ended.
         assert_eq!(log.abandon(0), already);
+    }
+
+    #[test]
+    fn re_ending_an_ended_session_earlier_is_already_ended_even_with_sets() {
+        let mut log = start();
+        log.add_set(set(1, 2_000)).unwrap();
+        log.complete(3_000).unwrap();
+        let already = Err(SessionError::AlreadyEnded {
+            session_id: session_id(),
+            status: SessionStatus::Completed,
+        });
+        // Before the last set, and before the start: the session has ended, that is the error.
+        assert_eq!(log.complete(1_500), already);
+        assert_eq!(log.complete(START - 1), already);
+        assert_eq!(log.session().finished_at(), Some(3_000));
+    }
+
+    #[test]
+    fn ending_before_the_start_is_reported_as_such_even_with_sets() {
+        let mut log = start();
+        log.add_set(set(1, 2_000)).unwrap();
+        assert_eq!(
+            log.complete(START - 1),
+            Err(SessionError::EndBeforeStart {
+                session_id: session_id()
+            })
+        );
+        assert!(!log.session().is_ended());
+    }
+
+    #[test]
+    fn unknown_json_fields_are_ignored_on_load() {
+        let mut log = start();
+        log.add_set(set(1, 2_000)).unwrap();
+        let mut json = serde_json::to_value(&log).unwrap();
+        json["from_the_future"] = true.into();
+        json["session"]["notes"] = "felt strong".into();
+        json["sets"][0]["rpe"] = 8.into();
+        assert_eq!(
+            serde_json::from_value::<SessionLog<i64>>(json).unwrap(),
+            log
+        );
     }
 
     #[test]

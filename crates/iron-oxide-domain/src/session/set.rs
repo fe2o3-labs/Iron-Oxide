@@ -17,7 +17,7 @@ use crate::weight::Weight;
 /// unique IDs) are enforced by [`SessionLog`](super::SessionLog).
 ///
 /// Serializes as an object with the field names below; `weight` and `duration` are `null` when
-/// absent.
+/// absent. Unknown fields are ignored on load, for forward compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LoggedSet<T> {
     /// Client-generated ID, the idempotency key.

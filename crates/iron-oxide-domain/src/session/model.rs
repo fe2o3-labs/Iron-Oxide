@@ -94,7 +94,8 @@ pub enum Change {
 /// logged sets.
 ///
 /// Serializes as an object with `id`, `program_version_id`, `day`, `started_at`, `finished_at`
-/// (`null` while in progress) and `status`.
+/// (`null` while in progress) and `status`. Unknown fields are ignored on load, for forward
+/// compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(
     try_from = "SessionRepr<T>",
