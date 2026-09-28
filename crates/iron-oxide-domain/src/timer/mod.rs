@@ -25,8 +25,13 @@
 //!   at, so no instant can be "ahead" of the clock and silence the timer. After the clock steps
 //!   back (or a reload on a device whose clock differs), alerts already announced for the current
 //!   arming stay announced and never fire twice, and the others still fire once their threshold is
-//!   reached. A clock that runs ahead fires an alert early, never twice: once it is corrected the
-//!   screen counts down again, without a second beep.
+//!   reached.
+//! - **Accepted trade-off: a clock running ahead.** It fires an alert early and never twice, so
+//!   once the clock is corrected the screen counts down again but the real end is silent (the
+//!   finish was already announced). Likewise `-15s` or skip taken on a fast clock arm at that
+//!   instant, so after the correction the remaining rest can run out silently. Alerts are never
+//!   duplicated and no timer is silenced by a clock running behind; only a clock that was ahead
+//!   can cost a beep.
 //!
 //! The pure [`RestTimer::alert_between`] and [`IntervalTimer::event_between`] give the alert
 //! crossed between two instants for the current arming, ignoring what was announced.

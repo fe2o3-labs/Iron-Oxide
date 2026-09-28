@@ -296,7 +296,8 @@ impl IntervalTimer {
 
     fn position(&self, at: Timestamp) -> Position {
         let elapsed = at.saturating_millis_since(self.started_at);
-        if elapsed >= self.plan.total_ms() {
+        // The end saturates at the latest timestamp: reaching it completes the plan too.
+        if elapsed >= self.plan.total_ms() || at >= self.ends_at() {
             return Position {
                 index: self.plan.done_index(),
                 remaining_ms: 0,
@@ -684,5 +685,22 @@ mod tests {
         let mut done = timer(5).unwrap();
         assert_eq!(done.observe(at(1_000_000)), None);
         assert!(timer(6).unwrap_err().to_string().contains("past the end"));
+    }
+
+    #[test]
+    fn completes_when_the_end_saturates_at_the_latest_timestamp() {
+        let near_the_end = Timestamp::from_epoch_millis(i64::MAX - 1_000);
+        let plan = IntervalPlan::new(secs(10), secs(5), 2).unwrap();
+        let mut timer = IntervalTimer::start(near_the_end, plan);
+        assert_eq!(timer.ends_at(), Timestamp::from_epoch_millis(i64::MAX));
+        assert_eq!(
+            timer.status(near_the_end),
+            status(IntervalPhase::Work, 1, 10_000)
+        );
+        let last = Timestamp::from_epoch_millis(i64::MAX);
+        assert_eq!(timer.status(last), status(IntervalPhase::Done, 2, 0));
+        assert!(timer.is_finished(last));
+        assert_eq!(timer.observe(last), Some(IntervalEvent::Completed));
+        assert_eq!(timer.observe(last), None);
     }
 }
