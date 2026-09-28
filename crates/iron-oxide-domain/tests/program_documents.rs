@@ -12,7 +12,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use iron_oxide_domain::program::{PROGRAM_SCHEMA_JSON, Program, ProgramError, ValidationErrorKind};
+use iron_oxide_domain::program::{
+    PROGRAM_SCHEMA_JSON, Program, ProgramError, ValidationErrorKind, builtin_programs,
+};
 use serde_json::Value;
 
 fn fixtures(dir: &str) -> Vec<PathBuf> {
@@ -57,6 +59,21 @@ fn valid_fixtures_parse_validate_round_trip_and_match_the_schema() {
             "{}",
             path.display()
         );
+    }
+}
+
+#[test]
+fn builtin_programs_match_the_schema() {
+    let validator = schema_validator();
+    for builtin in builtin_programs().unwrap() {
+        assert_eq!(
+            schema_errors(&validator, builtin.json()),
+            Vec::<String>::new(),
+            "{}",
+            builtin.id()
+        );
+        let written = builtin.program().to_json_pretty().unwrap();
+        assert_eq!(schema_errors(&validator, &written), Vec::<String>::new());
     }
 }
 

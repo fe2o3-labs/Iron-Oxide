@@ -20,6 +20,7 @@
 //! them per user and per exercise, and asks for the ones listed by
 //! [`Program::training_max_exercises`] before the first session.
 
+mod builtin;
 mod error;
 mod ids;
 mod model;
@@ -30,11 +31,12 @@ mod values;
 
 use std::collections::BTreeSet;
 
+pub use builtin::{BuiltinProgram, BuiltinProgramError, builtin_program, builtin_programs};
 pub use error::{
     JsonPath, ParseError, PathSegment, ProgramError, ValidationError, ValidationErrorKind,
     ValidationErrors,
 };
-pub use ids::{InvalidSlug, SupersetId};
+pub use ids::{BuiltinProgramId, InvalidSlug, SupersetId};
 pub use model::{Day, Deload, Exercise, Program, ProgressionRule, WarmupSet, Work};
 pub use validate::{CURRENT_SCHEMA_VERSION, limits};
 pub use values::{

@@ -1,0 +1,208 @@
+{
+  "$schema": "https://raw.githubusercontent.com/guizmaii-opensource/Iron-Oxide/main/schemas/program.schema.json",
+  "schema_version": 1,
+  "name": "Full-body 3-day barbell",
+  "description": "Three full-body barbell sessions a week on non-consecutive days (e.g. Monday, Wednesday, Friday), rotating A, B, C. Squat every session, bench and overhead press alternate, one hinge per session. The starting loads are deliberately light: set each one so the first session feels easy with clean technique, then let the progression add weight. Warm-up sets that come out lighter than the empty bar are done with the bar.",
+  "days": [
+    {
+      "id": "a",
+      "name": "Day A",
+      "exercises": [
+        {
+          "id": "back-squat",
+          "name": "Back squat",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "kg": 40 },
+          "rest": 180,
+          "notes": "Brace before each rep, break at hips and knees together, hit at least parallel.",
+          "warmup": [
+            { "sets": 2, "reps": 5, "load": { "kg": 20 } },
+            { "reps": 5, "load": { "percent_of_working_weight": 60 } },
+            { "reps": 3, "load": { "percent_of_working_weight": 80 } }
+          ],
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": { "kg": 2.5 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          }
+        },
+        {
+          "id": "bench-press",
+          "name": "Bench press",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "kg": 30 },
+          "rest": 180,
+          "notes": "Shoulder blades pinched, feet planted, touch the lower chest. Use safety arms or a spotter.",
+          "warmup": [
+            { "sets": 2, "reps": 8, "load": { "kg": 20 } },
+            { "reps": 3, "load": { "percent_of_working_weight": 80 } }
+          ],
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": { "kg": 2.5 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          }
+        },
+        {
+          "id": "barbell-row",
+          "name": "Barbell row",
+          "work": { "reps": { "sets": 3, "reps": { "min": 8, "max": 12 } } },
+          "load": { "kg": 30 },
+          "rest": 120,
+          "notes": "Torso close to horizontal, pull to the lower chest, no jerking.",
+          "warmup": [{ "reps": 8, "load": { "kg": 20 } }],
+          "progression": { "double_progression": { "increment": { "kg": 2.5 } } }
+        },
+        {
+          "id": "plank",
+          "name": "Plank",
+          "work": { "hold": { "sets": 3, "seconds": 30 } },
+          "rest": 60,
+          "notes": "Forearms under shoulders, squeeze glutes, straight line from head to heels. Stop when the hips sag."
+        }
+      ]
+    },
+    {
+      "id": "b",
+      "name": "Day B",
+      "exercises": [
+        {
+          "id": "back-squat",
+          "name": "Back squat",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "kg": 40 },
+          "rest": 180,
+          "notes": "Brace before each rep, break at hips and knees together, hit at least parallel.",
+          "warmup": [
+            { "sets": 2, "reps": 5, "load": { "kg": 20 } },
+            { "reps": 5, "load": { "percent_of_working_weight": 60 } },
+            { "reps": 3, "load": { "percent_of_working_weight": 80 } }
+          ],
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": { "kg": 2.5 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          }
+        },
+        {
+          "id": "overhead-press",
+          "name": "Overhead press",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "kg": 25 },
+          "rest": 180,
+          "notes": "Standing, glutes tight, bar path close to the face, lock out overhead.",
+          "warmup": [
+            { "sets": 2, "reps": 5, "load": { "kg": 20 } }
+          ],
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": { "kg": 1.25 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          }
+        },
+        {
+          "id": "deadlift",
+          "name": "Deadlift",
+          "work": { "reps": { "sets": 1, "reps": 5 } },
+          "load": { "kg": 50 },
+          "rest": 180,
+          "notes": "Bar over mid-foot, flat back, push the floor away. Reset each rep.",
+          "warmup": [
+            { "reps": 5, "load": { "percent_of_working_weight": 50 } },
+            { "reps": 3, "load": { "percent_of_working_weight": 75 } }
+          ],
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": { "kg": 5 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          }
+        },
+        {
+          "id": "chin-up",
+          "name": "Chin-up",
+          "work": { "reps": { "sets": 3, "reps": { "min": 3, "max": 10 } } },
+          "rest": 30,
+          "notes": "Superset with barbell curls. Full hang at the bottom. Use a band if you cannot do 3.",
+          "superset": "a"
+        },
+        {
+          "id": "barbell-curl",
+          "name": "Barbell curl",
+          "work": { "reps": { "sets": 3, "reps": { "min": 8, "max": 12 } } },
+          "load": { "kg": 15 },
+          "rest": 90,
+          "notes": "Elbows pinned to the sides, no swinging.",
+          "superset": "a",
+          "progression": { "double_progression": { "increment": { "kg": 1.25 } } }
+        }
+      ]
+    },
+    {
+      "id": "c",
+      "name": "Day C",
+      "exercises": [
+        {
+          "id": "back-squat",
+          "name": "Back squat",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "kg": 40 },
+          "rest": 180,
+          "notes": "Brace before each rep, break at hips and knees together, hit at least parallel.",
+          "warmup": [
+            { "sets": 2, "reps": 5, "load": { "kg": 20 } },
+            { "reps": 5, "load": { "percent_of_working_weight": 60 } },
+            { "reps": 3, "load": { "percent_of_working_weight": 80 } }
+          ],
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": { "kg": 2.5 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          }
+        },
+        {
+          "id": "bench-press",
+          "name": "Bench press",
+          "work": { "reps": { "sets": 3, "reps": 5 } },
+          "load": { "kg": 30 },
+          "rest": 180,
+          "notes": "Shoulder blades pinched, feet planted, touch the lower chest. Use safety arms or a spotter.",
+          "warmup": [
+            { "sets": 2, "reps": 8, "load": { "kg": 20 } },
+            { "reps": 3, "load": { "percent_of_working_weight": 80 } }
+          ],
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": { "kg": 2.5 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          }
+        },
+        {
+          "id": "romanian-deadlift",
+          "name": "Romanian deadlift",
+          "work": { "reps": { "sets": 3, "reps": { "min": 8, "max": 12 } } },
+          "load": { "kg": 40 },
+          "rest": 120,
+          "tempo": "3-0-1-0",
+          "notes": "Soft knees, push the hips back until the hamstrings stretch, keep the bar against the legs.",
+          "warmup": [{ "reps": 8, "load": { "percent_of_working_weight": 50 } }],
+          "progression": { "double_progression": { "increment": { "kg": 2.5 } } }
+        },
+        {
+          "id": "plank",
+          "name": "Plank",
+          "work": { "hold": { "sets": 3, "seconds": 30 } },
+          "rest": 60,
+          "notes": "Forearms under shoulders, squeeze glutes, straight line from head to heels. Stop when the hips sag."
+        }
+      ]
+    }
+  ],
+  "rotation": ["a", "b", "c"]
+}

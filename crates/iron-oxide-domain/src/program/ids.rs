@@ -1,4 +1,4 @@
-//! Slug identifiers of the program module: superset groups. Day ids are
+//! Slug identifiers of the program module: superset groups and built-in programs. Day ids are
 //! [`DayId`](crate::DayId), next to [`ExerciseId`](crate::ExerciseId).
 
 use std::fmt;
@@ -94,6 +94,12 @@ slug_id!(
     SupersetId,
     "superset id"
 );
+slug_id!(
+    /// Identifies a program shipped with the app (`full-body-3day`). Stable across releases, so a
+    /// user's copy can record where it came from.
+    BuiltinProgramId,
+    "built-in program id"
+);
 
 #[cfg(test)]
 mod tests {
@@ -108,6 +114,10 @@ mod tests {
         assert_eq!("upper-1".parse::<SupersetId>().unwrap(), group);
         assert_eq!(String::from(group.clone()), "upper-1");
         assert_eq!(SupersetId::try_from("upper-1".to_owned()).unwrap(), group);
+        assert_eq!(
+            BuiltinProgramId::new("full-body-3day").unwrap().as_str(),
+            "full-body-3day"
+        );
     }
 
     #[test]

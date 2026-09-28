@@ -9,6 +9,7 @@ A strength-training PWA written in Rust with [Dioxus](https://dioxuslabs.com) fu
 |---|---|
 | `crates/iron-oxide-domain` | Pure domain logic. No Dioxus, web-sys or sqlx dependencies; tests run with plain `cargo test -p iron-oxide-domain`. |
 | `crates/iron-oxide-app` | The Dioxus fullstack app. The `web` feature builds the browser client (wasm32); the `server` feature builds the axum server (SSR, server functions, `/healthz`). |
+| `programs/` | Built-in training programs (JSON), embedded in the domain crate. |
 | `schemas/program.schema.json` | JSON Schema of a program document, generated from the domain types. Regenerate with `UPDATE_SCHEMA=1 cargo test -p iron-oxide-domain program::schema`; a test fails when it is stale. |
 
 ## Pinned versions
