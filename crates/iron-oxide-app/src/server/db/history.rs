@@ -312,14 +312,15 @@ mod tests {
     async fn page_lists_ended_sessions_by_finish_time_with_their_program(pool: PgPool) {
         let user = testing::user(&pool).await;
         let (program, version) = testing::program(&pool, user).await;
-        // Started in one order, finished in another.
+        // Started in one order, finished in another (each ended before the next starts: one
+        // session in progress at a time).
         let early = start(&pool, user, version, at(0)).await;
-        let late = start(&pool, user, version, at(10)).await;
-        let running = start(&pool, user, version, at(20)).await;
-        finish(&pool, user, late, at(100)).await;
         sessions::finish(&pool, user, early, SessionOutcome::Abandoned, at(200))
             .await
             .unwrap();
+        let late = start(&pool, user, version, at(10)).await;
+        finish(&pool, user, late, at(100)).await;
+        let running = start(&pool, user, version, at(20)).await;
         log(
             &pool,
             user,
@@ -438,9 +439,8 @@ mod tests {
     async fn exercise_sets_come_from_ended_sessions_and_have_a_weight(pool: PgPool) {
         let user = testing::user(&pool).await;
         let (_, version) = testing::program(&pool, user).await;
+        // Each session ends before the next starts: one session in progress at a time.
         let second = start(&pool, user, version, at(1_000)).await;
-        let first = start(&pool, user, version, at(0)).await;
-        let running = start(&pool, user, version, at(2_000)).await;
         let heavy = LoggedSet {
             reps: 3,
             weight_ng: Some(120_000_000_000_000),
@@ -453,9 +453,12 @@ mod tests {
             completed_at: at(1_050),
             ..new_set(second)
         };
+        for set in [heavy.clone(), light.clone()] {
+            log(&pool, user, set).await;
+        }
+        finish(&pool, user, second, at(3_000)).await;
+        let first = start(&pool, user, version, at(0)).await;
         for set in [
-            heavy.clone(),
-            light.clone(),
             new_set(first),
             LoggedSet {
                 weight_ng: None,
@@ -465,13 +468,12 @@ mod tests {
                 exercise_id: "bench".to_owned(),
                 ..new_set(first)
             },
-            new_set(running),
         ] {
             log(&pool, user, set).await;
         }
-        for id in [first, second] {
-            finish(&pool, user, id, at(3_000)).await;
-        }
+        finish(&pool, user, first, at(3_000)).await;
+        let running = start(&pool, user, version, at(2_000)).await;
+        log(&pool, user, new_set(running)).await;
         let found = exercise_sets(&pool, user, "back-squat").await.unwrap();
         assert_eq!(
             found,
@@ -513,29 +515,27 @@ mod tests {
         let user = testing::user(&pool).await;
         let (_, version) = testing::program(&pool, user).await;
         assert!(logged_exercises(&pool, user).await.unwrap().is_empty());
-        let old = start(&pool, user, version, at(0)).await;
-        let recent = start(&pool, user, version, at(1_000)).await;
-        let running = start(&pool, user, version, at(2_000)).await;
-        for (session, exercise) in [
-            (old, "back-squat"),
-            (old, "back-squat"),
-            (old, "bench"),
-            (recent, "back-squat"),
-            (recent, "pull-up"),
-            (running, "deadlift"),
+        // Each session ends before the next starts: one session in progress at a time.
+        for (start_at, exercises, ended) in [
+            (0, &["back-squat", "back-squat", "bench"][..], true),
+            (1_000, &["back-squat", "pull-up"][..], true),
+            (2_000, &["deadlift"][..], false),
         ] {
-            log(
-                &pool,
-                user,
-                LoggedSet {
-                    exercise_id: exercise.to_owned(),
-                    ..new_set(session)
-                },
-            )
-            .await;
-        }
-        for id in [old, recent] {
-            finish(&pool, user, id, at(3_000)).await;
+            let session = start(&pool, user, version, at(start_at)).await;
+            for exercise in exercises {
+                log(
+                    &pool,
+                    user,
+                    LoggedSet {
+                        exercise_id: (*exercise).to_owned(),
+                        ..new_set(session)
+                    },
+                )
+                .await;
+            }
+            if ended {
+                finish(&pool, user, session, at(3_000)).await;
+            }
         }
         let found = logged_exercises(&pool, user).await.unwrap();
         let summary: Vec<(&str, u32, OffsetDateTime)> = found
