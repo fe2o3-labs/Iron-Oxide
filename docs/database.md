@@ -207,8 +207,18 @@ types mirror them field for field, and switch to them once they are merged.
 | `history` | The history screens (#20): `page` (ended sessions, most recently finished first, paged by `(finished_at, id)` with microsecond cursors, served by the partial `workout_sessions_history_idx`), `entry` (one session with its program name, version number and working-set count), `exercise_sets` (weighted sets of one exercise in ended sessions, for the charts), `logged_exercises` |
 | `sets` | `upsert_idempotent`, `list_for_session`, `completed_for_exercise` (sets of one exercise after a time, in completed sessions of any version of a program: the progression input of #57, served by the `(user_id, exercise_id, completed_at)` index) |
 
+A user has at most one session in progress: the partial unique index
+`workout_sessions_one_in_progress_idx` on `workout_sessions (user_id) WHERE status =
+'in_progress'` refuses a second one (`RepoError::SessionInProgress`, a 409), even for concurrent
+starts.
+
 Rules that span rows and are checked by the domain (`SessionLog`, #54) before a write, not by the
 database: a set completed before its session started or after it ended.
+
+The history reads for #18 are `sessions::list_in_program` (the rotation and progression input:
+every session of a program, oldest first), `sets::completed_in_program` (the sets of its completed
+sessions) and `sets::completed_for_exercises_before` (the personal-record history, any program,
+strictly before a session).
 
 ## Built-in programs
 

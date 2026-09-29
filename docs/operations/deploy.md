@@ -119,7 +119,10 @@ the new machines refuse to start (the old ones keep serving). `WEBAUTHN_ORIGIN` 
 `GOOGLE_REDIRECT_URL` must match `APP_BASE_URL`, so change all three together when moving to the
 custom domain.
 
-`IP` and `PORT` are not secrets: they are set in `fly.toml` (`0.0.0.0`, `8080`).
+`IP` and `PORT` are not secrets: they are set in `fly.toml` (`0.0.0.0`, `8080`), as is
+`CLIENT_IP_SOURCE = "fly"`, which makes the rate limits key clients by the `Fly-Client-IP` header
+instead of the proxy's address (see [docs/rate-limiting.md](../rate-limiting.md)). Keep it: without
+it, every user shares one set of per-IP limits.
 
 List what is set (values are never shown) with `fly secrets list`.
 
@@ -147,6 +150,35 @@ curl -sS https://iron-oxide.fly.dev/readyz    # database reachable
 
 `https://iron-oxide.fly.dev` is served over HTTPS with Fly's certificate, and `force_https`
 redirects plain HTTP to it.
+
+**One-off check (after the first deploy with rate limiting, #23): Fly's proxy overwrites
+`Fly-Client-IP`.**
+
+The rate limits trust that header in `fly` mode (see [rate-limiting.md](../rate-limiting.md)), and
+Fly's docs don't state explicitly that a value sent by the client is replaced.
+
+- [ ] From one machine, send 31 sign-in begins that all claim to come from `198.51.100.1`, then one
+      that claims `198.51.100.2`:
+
+  ```sh
+  url=https://iron-oxide.fly.dev/api/auth/passkey/sign-in/begin
+  begin() {
+    curl -4 -sS -o /dev/null -w '%{http_code}\n' -X POST "$url" \
+      -H 'Origin: https://iron-oxide.fly.dev' -H 'Content-Type: application/json' \
+      -H "Fly-Client-IP: $1" --data '{}'
+  }
+  for i in $(seq 31); do begin 198.51.100.1; done | sort | uniq -c   # 30 × 200, then 429
+  begin 198.51.100.2                                                    # must be 429
+  ```
+
+  - **The last one is `429`:** the proxy replaced the header with your real address, and every
+    request counted against it. Nothing to do.
+  - **The last one is `200`:** clients can choose their own bucket. Set `CLIENT_IP_SOURCE = "peer"`
+    in `fly.toml` and redeploy (every user then shares one set of per-IP limits, which is safe but
+    strict), and open an issue.
+
+  Use the custom domain in `url` and `Origin` once it is live. The 30 requests leave 30 short-lived
+  sign-in rows, which the cleanup deletes. Your IP is limited for about a minute afterwards.
 
 ### 5. Deploy from GitHub Actions
 

@@ -20,6 +20,10 @@ pub enum RepoError {
     /// The session has ended: no new set can be added to it.
     #[error("the session has already ended")]
     SessionEnded,
+    /// The user already has another session in progress (at most one at a time, enforced by the
+    /// `workout_sessions_one_in_progress_idx` index).
+    #[error("another session is in progress")]
+    SessionInProgress,
     /// The program is archived, so it cannot be made the active program.
     #[error("the program is archived")]
     ProgramArchived,

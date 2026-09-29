@@ -876,8 +876,10 @@ async fn googles_error_with_the_right_state_ends_the_flow(db: PgPool) {
 #[sqlx::test]
 #[ignore = "needs Postgres"]
 async fn a_new_begin_replaces_the_previous_ceremony_row(db: PgPool) {
-    // Repeated begins on one cookie must not pile up rows (full rate limiting is #23).
-    let app = TestApp::new(db.clone()).await;
+    // Repeated begins on one cookie must not pile up rows, even without the per-IP limit (#23).
+    let mut rate_limit = crate::server::rate_limit::RateLimitConfig::default();
+    rate_limit.limits.auth_begin.per_ip = None;
+    let app = TestApp::with_rate_limit(db.clone(), rate_limit).await;
     let mut browser = app.browser();
     for _ in 0..20 {
         let _: RequestChallengeResponse = browser.call(SIGN_IN_BEGIN, json!({})).await.unwrap();

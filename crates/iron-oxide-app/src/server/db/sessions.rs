@@ -141,12 +141,13 @@ impl WorkoutSession {
 /// # Errors
 /// - [`RepoError::Conflict`] when the user already has a session with this id and other values.
 ///   Another user's sessions play no part: ids are only unique per user.
+/// - [`RepoError::SessionInProgress`] when the user has another session in progress.
 /// - [`RepoError::NotFound`] when the program version is not one of the user's.
 /// - [`RepoError::Invalid`] for a day id that is not a slug.
 pub async fn start(pool: &PgPool, user: UserId, session: &NewSession) -> Result<Change, RepoError> {
     // Ids are unique per user (primary key `(user_id, id)`): another user's session with the same
     // id is a different row and never gets in the way.
-    let inserted = sqlx::query!(
+    let result = sqlx::query!(
         "INSERT INTO workout_sessions (id, user_id, program_version_id, day_id, status, started_at)
          VALUES ($1, $2, $3, $4, 'in_progress', $5)
          ON CONFLICT (user_id, id) DO NOTHING",
@@ -157,9 +158,14 @@ pub async fn start(pool: &PgPool, user: UserId, session: &NewSession) -> Result<
         session.started_at,
     )
     .execute(pool)
-    .await?
-    .rows_affected();
-    if inserted == 1 {
+    .await;
+    // Another session in progress: unless it is this very one (a concurrent duplicate of this
+    // request can hit this index before the primary key), refuse.
+    let in_progress = matches!(
+        &result,
+        Err(sqlx::Error::Database(error)) if error.constraint() == Some(ONE_IN_PROGRESS)
+    );
+    if !in_progress && result?.rows_affected() == 1 {
         return Ok(Change::Applied);
     }
     // This user already has a session with this id: compare with it.
@@ -177,11 +183,15 @@ pub async fn start(pool: &PgPool, user: UserId, session: &NewSession) -> Result<
     match same {
         Some(true) => Ok(Change::Unchanged),
         Some(false) => Err(RepoError::Conflict),
+        None if in_progress => Err(RepoError::SessionInProgress),
         // Not inserted, yet no row of this user: cannot happen while sessions are never deleted
         // (except with their user). Nothing was saved, so a retry is the right answer.
         None => Err(RepoError::Transient),
     }
 }
+
+/// The partial unique index that allows one session in progress per user.
+const ONE_IN_PROGRESS: &str = "workout_sessions_one_in_progress_idx";
 
 /// Ends one of the user's in-progress sessions. Idempotent: ending it again with the same outcome
 /// and time is [`Change::Unchanged`].
@@ -304,11 +314,39 @@ pub async fn list(
     .collect()
 }
 
+/// Every session run from any version of `program`, whatever its status, oldest first (by start,
+/// then id). The input of the day rotation and of the progression history (#18); a user's history
+/// in one program stays small (a few hundred sessions), so it is read in one go.
+///
+/// A program that is not the user's gives no sessions, like one that does not exist.
+pub async fn list_in_program(
+    pool: &PgPool,
+    user: UserId,
+    program: ProgramId,
+) -> Result<Vec<WorkoutSession>, RepoError> {
+    sqlx::query_as!(
+        SessionRow,
+        "SELECT s.id, s.program_version_id, v.program_id, s.day_id, s.status, s.started_at,
+                s.finished_at
+         FROM workout_sessions s
+         JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id
+         WHERE s.user_id = $1 AND v.program_id = $2
+         ORDER BY s.started_at, s.id",
+        user.as_uuid(),
+        program.as_uuid(),
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(WorkoutSession::try_from)
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::server::db::{
-        MIGRATOR,
+        MIGRATOR, programs,
         testing::{self, at, new_session, random_uuid},
     };
 
@@ -405,6 +443,52 @@ mod tests {
         for task in tasks {
             if task.await.unwrap().unwrap() == Change::Applied {
                 applied += 1;
+            }
+        }
+        assert_eq!(applied, 1);
+        assert_eq!(list(&pool, user, None, None, 100).await.unwrap().len(), 1);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn one_session_in_progress_per_user(pool: PgPool) {
+        let (user, other_user) = testing::users_a_and_b(&pool).await;
+        let (_, version) = testing::program(&pool, user).await;
+        let first = new_session(version);
+        start(&pool, user, &first).await.unwrap();
+        let second = new_session(version);
+        let result = start(&pool, user, &second).await;
+        assert!(
+            matches!(result, Err(RepoError::SessionInProgress)),
+            "{result:?}"
+        );
+        // Retrying the one in progress is still fine; another user is not affected.
+        assert_eq!(start(&pool, user, &first).await.unwrap(), Change::Unchanged);
+        testing::session(&pool, other_user).await;
+        // Once it ended, the next one can start.
+        finish(&pool, user, first.id, SessionOutcome::Abandoned, at(1))
+            .await
+            .unwrap();
+        assert_eq!(start(&pool, user, &second).await.unwrap(), Change::Applied);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn concurrent_starts_of_different_sessions_create_one(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (_, version) = testing::program(&pool, user).await;
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let (pool, new) = (pool.clone(), new_session(version));
+                tokio::spawn(async move { start(&pool, user, &new).await })
+            })
+            .collect();
+        let mut applied = 0;
+        for task in tasks {
+            match task.await.unwrap() {
+                Ok(Change::Applied) => applied += 1,
+                Err(RepoError::SessionInProgress) => {}
+                other => panic!("{other:?}"),
             }
         }
         assert_eq!(applied, 1);
@@ -529,11 +613,55 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     #[ignore = "needs Postgres"]
+    async fn list_in_program_keeps_every_version_and_status_oldest_first(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (program, version_1) = testing::program(&pool, user).await;
+        let (_, version_2) = programs::add_version(&pool, user, program, &testing::document("v2"))
+            .await
+            .unwrap();
+        let (_, other_version) = testing::program(&pool, user).await;
+        let mut expected = Vec::new();
+        for (hour, version) in [(2, version_2.id), (0, version_1), (1, other_version)] {
+            let new = NewSession {
+                started_at: at(hour * 3_600),
+                program_version_id: version,
+                ..new_session(version)
+            };
+            start(&pool, user, &new).await.unwrap();
+            // Ended at once: one session in progress at a time.
+            let outcome = if hour == 0 {
+                SessionOutcome::Abandoned
+            } else {
+                SessionOutcome::Completed
+            };
+            finish(&pool, user, new.id, outcome, at(hour * 3_600 + 60))
+                .await
+                .unwrap();
+            if version != other_version {
+                expected.push((hour, new.id));
+            }
+        }
+        expected.sort();
+        let listed = list_in_program(&pool, user, program).await.unwrap();
+        assert_eq!(
+            listed.iter().map(|s| s.id).collect::<Vec<_>>(),
+            expected.iter().map(|(_, id)| *id).collect::<Vec<_>>()
+        );
+        assert!(listed.iter().all(|s| s.program_id == program));
+        assert_eq!(listed[0].status, SessionStatus::Abandoned);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
     async fn sessions_with_the_same_start_page_by_id(pool: PgPool) {
         let user = testing::user(&pool).await;
         let (_, version) = testing::program(&pool, user).await;
         for _ in 0..3 {
-            start(&pool, user, &new_session(version)).await.unwrap();
+            let new = new_session(version);
+            start(&pool, user, &new).await.unwrap();
+            finish(&pool, user, new.id, SessionOutcome::Completed, at(1))
+                .await
+                .unwrap();
         }
         let mut seen = Vec::new();
         let mut after = None;
@@ -567,6 +695,12 @@ mod tests {
         }
         assert_eq!(get_in_progress(&pool, b).await.unwrap(), None);
         assert!(list(&pool, b, None, None, 100).await.unwrap().is_empty());
+        assert!(
+            list_in_program(&pool, b, program_a)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             list(&pool, b, Some(program_a), None, 100)
                 .await

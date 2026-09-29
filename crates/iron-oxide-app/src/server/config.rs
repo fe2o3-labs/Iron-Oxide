@@ -19,6 +19,8 @@ use secrecy::{ExposeSecret, SecretSlice, SecretString};
 use sqlx::postgres::PgConnectOptions;
 use url::Url;
 
+use super::rate_limit::{ClientIpSource, RateLimitConfig};
+
 /// Default bind IP, the same as `dioxus::serve` uses when `IP` is unset.
 const DEFAULT_IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 /// Default port, the same as `dioxus::serve` uses when `PORT` is unset.
@@ -95,6 +97,7 @@ pub mod vars {
     pub const GOOGLE_CLIENT_SECRET: &str = "GOOGLE_CLIENT_SECRET";
     pub const GOOGLE_REDIRECT_URL: &str = "GOOGLE_REDIRECT_URL";
     pub const SESSION_KEY: &str = "SESSION_KEY";
+    pub const CLIENT_IP_SOURCE: &str = "CLIENT_IP_SOURCE";
     pub const STRIPE_WEBHOOK_SECRET: &str = "STRIPE_WEBHOOK_SECRET";
 
     /// The sign-in variables (#5), all required.
@@ -125,6 +128,9 @@ pub struct Config {
     pub shutdown_grace: Duration,
     /// Sign-in settings.
     pub auth: AuthConfig,
+    /// Rate limits (#23): where client IPs come from (`CLIENT_IP_SOURCE`, default `peer`) and
+    /// the limits themselves (built in, see `docs/rate-limiting.md`).
+    pub rate_limit: RateLimitConfig,
     /// Billing settings (#21, see docs/billing.md).
     pub billing: BillingConfig,
 }
@@ -373,6 +379,7 @@ impl Config {
         let port = env.optional(vars::PORT, parse_port);
         let log_filter = env.optional(vars::RUST_LOG, parse_log_filter);
         let shutdown_grace = env.optional(vars::SHUTDOWN_GRACE_SECS, parse_grace);
+        let client_ip = env.optional(vars::CLIENT_IP_SOURCE, str::parse::<ClientIpSource>);
         let auth = load_auth(&mut env);
         let billing = BillingConfig {
             stripe_webhook_secret: env.optional(vars::STRIPE_WEBHOOK_SECRET, |raw| {
@@ -394,6 +401,10 @@ impl Config {
                 log_filter,
                 shutdown_grace: shutdown_grace.unwrap_or(DEFAULT_SHUTDOWN_GRACE),
                 auth,
+                rate_limit: RateLimitConfig {
+                    client_ip: client_ip.unwrap_or_default(),
+                    ..RateLimitConfig::default()
+                },
                 billing,
             }),
             _ => Err(ConfigErrors(env.errors)),
@@ -763,6 +774,28 @@ mod tests {
             "http://localhost is local development"
         );
         assert_eq!(config.database_url.redacted(), "localhost:5433/iron_oxide");
+        assert_eq!(config.rate_limit, RateLimitConfig::default());
+        assert_eq!(config.rate_limit.client_ip, ClientIpSource::Peer);
+    }
+
+    #[test]
+    fn client_ip_source_is_peer_unless_set_to_fly() {
+        let fly = load(&set(minimal(), vars::CLIENT_IP_SOURCE, "fly")).unwrap();
+        assert_eq!(fly.rate_limit.client_ip, ClientIpSource::Fly);
+        let peer = load(&set(minimal(), vars::CLIENT_IP_SOURCE, " peer ")).unwrap();
+        assert_eq!(peer.rate_limit.client_ip, ClientIpSource::Peer);
+        let blank = load(&set(minimal(), vars::CLIENT_IP_SOURCE, " ")).unwrap();
+        assert_eq!(blank.rate_limit.client_ip, ClientIpSource::Peer);
+    }
+
+    #[test]
+    fn an_unknown_client_ip_source_is_rejected() {
+        for value in ["x-forwarded-for", "true", "1"] {
+            assert_single_invalid(
+                &set(minimal(), vars::CLIENT_IP_SOURCE, value),
+                vars::CLIENT_IP_SOURCE,
+            );
+        }
     }
 
     #[test]

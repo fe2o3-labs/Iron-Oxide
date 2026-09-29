@@ -18,6 +18,9 @@ kill_timeout = "30s"
   # Non-secret settings only. IP and PORT are also the image defaults.
   IP = "0.0.0.0"
   PORT = "8080"
+  # Rate limits key clients by the Fly-Client-IP header that Fly's proxy sets (every connection
+  # comes from the proxy). See docs/rate-limiting.md.
+  CLIENT_IP_SOURCE = "fly"
 
 [deploy]
   # Replace machines one at a time and wait for their health checks.
