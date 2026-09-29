@@ -12,6 +12,7 @@ use sqlx::{
 use super::{
     error::{Change, RepoError, narrow},
     ids::{ProgramId, SessionId, SetId, UserId},
+    sessions::Cursor,
 };
 
 /// A logged set (the domain `LoggedSet`), as saved and as read back.
@@ -268,6 +269,65 @@ pub async fn completed_for_exercise(
     .collect()
 }
 
+/// Every set (warm-ups included) of the user's **completed** sessions run from any version of
+/// `program`, in session order (start, then id), then in logging order. The progression history
+/// of #18: the caller groups it by session and exercise. A program that is not the user's gives
+/// no sets.
+pub async fn completed_in_program(
+    pool: &PgPool,
+    user: UserId,
+    program: ProgramId,
+) -> Result<Vec<LoggedSet>, RepoError> {
+    sqlx::query_as!(
+        SetRow,
+        "SELECT st.id, st.session_id, st.exercise_id, st.set_index, st.reps, st.weight_ng,
+                st.duration_s, st.warmup, st.completed_at
+         FROM workout_sets st
+         JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id
+         JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id
+         WHERE st.user_id = $1 AND s.status = 'completed' AND v.program_id = $2
+         ORDER BY s.started_at, s.id, st.completed_at, st.id",
+        user.as_uuid(),
+        program.as_uuid(),
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(LoggedSet::try_from)
+    .collect()
+}
+
+/// The user's sets of `exercises` (warm-ups included) in **completed** sessions of any program
+/// that started strictly before `before` (by start, then id); oldest first. The personal-record
+/// history of a session's summary (#18), which only depends on what came before it, so a retried
+/// summary is the same.
+pub async fn completed_for_exercises_before(
+    pool: &PgPool,
+    user: UserId,
+    exercises: &[String],
+    before: Cursor,
+) -> Result<Vec<LoggedSet>, RepoError> {
+    sqlx::query_as!(
+        SetRow,
+        "SELECT st.id, st.session_id, st.exercise_id, st.set_index, st.reps, st.weight_ng,
+                st.duration_s, st.warmup, st.completed_at
+         FROM workout_sets st
+         JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id
+         WHERE st.user_id = $1 AND st.exercise_id = ANY($2) AND s.status = 'completed'
+           AND (s.started_at, s.id) < ($3, $4::uuid)
+         ORDER BY s.started_at, s.id, st.completed_at, st.id",
+        user.as_uuid(),
+        exercises,
+        before.started_at,
+        before.id.as_uuid(),
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(LoggedSet::try_from)
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +388,11 @@ mod tests {
     #[ignore = "needs Postgres"]
     async fn same_id_and_content_is_one_row_and_different_content_conflicts(pool: PgPool) {
         let user = testing::user(&pool).await;
+        // An earlier, ended session (one session in progress at a time).
+        let other_session = testing::session(&pool, user).await;
+        sessions::finish(&pool, user, other_session, SessionOutcome::Abandoned, at(1))
+            .await
+            .unwrap();
         let session = testing::session(&pool, user).await;
         let set = new_set(session);
         assert_eq!(
@@ -340,7 +405,6 @@ mod tests {
                 Change::Unchanged
             );
         }
-        let other_session = testing::session(&pool, user).await;
         for different in [
             LoggedSet {
                 reps: 4,
@@ -606,6 +670,25 @@ mod tests {
                 .len(),
             1
         );
+        let exercises = ["back-squat".to_owned()];
+        let end = sessions::Cursor {
+            started_at: at(1_000_000),
+            id: SessionId::from_uuid(random_uuid()),
+        };
+        assert_eq!(
+            completed_in_program(&pool, a, program_a)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            completed_for_exercises_before(&pool, a, &exercises, end)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         for program in [program_a, ProgramId::from_uuid(random_uuid())] {
             assert!(
                 completed_for_exercise(&pool, b, program, "back-squat", at(-1))
@@ -613,7 +696,92 @@ mod tests {
                     .unwrap()
                     .is_empty()
             );
+            assert!(
+                completed_in_program(&pool, b, program)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
+        assert!(
+            completed_for_exercises_before(&pool, b, &exercises, end)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn completed_sets_of_a_program_and_before_a_session(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (program, v1) = testing::program(&pool, user).await;
+        let v2 = programs::add_version(&pool, user, program, &document("v2"))
+            .await
+            .unwrap()
+            .1
+            .id;
+        let (_, other_version) = testing::program(&pool, user).await;
+
+        // A session of `version` started at `hour` with one set of `exercise`, then ended.
+        let log = |version, exercise: &'static str, hour: i64, outcome: Option<SessionOutcome>| {
+            let pool = pool.clone();
+            async move {
+                let session = sessions::NewSession {
+                    started_at: at(hour * 3_600),
+                    ..new_session(version)
+                };
+                sessions::start(&pool, user, &session).await.unwrap();
+                let set = LoggedSet {
+                    exercise_id: exercise.to_owned(),
+                    completed_at: at(hour * 3_600 + 60),
+                    ..new_set(session.id)
+                };
+                upsert_idempotent(&pool, user, &set).await.unwrap();
+                if let Some(outcome) = outcome {
+                    sessions::finish(&pool, user, session.id, outcome, at(hour * 3_600 + 120))
+                        .await
+                        .unwrap();
+                }
+                (session, set)
+            }
+        };
+        let done = Some(SessionOutcome::Completed);
+        // Logged out of order: the results are in session order.
+        let (_, v2_squat) = log(v2, "back-squat", 3, done).await;
+        let (_, v1_squat) = log(v1, "back-squat", 1, done).await;
+        let (_, v1_bench) = log(v1, "bench", 2, done).await;
+        let (_, other_squat) = log(other_version, "back-squat", 4, done).await;
+        let (_, _abandoned) = log(v2, "back-squat", 5, Some(SessionOutcome::Abandoned)).await;
+        let (_, _skipped) = log(v2, "back-squat", 6, Some(SessionOutcome::Skipped)).await;
+        // Logged before the one in progress: one session in progress at a time.
+        let (_, _later) = log(v1, "back-squat", 8, done).await;
+        let (current, _in_progress) = log(v2, "back-squat", 7, None).await;
+
+        let in_program = completed_in_program(&pool, user, program).await.unwrap();
+        assert_eq!(
+            in_program[..3],
+            [v1_squat.clone(), v1_bench, v2_squat.clone()]
+        );
+        assert_eq!(in_program.len(), 4);
+
+        let before = sessions::Cursor {
+            started_at: current.started_at,
+            id: current.id,
+        };
+        let squats = ["back-squat".to_owned()];
+        assert_eq!(
+            completed_for_exercises_before(&pool, user, &squats, before)
+                .await
+                .unwrap(),
+            vec![v1_squat, v2_squat, other_squat]
+        );
+        assert!(
+            completed_for_exercises_before(&pool, user, &[], before)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -768,7 +936,12 @@ mod tests {
             let (pool_2, set_2) = (pool.clone(), set.clone());
             let save = tokio::spawn(async move { upsert_idempotent(&pool_2, user, &set_2).await });
             assert_eq!(start.await.unwrap().unwrap(), Change::Applied);
-            match save.await.unwrap() {
+            let saved = save.await.unwrap();
+            // Ended, so the next round can start one (one session in progress at a time).
+            sessions::finish(&pool, user, session.id, SessionOutcome::Abandoned, at(120))
+                .await
+                .unwrap();
+            match saved {
                 Ok(change) => {
                     assert_eq!(change, Change::Applied);
                     assert_eq!(

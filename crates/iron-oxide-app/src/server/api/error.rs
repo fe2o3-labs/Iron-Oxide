@@ -20,6 +20,8 @@ pub const NOT_FOUND: &str = "Not found.";
 pub const TRANSIENT: &str = "The server is busy. Please try again.";
 /// The public message of a 500.
 pub const INTERNAL: &str = "Something went wrong. Please try again.";
+/// The public message of a 409 when another session is in progress.
+pub const SESSION_IN_PROGRESS: &str = "Another session is in progress. Finish or abandon it first.";
 /// The public message of a 401 (the same as sign-in's).
 pub const UNAUTHORIZED: &str = "Please sign in.";
 /// The public message of a 422 for a program document, whose problems are in the details.
@@ -136,6 +138,7 @@ impl From<RepoError> for ApiError {
             RepoError::NotFound => Self::NotFound,
             RepoError::Conflict => Self::conflict("This was already saved with different values."),
             RepoError::SessionEnded => Self::conflict("This session has already ended."),
+            RepoError::SessionInProgress => Self::conflict(SESSION_IN_PROGRESS),
             RepoError::ProgramArchived => {
                 Self::conflict("This program is archived. Restore it before training with it.")
             }
@@ -285,6 +288,7 @@ mod tests {
         assert_eq!(status(RepoError::NotFound), 404);
         assert_eq!(status(RepoError::Conflict), 409);
         assert_eq!(status(RepoError::SessionEnded), 409);
+        assert_eq!(status(RepoError::SessionInProgress), 409);
         assert_eq!(status(RepoError::ProgramArchived), 409);
         assert_eq!(status(RepoError::ProgramActive), 409);
         assert_eq!(status(RepoError::Transient), 503);
