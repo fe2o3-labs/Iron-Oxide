@@ -180,10 +180,12 @@ host), stops the server with "unsupported parameter".
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | yes | Sign in with Google: the OAuth client (secret) |
 | `GOOGLE_REDIRECT_URL` | yes | `APP_BASE_URL`'s origin + `/auth/google/callback` (must be equal) |
 | `SESSION_KEY` | yes | Session cookie signing key (secret), ≥ 64 random bytes in base64: `openssl rand 64 \| openssl base64 -A` |
+| `CLIENT_IP_SOURCE` | no | Client IP for the rate limits: `peer` (default, the TCP peer) or `fly` (`Fly-Client-IP`, behind Fly.io's proxy only). See [docs/rate-limiting.md](docs/rate-limiting.md) |
 | `STRIPE_WEBHOOK_SECRET` | no | Stripe webhook signing secret (secret). Unused until billing is implemented, see [docs/billing.md](docs/billing.md) |
 
 Sign-in (passkeys, Google, sessions) is described in [docs/auth.md](docs/auth.md), including how to
-create the Google OAuth client. Every value is validated at startup. If anything is missing or invalid, the
+create the Google OAuth client. Rate limits (per IP and per user) are described in
+[docs/rate-limiting.md](docs/rate-limiting.md). Every value is validated at startup. If anything is missing or invalid, the
 server prints one line per problem, naming the variable (never its value), and exits with status 1.
 Secrets are redacted from `Debug` output and logs.
 

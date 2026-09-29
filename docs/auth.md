@@ -20,6 +20,7 @@ Code map:
 | `crates/iron-oxide-app/src/server/auth/session.rs` | Session store, cookie settings, timeouts, cleanup |
 | `crates/iron-oxide-app/src/server/auth/ceremony.rs` | One-time ceremony state |
 | `crates/iron-oxide-app/src/server/auth/csrf.rs` | The CSRF layer |
+| `crates/iron-oxide-app/src/server/rate_limit.rs` | Per-IP and per-user rate limits ([rate-limiting.md](rate-limiting.md)) |
 | `crates/iron-oxide-app/migrations/20260928153000_create_auth_tables.sql` | Tables |
 
 ## Accounts and identities
@@ -267,7 +268,7 @@ server-side: which check failed, and database errors.
 | **Deleted user keeps access** | Sessions, identities and ceremonies cascade from `users`; a deleted session is never resurrected | `deleting_a_user_deletes_their_auth_rows`, `saving_a_deleted_session_does_not_resurrect_it` |
 | **Secrets in logs** | `secrecy` wrappers; generic client errors; a per-event filter drops every `webauthn_rs*` event below `info`, after and independently of `RUST_LOG` (they log credential ids and public keys at `debug`, challenges and registrations at `trace`) | `a_nasty_database_password_never_reaches_the_logs`, `error::tests`, `logging::tests` |
 | **Credential stuffing / password spraying** | **Not applicable**: there are no passwords. Passkeys are phishing-resistant and origin-bound | — |
-| **Brute force / resource exhaustion** on the begin endpoints | A new begin deletes the ceremony it replaces (one row per kind per session for sequential requests; concurrent begins on one cookie can each leave a row until cleanup); ceremonies and signed-out sessions are short-lived and cleaned up; per-IP and per-user rate limits come with #23 (the begin/finish functions and the callback are the places to limit). New cookie-less sessions are still one row each until #23 | `a_new_begin_replaces_the_previous_ceremony_row` |
+| **Brute force / resource exhaustion** on the begin endpoints | Per-IP limits on every begin and finish function and the callback, checked after the CSRF check (so a cross-site page cannot spend a shared IP's limits) and before the session or the database is touched, plus per-user limits when signed in ([rate-limiting.md](rate-limiting.md)): each IP can create at most 30 sessions and ceremonies at once, then one every 2 s. A new begin deletes the ceremony it replaces (one row per kind per session for sequential requests; concurrent begins on one cookie can each leave a row until cleanup, within the same per-IP limit); ceremonies and signed-out sessions are short-lived and cleaned up | `a_limited_begin_creates_no_session_and_no_ceremony`, `a_new_begin_replaces_the_previous_ceremony_row`, `the_sign_in_limit_is_per_client_behind_the_proxy` |
 | **Credential id existence oracle** | **Accepted.** `credential_id` is unique across all accounts, so registering an id that exists gets 409. The WebAuthn spec says a relying party should reject a credential id already registered to any user; ids are random, chosen by the authenticator, and only ever sent to their owner (in `excludeCredentials`) | `add_list_and_remove_passkeys_but_never_the_last_way_in` |
 
 ## Creating the Google OAuth client

@@ -388,3 +388,49 @@ fn a_nasty_database_password_never_reaches_the_logs() {
     assert!(!logs.contains("test-client-secret"), "{logs}");
     assert!(!logs.contains("AAAAAAAAAAAAAAAA"), "{logs}");
 }
+
+/// `POST path` with an empty JSON body from our own origin; returns the whole response head.
+fn http_post(port: u16, path: &str, extra_headers: &str) -> std::io::Result<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    write!(
+        stream,
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:8080\r\n\
+         Content-Type: application/json\r\nContent-Length: 2\r\n{extra_headers}\
+         Connection: close\r\n\r\n{{}}"
+    )?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
+}
+
+/// The per-IP limit sees the real connection: in `fly` mode a loopback peer vouches for
+/// `Fly-Client-IP`, which would be ignored if the server did not know the peer address.
+#[test]
+#[ignore = "needs Postgres"]
+fn the_sign_in_limit_is_per_client_behind_the_proxy() {
+    let server = Server::start("rate-limit", None, &[("CLIENT_IP_SOURCE", "fly")]);
+    let begin = "/api/auth/passkey/sign-in/begin";
+    let client_a = "Fly-Client-IP: 203.0.113.1\r\n";
+    // 30 at once, then one every 2 s: the first 30 pass, and a 429 follows soon after.
+    let mut allowed = 0;
+    let limited = loop {
+        let response = http_post(server.port, begin, client_a).unwrap();
+        if response.starts_with("HTTP/1.1 429") {
+            break response;
+        }
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        allowed += 1;
+        assert!(allowed < 60, "never limited");
+    };
+    assert!(allowed >= 30, "only {allowed} allowed");
+    let lower = limited.to_ascii_lowercase();
+    assert!(
+        lower.contains("\r\nretry-after: 1\r\n") || lower.contains("\r\nretry-after: 2\r\n"),
+        "{limited}"
+    );
+    let client_b = http_post(server.port, begin, "Fly-Client-IP: 203.0.113.2\r\n").unwrap();
+    assert!(client_b.starts_with("HTTP/1.1 200"), "{client_b}");
+    let healthz = http_get(server.port, "/healthz").unwrap();
+    assert!(healthz.0.contains("200"), "{healthz:?}");
+}
