@@ -20,6 +20,7 @@ use super::config::DatabaseUrl;
 #[allow(dead_code, reason = "called by the server functions of #18-#22")]
 pub mod active_program;
 pub mod error;
+pub mod history;
 #[allow(dead_code, reason = "called by the server functions of #18-#22")]
 pub mod ids;
 #[allow(dead_code, reason = "called by the server functions of #18-#22")]

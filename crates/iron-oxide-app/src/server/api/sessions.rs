@@ -377,7 +377,9 @@ impl Context {
                 .or_default()
                 .push(domain_set(&set)?);
         }
-        let settings = db::settings::get(pool, owner).await?;
+        let settings = db::settings::find(pool, owner)
+            .await?
+            .unwrap_or_else(db::settings::UserSettings::defaults);
         let unit = match settings.unit {
             db::settings::Unit::Kg => Unit::Kg,
             db::settings::Unit::Lb => Unit::Lb,
@@ -562,7 +564,7 @@ fn domain_session(session: &WorkoutSession) -> Result<Session<Timestamp>, ApiErr
     .map_err(ApiError::internal)
 }
 
-const fn status(status: db::sessions::SessionStatus) -> SessionStatus {
+pub(super) const fn status(status: db::sessions::SessionStatus) -> SessionStatus {
     match status {
         db::sessions::SessionStatus::InProgress => SessionStatus::InProgress,
         db::sessions::SessionStatus::Completed => SessionStatus::Completed,

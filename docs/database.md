@@ -98,7 +98,7 @@ with the sign-in `sessions` table.
 
 | Table | Holds | Notes |
 |---|---|---|
-| `user_settings` | Unit, bar weight, plate inventory, default rest, sound | One row per user, created by the first save. Until then the repository returns `UserSettings::defaults()`, which a test keeps equal to the column defaults. |
+| `user_settings` | Unit, bar weight, plate inventory, default rest, sound | One row per user, created by the first save. Until then `settings::find` returns `None` and the API shows `Settings::defaults()` (with the domain's default plate inventory). `UserSettings::defaults()` mirrors the column defaults, which a test keeps equal. |
 | `training_maxes` | One training max per user and exercise, with `set_at` | Per user, not per program (#56). A table rather than a jsonb map, so the weight range and the slug are checked. `set_at` is when the lifter entered it: the progression engine (#57) replays the completed sets after it. `training_maxes::set` writes the weight and `set_at` together, but it cannot tell an entered value from a computed one: the caller must pass the time the value is valid from (never keep the old `set_at` with the engine's result), or the same sets are counted twice. |
 | `programs` | A program's header | `user_id` is NULL only for built-ins (`CHECK (user_id IS NOT NULL OR source_builtin_id IS NOT NULL)`); one row per built-in id (partial unique index). A copy of a built-in keeps its `source_builtin_id`. `creation_id` is the client's idempotency key for the create or copy request (`UNIQUE (user_id, creation_id)`), so a retry returns the same program. Programs are archived, not deleted: a trigger rejects any `DELETE` that is not the cascade from a deleted user. |
 | `program_versions` | Immutable program documents | `version` is 1, 2, ... per program. A trigger rejects every `UPDATE`; there is no update path in the repository. A trigger rejects any `DELETE` that is not the cascade from a deleted user, so a version number is never freed for other content. |
@@ -199,11 +199,12 @@ types mirror them field for field, and switch to them once they are merged.
 | Module | Functions |
 |---|---|
 | `users` | `plan` (the subscription plan, read on every gated call), `lock_plan` (the same with `FOR NO KEY UPDATE`: the serialisation point of quota checks), `unarchived_programs` (what the custom program quota counts); see docs/billing.md |
-| `settings` | `get` (defaults when never saved), `save` |
+| `settings` | `find` (`None` when never saved: the API then shows its own defaults, #20), `save` |
 | `training_maxes` | `list`, `set`, `delete` |
 | `programs` | `seed_builtins`, `list_builtins`, `copy_builtin` and `create` (idempotent on a `CreationId`), `get`, `list`, `rename`, `archive`, `unarchive`, `add_version` (a retried identical upload is a no-op), `list_versions`, `get_version`, `latest_version` |
 | `active_program` | `get`, `set`, `clear` |
 | `sessions` | `start` (idempotent), `finish` (idempotent), `get`, `get_in_progress`, `list` (history pages by `(started_at, id)`, optionally for one program) |
+| `history` | The history screens (#20): `page` (ended sessions, most recently finished first, paged by `(finished_at, id)` with microsecond cursors, served by the partial `workout_sessions_history_idx`), `entry` (one session with its program name, version number and working-set count), `exercise_sets` (weighted sets of one exercise in ended sessions, for the charts), `logged_exercises` |
 | `sets` | `upsert_idempotent`, `list_for_session`, `completed_for_exercise` (sets of one exercise after a time, in completed sessions of any version of a program: the progression input of #57, served by the `(user_id, exercise_id, completed_at)` index) |
 
 A user has at most one session in progress: the partial unique index

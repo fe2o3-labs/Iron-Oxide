@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT st.exercise_id, count(DISTINCT st.session_id) AS \"sessions!\",\n                  max(s.started_at) AS \"last_session_at!\"\n           FROM workout_sets st\n           JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id\n           WHERE st.user_id = $1 AND s.status <> 'in_progress'\n           GROUP BY st.exercise_id\n           ORDER BY max(s.started_at) DESC, st.exercise_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exercise_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "sessions!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "last_session_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "70000f7044473ec63917865bdb00e275bc41a1ce25d879760f96eb779edad035"
+}

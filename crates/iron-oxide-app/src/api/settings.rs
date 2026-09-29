@@ -1,0 +1,155 @@
+//! Settings server functions (#20): units, bar weight, plate inventory, default rest, sound, and
+//! the training maxes (#34).
+//!
+//! Weights travel as the domain [`Weight`] (kg numbers on the wire, stored as exact nanograms);
+//! `unit` only says how the UI shows and enters them.
+
+use dioxus::prelude::*;
+use iron_oxide_domain::{
+    ExerciseId, PlateInventory, PlateStock, Seconds, Unit, Weight, time::Timestamp,
+};
+use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "server")]
+use {
+    crate::server::{AppState, api::settings as logic, auth::AuthUser},
+    dioxus::server::axum::Extension,
+};
+
+/// The longest default rest [`update_settings`] accepts: one hour.
+pub const MAX_DEFAULT_REST: Seconds = Seconds::new(3_600);
+
+/// A user's settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Settings {
+    /// How weights are shown and entered.
+    pub unit: Unit,
+    pub bar_weight: Weight,
+    pub plate_inventory: PlateInventory,
+    /// The rest between sets when the program does not say.
+    pub default_rest: Seconds,
+    pub sound_enabled: bool,
+}
+
+impl Settings {
+    /// The settings of a user who never saved any: kg, a 20 kg bar, the domain's default kg plate
+    /// inventory, 2 minutes of rest and sound on.
+    #[must_use]
+    pub fn defaults() -> Self {
+        Self {
+            unit: Unit::Kg,
+            bar_weight: Weight::from_kg(20.0).unwrap_or(Weight::ZERO),
+            plate_inventory: PlateInventory::default_for(Unit::Kg),
+            default_rest: Seconds::new(120),
+            sound_enabled: true,
+        }
+    }
+}
+
+/// What [`update_settings`] saves: the same fields as [`Settings`], but the values the user types
+/// travel unchecked (weights as kg numbers, the plate inventory as a plain list) and the server
+/// validates them, so a bad one gets a `422` that says what is wrong instead of the generic
+/// `422 Invalid request.` of an argument that does not decode.
+///
+/// The JSON is the same as [`Settings`]' (a [`Weight`] is a kg number), and converting a
+/// [`Weight`] to kg and back is exact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingsUpdate {
+    pub unit: Unit,
+    /// The bar weight in kg.
+    pub bar_weight: f64,
+    /// Plate sizes with their pair counts, in any order.
+    pub plate_inventory: Vec<PlateInput>,
+    pub default_rest: Seconds,
+    pub sound_enabled: bool,
+}
+
+/// A plate size (in kg) and how many pairs of it are available: a [`PlateStock`] before
+/// validation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PlateInput {
+    pub plate: f64,
+    pub pairs: u32,
+}
+
+impl From<PlateStock> for PlateInput {
+    fn from(stock: PlateStock) -> Self {
+        Self {
+            plate: stock.plate.as_kg(),
+            pairs: stock.pairs,
+        }
+    }
+}
+
+impl From<Settings> for SettingsUpdate {
+    fn from(settings: Settings) -> Self {
+        Self {
+            unit: settings.unit,
+            bar_weight: settings.bar_weight.as_kg(),
+            plate_inventory: settings
+                .plate_inventory
+                .stock()
+                .iter()
+                .copied()
+                .map(PlateInput::from)
+                .collect(),
+            default_rest: settings.default_rest,
+            sound_enabled: settings.sound_enabled,
+        }
+    }
+}
+
+/// One exercise's training max.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrainingMax {
+    pub exercise_id: ExerciseId,
+    pub weight: Weight,
+    /// When it was set: the progression replays the sets logged after it.
+    pub set_at: Timestamp,
+}
+
+/// The signed-in user's settings, or [`Settings::defaults`] if they never saved any.
+#[post("/api/settings/get", state: Extension<AppState>, user: AuthUser)]
+pub async fn get_settings() -> Result<Settings, ServerFnError> {
+    Ok(logic::get(&state.db, user.owner()).await?)
+}
+
+/// Replaces the signed-in user's settings and returns them as saved (the plate inventory sorted
+/// heaviest first). Saving the same settings again changes nothing.
+///
+/// # Errors
+/// 422 for an invalid bar weight or plate inventory (with the reason) or a default rest above
+/// [`MAX_DEFAULT_REST`].
+#[post("/api/settings/update", state: Extension<AppState>, user: AuthUser)]
+pub async fn update_settings(settings: SettingsUpdate) -> Result<Settings, ServerFnError> {
+    Ok(logic::update(&state.db, user.owner(), settings).await?)
+}
+
+/// The signed-in user's training maxes, by exercise id.
+#[post("/api/settings/training-maxes", state: Extension<AppState>, user: AuthUser)]
+pub async fn training_maxes() -> Result<Vec<TrainingMax>, ServerFnError> {
+    Ok(logic::training_maxes(&state.db, user.owner()).await?)
+}
+
+/// Sets (or replaces) the training max of an exercise, `weight` in kg (a [`Weight`]'s JSON). Its
+/// `set_at` becomes now (the server's clock): the progression starts again from this value and
+/// only replays sets logged after it.
+///
+/// # Errors
+/// 422 when `exercise_id` is not a valid exercise id, or `weight` is zero or not a valid weight.
+#[post("/api/settings/training-max/set", state: Extension<AppState>, user: AuthUser)]
+pub async fn set_training_max(
+    exercise_id: String,
+    weight: f64,
+) -> Result<TrainingMax, ServerFnError> {
+    Ok(logic::set_training_max(&state.db, user.owner(), &exercise_id, weight).await?)
+}
+
+/// Removes the training max of an exercise.
+///
+/// # Errors
+/// 404 when the user has none for that exercise; 422 for an invalid exercise id.
+#[post("/api/settings/training-max/delete", state: Extension<AppState>, user: AuthUser)]
+pub async fn delete_training_max(exercise_id: String) -> Result<(), ServerFnError> {
+    Ok(logic::delete_training_max(&state.db, user.owner(), &exercise_id).await?)
+}
