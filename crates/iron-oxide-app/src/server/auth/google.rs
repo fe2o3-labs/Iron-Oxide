@@ -139,7 +139,11 @@ pub async fn begin(
     popup: bool,
 ) -> Result<String, AuthError> {
     let (kind, user) = match (intent, ctx.current_user().await?) {
-        (_, Some(user)) => (CeremonyKind::GoogleLink, Some(user)),
+        (_, Some(user)) => {
+            // Linking adds a sign-in method: it needs a recent sign-in (#22).
+            ctx.require_recent_sign_in().await?;
+            (CeremonyKind::GoogleLink, Some(user))
+        }
         (GoogleIntent::SignIn, None) => (CeremonyKind::GoogleSignIn, None),
         (GoogleIntent::Link, None) => return Err(AuthError::Unauthenticated),
     };
@@ -235,7 +239,11 @@ async fn complete(
     let subject = claims.subject().as_str();
 
     match (kind, owner) {
-        (CeremonyKind::GoogleLink, Some(user)) => link(ctx, user, subject).await,
+        (CeremonyKind::GoogleLink, Some(user)) => {
+            // Checked again: the sign-in may have aged past the window since `begin`.
+            ctx.require_recent_sign_in().await?;
+            link(ctx, user, subject).await
+        }
         (CeremonyKind::GoogleSignIn, None) => {
             let user = sign_in_or_create(ctx, subject).await?;
             ctx.sign_in(user).await

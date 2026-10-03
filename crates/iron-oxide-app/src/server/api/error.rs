@@ -45,6 +45,10 @@ pub enum ApiError {
     /// JSON path ([`ProgramProblems`]), for the UI to list.
     #[error("invalid program: {} problem(s)", .0.errors.len() + .0.omitted)]
     InvalidProgram(ProgramProblems),
+    /// `422`: an invalid program document inside a larger upload (an account import): the message
+    /// says which one and why, for the user and support; the `details` carry all its problems.
+    #[error("invalid program in an upload: {0}")]
+    InvalidProgramIn(Cow<'static, str>, ProgramProblems),
     /// `413`: the request is larger than the endpoint accepts. The message is shown to the user.
     #[error("too large: {0}")]
     TooLarge(Cow<'static, str>),
@@ -94,6 +98,7 @@ impl ApiError {
             Self::Conflict(message) => (409, message),
             Self::Invalid(message) => (422, message),
             Self::InvalidProgram(_) => (422, INVALID_PROGRAM),
+            Self::InvalidProgramIn(message, _) => (422, message),
             Self::TooLarge(message) => (413, message),
             Self::Transient(_) => (503, TRANSIENT),
             Self::Unauthorized => (401, UNAUTHORIZED),
@@ -121,7 +126,9 @@ impl From<ApiError> for ServerFnError {
         let (code, message) = error.public();
         let details = match &error {
             // Plain data (strings and numbers): serializing it cannot fail.
-            ApiError::InvalidProgram(problems) => serde_json::to_value(problems).ok(),
+            ApiError::InvalidProgram(problems) | ApiError::InvalidProgramIn(_, problems) => {
+                serde_json::to_value(problems).ok()
+            }
             _ => None,
         };
         ServerFnError::ServerError {
@@ -197,6 +204,7 @@ impl From<AuthError> for ApiError {
         let (code, message) = error.public();
         match code {
             401 => Self::Unauthorized,
+            403 => Self::Forbidden(Cow::Owned(message.to_owned())),
             404 => Self::NotFound,
             409 => Self::conflict(message.to_owned()),
             503 => Self::Transient(error.to_string()),
