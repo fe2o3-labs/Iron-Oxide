@@ -125,7 +125,8 @@ pub async fn get_settings() -> Result<Settings, ServerFnError> {
 /// heaviest first). Saving the same settings again changes nothing.
 ///
 /// # Errors
-/// 422 for an invalid bar weight or plate inventory (with the reason) or a default rest above
+/// 422 for an invalid bar weight (or none) or plate inventory (or an empty one), with the reason
+/// and the field in the details (`{"field": "bar_weight"}`), or a default rest above
 /// [`MAX_DEFAULT_REST`].
 #[post("/api/settings/update", state: Extension<AppState>, user: AuthUser)]
 pub async fn update_settings(settings: SettingsUpdate) -> Result<Settings, ServerFnError> {

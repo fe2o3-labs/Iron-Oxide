@@ -54,6 +54,7 @@ logged, never returned.
 | `NotFound` | 404 | `Not found.` | No such row **among the caller's own**. Another user's id gives exactly the same answer as an id that does not exist. |
 | `Conflict(msg)` | 409 | `msg` | An id reused with different content, a session that has already ended |
 | `Invalid(msg)` | 422 | `msg` | Invalid input: a domain value, a program document, a database `CHECK` (`Invalid value.`) |
+| `InvalidField { field, message }` | 422 | `message` | Invalid input in one named field; `{"field": path}` (e.g. `bar_weight`) is sent as the error details, so the UI can point at it |
 | `InvalidProgram(problems)` | 422 | `This program is not valid.` | An uploaded program document that does not parse or breaks a rule. `problems` (`ProgramProblems`) is sent as the error details, see [Programs](#programs-srcapiprogramsrs-19). |
 | `TooLarge(msg)` | 413 | `msg` | A request body or document past its size limit |
 | `Transient(detail)` | 503 | `The server is busy. Please try again.` | The same request can simply be retried: it may have been saved before a dropped connection, but every write is idempotent. Covers a concurrent write, a pool timeout, a dropped connection, a serialization failure or a deadlock. |
@@ -307,12 +308,13 @@ Epley formula.
   unchecked: `bar_weight` and each plate as kg numbers (the same JSON as a `Weight`), the plate
   inventory as a plain list. The server validates them with the domain (`Weight::from_kg`,
   `PlateInventory::new`: no zero, duplicate or off-grid plate, at most 50 pairs and 16 sizes), and
-  the default rest must be at most one hour. Weights out of range get a fixed message ("… must be between 0 and 2000 kg."), never the number echoed back. A typed `Weight` or `PlateInventory` argument would
+  the default rest must be at most one hour. The bar must weigh more than zero and the inventory
+  must keep at least one plate size. Each refusal is an `InvalidField` naming `bar_weight`,
+  `plate_inventory` or `default_rest`. Weights out of range get a fixed message ("… must be between 0 and 2000 kg."), never the number echoed back. A typed `Weight` or `PlateInventory` argument would
   fail while the body is decoded, before the function runs, and only give the generic
   `422 Invalid request.` without saying which value is wrong.
-- **Defaults only when nothing was saved.** A user who saves an empty plate inventory keeps an
-  empty one; the defaults apply only while there is no `user_settings` row
-  (`settings::find` returns `None`).
+- **Defaults only when nothing was saved.** The defaults apply only while there is no
+  `user_settings` row (`settings::find` returns `None`).
 - **Training maxes and the progression anchor.** Setting a training max always moves its `set_at`
   to now, on the server's clock, even when the weight is unchanged: the progression (#57) restarts
   from this value and replays only the sets logged after it. This is the one write whose time

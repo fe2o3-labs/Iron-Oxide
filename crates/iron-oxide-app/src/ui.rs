@@ -5,7 +5,8 @@
 //! - `components`: the reusable components.
 //! - `errors`: the banner every server error is reported to.
 //! - `weight`: weights in the user's unit.
-//! - `settings`: the user's settings, shared by every screen, and the Settings page.
+//! - `user_settings`: the user's settings, shared by every screen, loaded and saved there.
+//! - `settings`: the Settings page.
 //! - `prefs`: preferences kept on this device only.
 //! - `programs`: the Programs page.
 
@@ -35,6 +36,7 @@ mod programs;
 mod settings;
 mod shell;
 pub(crate) mod theme;
+mod user_settings;
 #[cfg_attr(
     not(debug_assertions),
     allow(
@@ -57,8 +59,8 @@ pub fn App() -> Element {
     shell::use_session_provider();
     errors::use_errors_provider();
     let unit = weight::use_unit_provider();
-    settings::use_settings_provider(unit);
-    prefs::use_device_prefs_provider();
+    let settings = user_settings::use_settings_provider(unit);
+    prefs::use_device_prefs_provider(settings);
 
     rsx! {
         document::Title { "Iron Oxide" }

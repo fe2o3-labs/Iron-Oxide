@@ -1,13 +1,6 @@
-//! The user's settings (#34): loaded once signed in and shared by every screen, and the Settings
-//! page that changes them.
-//!
-//! [`use_user_settings`] gives the saved settings (bar, plates, rest, sound). They are loaded as
-//! soon as the session is signed in, not when the Settings page opens, and they drive the display
-//! unit of [`crate::ui::weight`], so every screen shows weights in the user's unit.
-//!
-//! The page saves each change at once. Changes are applied on screen straight away and sent one
-//! request at a time; changes made while a request is in flight are coalesced into one, so a slow
-//! answer never overwrites a newer choice. A refused change is reported and undone.
+//! The Settings page (#34). The settings themselves, shared by every screen, are loaded and saved
+//! by [`crate::ui::user_settings`]; the page shows them and changes them through
+//! [`UserSettings::change`].
 
 use dioxus::prelude::*;
 use iron_oxide_domain::entitlements::{Entitlements, Limit, Quota};
@@ -18,15 +11,15 @@ use iron_oxide_domain::{
 
 use super::account::Account;
 use super::components::{Button, ButtonVariant, Card, Chip, LoadingState, Stepper, WeightStepper};
-use super::errors::{BannerKind, Errors, use_errors};
-use super::prefs::{DevicePrefs, save_device_prefs, step_choices, use_device_prefs};
+use super::errors::{BannerKind, use_errors};
+use super::prefs::{DevicePrefs, step_choices, use_device_prefs};
 use super::shell::{SessionStatus, use_session};
-use super::weight::{UnitSetting, weight_text};
+use super::user_settings::{UserSettings, use_user_settings};
+use super::weight::weight_text;
 use crate::api::billing::my_entitlements;
 use crate::api::programs::get_active_program;
 use crate::api::settings::{
-    MAX_DEFAULT_REST, Settings, SettingsUpdate, TrainingMax, delete_training_max, get_settings,
-    set_training_max, training_maxes, update_settings,
+    MAX_DEFAULT_REST, Settings, TrainingMax, delete_training_max, set_training_max, training_maxes,
 };
 
 /// The default rest moves by this many seconds.
@@ -34,103 +27,6 @@ pub const REST_STEP: i64 = 15;
 
 /// The shortest default rest the page offers.
 pub const MIN_REST: i64 = 15;
-
-/// The settings shared by every screen, provided by the app root.
-#[derive(Clone, Copy, PartialEq)]
-pub struct UserSettings {
-    /// What the screens show: the saved settings, with the change being saved already applied.
-    /// `None` until loaded (and while signed out).
-    current: Signal<Option<Settings>>,
-    /// The settings as the server last confirmed them, to go back to when a change is refused.
-    confirmed: Signal<Option<Settings>>,
-    /// Whether loading failed (the banner says why); the Settings page offers to try again.
-    failed: Signal<bool>,
-    loading: Signal<bool>,
-    unit: UnitSetting,
-}
-
-impl UserSettings {
-    /// The settings, if loaded.
-    #[must_use]
-    pub fn get(&self) -> Option<Settings> {
-        self.current.read().clone()
-    }
-
-    /// Shows `settings`, and their unit everywhere.
-    fn show(self, settings: Option<Settings>) {
-        let mut unit = self.unit.0;
-        let wanted = settings.as_ref().map_or(Unit::Kg, |settings| settings.unit);
-        if *unit.peek() != wanted {
-            unit.set(wanted);
-        }
-        let mut current = self.current;
-        current.set(settings);
-    }
-
-    /// Loads the settings from the server.
-    async fn load(mut self, errors: Errors) {
-        if *self.loading.peek() {
-            return;
-        }
-        self.loading.set(true);
-        self.failed.set(false);
-        match get_settings().await {
-            Ok(settings) => {
-                self.confirmed.set(Some(settings.clone()));
-                self.show(Some(settings));
-            }
-            Err(error) => {
-                errors.report(&error);
-                self.failed.set(true);
-            }
-        }
-        self.loading.set(false);
-    }
-
-    /// Forgets the settings (signed out).
-    fn clear(mut self) {
-        self.confirmed.set(None);
-        self.failed.set(false);
-        self.show(None);
-    }
-}
-
-/// Provides the shared settings and loads them whenever the session becomes signed in. Called
-/// once, by the app root, after the session, the banner and the unit are provided.
-pub fn use_settings_provider(unit: UnitSetting) -> UserSettings {
-    let settings = UserSettings {
-        current: use_signal(|| None),
-        confirmed: use_signal(|| None),
-        failed: use_signal(|| false),
-        loading: use_signal(|| false),
-        unit,
-    };
-    use_context_provider(|| settings);
-    let session = use_session();
-    let errors = use_errors();
-    // Client only: the server renders the signed-out shell, so hydration matches.
-    use_effect(move || {
-        if !cfg!(feature = "web") {
-            return;
-        }
-        match *session.read() {
-            SessionStatus::SignedIn => {
-                if settings.current.peek().is_none() {
-                    spawn(settings.load(errors));
-                }
-            }
-            SessionStatus::SignedOut => settings.clear(),
-            SessionStatus::Checking | SessionStatus::Unverified => {}
-        }
-    });
-    settings
-}
-
-/// The shared settings.
-#[must_use]
-pub fn use_user_settings() -> UserSettings {
-    use_context::<UserSettings>()
-}
 
 /// `2:00`, `0:45`, `60:00`: a rest as minutes and seconds.
 #[must_use]
@@ -262,9 +158,12 @@ pub fn set_pairs(
     PlateInventory::new(stock).map_err(|error| plate_problem(&error, unit))
 }
 
-/// The inventory without `plate`.
+/// The inventory without `plate`, unless it is the last size (at least one must stay).
 #[must_use]
 pub fn remove_plate(inventory: &PlateInventory, plate: Weight) -> PlateInventory {
+    if inventory.stock().len() <= 1 {
+        return inventory.clone();
+    }
     let stock = inventory
         .stock()
         .iter()
@@ -312,62 +211,15 @@ pub fn programs_allowance(entitlements: &Entitlements) -> String {
     }
 }
 
-/// Applies a change to the settings on screen and queues it for saving. `Copy`, so every event
-/// handler can take one; handlers read the settings when they run, never a stale copy.
-#[derive(Clone, Copy, PartialEq)]
-struct Editor {
-    user: UserSettings,
-    saver: Coroutine<Settings>,
-}
-
-impl Editor {
-    /// The settings on screen.
-    fn current(self) -> Option<Settings> {
-        self.user.current.peek().clone()
-    }
-
-    /// Changes the settings with `edit` and saves them.
-    fn apply(self, edit: impl FnOnce(Settings) -> Settings) {
-        if let Some(settings) = self.current() {
-            let settings = edit(settings);
-            self.user.show(Some(settings.clone()));
-            self.saver.send(settings);
-        }
-    }
-}
+/// What the cards change the settings through.
+type Editor = UserSettings;
 
 /// The Settings page.
 #[component]
 pub fn SettingsPage() -> Element {
     let user = use_user_settings();
-    let errors = use_errors();
-
-    // Sends changes one at a time, always the latest one.
-    let saver = use_coroutine(move |mut changes: UnboundedReceiver<Settings>| async move {
-        while let Ok(mut wanted) = changes.recv().await {
-            while let Ok(newer) = changes.try_recv() {
-                wanted = newer;
-            }
-            let result = update_settings(SettingsUpdate::from(wanted.clone())).await;
-            let latest = user.current.peek().as_ref() == Some(&wanted);
-            match result {
-                Ok(saved) => {
-                    let mut confirmed = user.confirmed;
-                    confirmed.set(Some(saved.clone()));
-                    if latest {
-                        user.show(Some(saved));
-                    }
-                }
-                Err(error) => {
-                    errors.report(&error);
-                    if latest {
-                        user.show(user.confirmed.peek().clone());
-                    }
-                }
-            }
-        }
-    });
-    let editor = Editor { user, saver };
+    let editor = user;
+    let session = use_session();
 
     let settings = user.get();
     rsx! {
@@ -382,16 +234,19 @@ pub fn SettingsPage() -> Element {
                 TrainingMaxCard { unit: settings.unit }
                 RestCard { settings, editor }
             },
-            None if *user.failed.read() => rsx! {
+            None if user.failed() => rsx! {
                 Card { title: "Your settings",
                     p { class: "io-muted", "Your settings could not be loaded." }
                     Button {
                         variant: ButtonVariant::Secondary,
-                        onclick: move |_| {
-                            spawn(user.load(errors));
-                        },
+                        onclick: move |_| user.reload(),
                         "Try again"
                     }
+                }
+            },
+            None if *session.read() == SessionStatus::Unverified => rsx! {
+                Card { title: "Your settings",
+                    p { class: "io-muted", "Your settings load as soon as the server can be reached." }
                 }
             },
             None => rsx! { LoadingState { message: "Loading your settings…" } },
@@ -423,7 +278,7 @@ fn UnitsCard(settings: Settings, editor: Editor) -> Element {
     let unit = settings.unit;
     // Set when the unit was just switched and the bar and plates are not the new unit's.
     let mut offer_standard = use_signal(|| false);
-    let step = prefs.read().weight_step(unit);
+    let step = prefs.get().weight_step(unit);
     rsx! {
         Card { title: "Units",
             div { class: "io-setting",
@@ -434,7 +289,7 @@ fn UnitsCard(settings: Settings, editor: Editor) -> Element {
                             key: "{choice}",
                             selected: choice == unit,
                             onclick: move |_| {
-                                editor.apply(|settings| {
+                                editor.change(|settings| {
                                     if settings.unit != choice {
                                         offer_standard.set(!has_standard_equipment(&settings, choice));
                                     }
@@ -446,7 +301,7 @@ fn UnitsCard(settings: Settings, editor: Editor) -> Element {
                     }
                 }
             }
-            if *offer_standard.read() {
+            if *offer_standard.read() && !has_standard_equipment(&settings, unit) {
                 div { class: "io-waiting", role: "status",
                     p {
                         "Your bar and plates did not change ({weight_text(settings.bar_weight, unit)} bar). Use the standard {unit.symbol()} ones?"
@@ -455,7 +310,7 @@ fn UnitsCard(settings: Settings, editor: Editor) -> Element {
                         variant: ButtonVariant::Primary,
                         onclick: move |_| {
                             offer_standard.set(false);
-                            editor.apply(|settings| with_standard_equipment(&settings));
+                            editor.change(|settings| with_standard_equipment(&settings));
                         },
                         "Use a {weight_text(standard_bar(unit), unit)} bar and {unit.symbol()} plates"
                     }
@@ -479,7 +334,7 @@ fn UnitsCard(settings: Settings, editor: Editor) -> Element {
                                 selected: choice == step,
                                 onclick: move |_| {
                                     let new = prefs.peek().with_weight_step(unit, choice);
-                                    save_device_prefs(prefs, new);
+                                    prefs.save(new);
                                 },
                                 "{weight_text(choice, unit)}"
                             }
@@ -500,9 +355,10 @@ fn BarCard(settings: Settings, editor: Editor) -> Element {
             WeightStepper {
                 value: bar,
                 step: bar_step(unit),
+                min: bar_step(unit),
                 max: max_bar(),
                 on_change: move |weight| {
-                    editor.apply(|settings| Settings { bar_weight: weight, ..settings });
+                    editor.change(|settings| Settings { bar_weight: weight, ..settings });
                 },
             }
             div { class: "io-chips", role: "group", aria_label: "Common bars",
@@ -512,7 +368,7 @@ fn BarCard(settings: Settings, editor: Editor) -> Element {
                             key: "{value}",
                             selected: choice == bar,
                             onclick: move |_| {
-                                editor.apply(|settings| Settings { bar_weight: choice, ..settings });
+                                editor.change(|settings| Settings { bar_weight: choice, ..settings });
                             },
                             "{weight_text(choice, unit)}"
                         }
@@ -530,7 +386,7 @@ fn PlatesCard(settings: Settings, editor: Editor) -> Element {
     let mut problem = use_signal(|| None::<String>);
 
     let mut add = move || {
-        let Some(current) = editor.current() else {
+        let Some(current) = editor.peek() else {
             return;
         };
         let result = parse_weight(&input.peek(), unit)
@@ -539,7 +395,7 @@ fn PlatesCard(settings: Settings, editor: Editor) -> Element {
             Ok(plate_inventory) => {
                 problem.set(None);
                 input.set(String::new());
-                editor.apply(|settings| Settings {
+                editor.change(|settings| Settings {
                     plate_inventory,
                     ..settings
                 });
@@ -553,11 +409,17 @@ fn PlatesCard(settings: Settings, editor: Editor) -> Element {
         Card { title: "Plates",
             p { class: "io-muted", "The pairs you can load, for the plate calculator." }
             if settings.plate_inventory.is_empty() {
-                p { class: "io-muted", "No plates: only the bar can be loaded." }
+                p { class: "io-muted", "No plates yet: add at least one size." }
             }
             ul { class: "io-list",
                 for stock in settings.plate_inventory.stock().iter().copied() {
-                    PlateRow { key: "{stock.plate.as_nanograms()}", unit, stock, editor }
+                    PlateRow {
+                        key: "{stock.plate.as_nanograms()}",
+                        unit,
+                        stock,
+                        last: settings.plate_inventory.stock().len() <= 1,
+                        editor,
+                    }
                 }
             }
             div { class: "io-field",
@@ -592,7 +454,7 @@ fn PlatesCard(settings: Settings, editor: Editor) -> Element {
                 Button {
                     variant: ButtonVariant::Ghost,
                     onclick: move |_| {
-                        editor.apply(|settings| Settings {
+                        editor.change(|settings| Settings {
                             plate_inventory: PlateInventory::default_for(unit),
                             ..settings
                         });
@@ -605,17 +467,17 @@ fn PlatesCard(settings: Settings, editor: Editor) -> Element {
 }
 
 #[component]
-fn PlateRow(unit: Unit, stock: PlateStock, editor: Editor) -> Element {
+fn PlateRow(unit: Unit, stock: PlateStock, last: bool, editor: Editor) -> Element {
     let errors = use_errors();
     let plate = stock.plate;
     let name = weight_text(plate, unit);
     let pairs_label = if stock.pairs == 1 { "pair" } else { "pairs" };
     let set = move |pairs: u32| {
-        let Some(current) = editor.current() else {
+        let Some(current) = editor.peek() else {
             return;
         };
         match set_pairs(&current.plate_inventory, plate, pairs, unit) {
-            Ok(plate_inventory) => editor.apply(|settings| Settings {
+            Ok(plate_inventory) => editor.change(|settings| Settings {
                 plate_inventory,
                 ..settings
             }),
@@ -653,8 +515,10 @@ fn PlateRow(unit: Unit, stock: PlateStock, editor: Editor) -> Element {
                 r#type: "button",
                 class: "io-button io-button-danger",
                 aria_label: "Remove {name} plates",
+                disabled: last,
+                title: if last { "Keep at least one plate size" },
                 onclick: move |_| {
-                    editor.apply(|settings| Settings {
+                    editor.change(|settings| Settings {
                         plate_inventory: remove_plate(&settings.plate_inventory, plate),
                         ..settings
                     });
@@ -669,7 +533,7 @@ fn PlateRow(unit: Unit, stock: PlateStock, editor: Editor) -> Element {
 fn RestCard(settings: Settings, editor: Editor) -> Element {
     let prefs = use_device_prefs();
     let rest = settings.default_rest;
-    let vibration = prefs.read().vibration;
+    let vibration = prefs.get().vibration;
     rsx! {
         Card { title: "Rest timer",
             Stepper {
@@ -683,21 +547,21 @@ fn RestCard(settings: Settings, editor: Editor) -> Element {
                 more_label: "{REST_STEP} seconds more",
                 on_change: move |seconds: i64| {
                     let default_rest = Seconds::new(u32::try_from(seconds).unwrap_or(0));
-                    editor.apply(|settings| Settings { default_rest, ..settings });
+                    editor.change(|settings| Settings { default_rest, ..settings });
                 },
             }
             p { class: "io-muted io-hint", "Used when the program does not say how long to rest." }
             OnOff {
                 label: "Sound",
                 on: settings.sound_enabled,
-                on_change: move |sound_enabled| editor.apply(|settings| Settings { sound_enabled, ..settings }),
+                on_change: move |sound_enabled| editor.change(|settings| Settings { sound_enabled, ..settings }),
             }
             OnOff {
                 label: "Vibration",
                 on: vibration,
                 on_change: move |vibration| {
-                    let new = DevicePrefs { vibration, ..*prefs.peek() };
-                    save_device_prefs(prefs, new);
+                    let new = DevicePrefs { vibration, ..prefs.peek() };
+                    prefs.save(new);
                 },
             }
             p { class: "io-muted io-hint", "Vibration and the weight step are saved on this device only." }
@@ -1074,6 +938,13 @@ mod tests {
         let removed = remove_plate(&inventory, kg(1.25));
         assert_eq!(removed.pairs_of(kg(1.25)), 0);
         assert_eq!(removed.stock().len(), inventory.stock().len() - 1);
+        // The last size stays.
+        let one = PlateInventory::new([PlateStock {
+            plate: kg(20.0),
+            pairs: 2,
+        }])
+        .unwrap();
+        assert_eq!(remove_plate(&one, kg(20.0)), one);
     }
 
     #[test]
