@@ -283,6 +283,8 @@ pub fn logged_set(
         duration: entry.duration,
         warm_up: step.warm_up,
         completed_at: now.max(started_at),
+        // What this set was prescribed, so that the progression judges it exactly (#60).
+        target: Some(step.target),
     }
 }
 
@@ -719,6 +721,7 @@ mod tests {
             duration: None,
             warm_up,
             completed_at: Timestamp::from_epoch_millis(at),
+            target: None,
         }
     }
 

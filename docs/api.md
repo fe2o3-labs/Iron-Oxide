@@ -264,6 +264,13 @@ Rules:
     skipped working set leaves a gap.
   - The exercise does not have to be on the session's day, so an added exercise is fine. Only the
     day's exercises get targets and progression.
+  - **`target` (#60, optional).** The `SetTarget` the session screen showed for the set (its
+    prefill: weight and reps, hold or intervals), saved with it and returned by every read of the
+    set. It is part of the set's content, so the same id with another target is `409`. The
+    progression judges a training max session's set against its target exactly (lifted at least
+    the target's weight); a set without one (logged before #60, an extra, an added exercise) is
+    judged with the legacy 1.25 kg tolerance. The server checks its types, not its values: it is
+    what the client says it showed, and it only ever moves the sender's own progression.
 - **Finishing.** The domain's `SessionLog::end` checks the time: not before the start or before a
   logged set (`422`). A retry with the same outcome and time returns the same summary. Another
   outcome or time is `409`. The summary is computed from stored data up to and including the
