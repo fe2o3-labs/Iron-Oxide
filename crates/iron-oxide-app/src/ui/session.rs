@@ -5,10 +5,8 @@
 //! - `writes`: every session write (start, save a set, finish), in one file so the offline outbox
 //!   (#30) can take them over.
 //! - `workout`: the active session screen.
-//! - `plates`: the slot for the plate calculator (#31).
 //! - `rest`: the rest timer between sets (#29).
 //! - `summary`: the end-of-session summary (#32).
-//! - `sheet`: the bottom sheet for confirmations.
 //! - `platform`: the browser clock, `localStorage`, sound, vibration and the screen wake lock.
 //!
 //! The page loads on the client only (like the shell's sign-in check), so the server render shows
@@ -16,10 +14,8 @@
 //! plan and the sets already saved, so a reload continues at the next set.
 
 mod flow;
-mod plates;
 pub(crate) mod platform;
 mod rest;
-mod sheet;
 mod summary;
 mod workout;
 pub(crate) mod writes;
