@@ -100,12 +100,15 @@
           </li>
         </ol>
 
+        <!-- The prompt: `make landing-build` replaces the text between the prompt markers with
+             programs/ai-prompt.md (#108), the one prompt the app shows too. The copy below is only
+             the fallback until that file exists. -->
         <figure class="prompt" aria-labelledby="prompt-title">
           <div class="prompt-head">
             <figcaption id="prompt-title" class="prompt-title">The prompt</figcaption>
             <button class="copy-button" type="button" data-copy="prompt-text" hidden>Copy the prompt</button>
           </div>
-          <pre class="prompt-body" id="prompt-text" tabindex="0" aria-label="The prompt to give your AI assistant">You are an experienced strength coach. Write a training program for me as a JSON document that the Iron Oxide app can import.
+          <pre class="prompt-body" id="prompt-text" tabindex="0" aria-label="The prompt to give your AI assistant"><!-- prompt:begin -->You are an experienced strength coach. Write a training program for me as a JSON document that the Iron Oxide app can import.
 
 Before you write it, ask me what you need to know, a few questions at a time:
 - my goals (strength, muscle, general fitness, a sport)
@@ -134,7 +137,7 @@ The document must follow the JSON Schema at https://iron-oxyde.com/program.schem
 - Optional "notes": short coaching cues.
 Choose conservative starting loads from what I tell you.
 
-Once you have my answers, reply with the JSON document only, with nothing before or after it.</pre>
+Once you have my answers, reply with the JSON document only, with nothing before or after it.<!-- prompt:end --></pre>
           <p class="copy-status" role="status" aria-live="polite"></p>
         </figure>
       </div>

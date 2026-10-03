@@ -264,7 +264,10 @@ run ok "clean accepts a relative target dir inside the checkout" "STUB cargo cle
 
 # `make landing-build` deletes and recreates LANDING_OUT: only a directory under dist/ is accepted.
 mkdir -p "$work/landing" "$work/schemas"
-echo page >"$work/landing/index.html"
+echo '<pre><!-- prompt:begin -->old<!-- prompt:end --></pre>' >"$work/landing/index.html"
+mkdir -p "$work/programs" "$work/scripts"
+echo 'Ask me & then write' >"$work/programs/ai-prompt.md"
+cp "$root/scripts/landing-prompt.py" "$work/scripts/"
 echo '{}' >"$work/schemas/program.schema.json"
 run fail "landing-build refuses LANDING_OUT=landing (the sources)" "must be a directory under dist/" -- \
   landing-build LANDING_OUT=landing
@@ -283,10 +286,11 @@ else
   failures=$((failures + 1))
 fi
 run ok "landing-build assembles dist/landing with the schema" "Landing page: dist/landing" -- landing-build
-if [ -f "$work/dist/landing/index.html" ] && [ -f "$work/dist/landing/program.schema.json" ]; then
-  echo "  ok    landing-build output has the page and the schema"
+if [ -f "$work/dist/landing/program.schema.json" ] \
+  && grep -qF '<!-- prompt:begin -->Ask me &amp; then write<!-- prompt:end -->' "$work/dist/landing/index.html"; then
+  echo "  ok    landing-build output has the schema and the prompt from programs/ai-prompt.md"
 else
-  echo "  FAIL  landing-build output has the page and the schema"
+  echo "  FAIL  landing-build output has the schema and the prompt from programs/ai-prompt.md"
   failures=$((failures + 1))
 fi
 

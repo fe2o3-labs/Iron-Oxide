@@ -445,6 +445,8 @@ landing-build: ## Assemble the landing page into LANDING_OUT (dist/landing)
 	$(Q)mkdir -p $(LANDING_OUT)
 	$(Q)cp -R landing/. $(LANDING_OUT)/
 	$(Q)cp schemas/program.schema.json $(LANDING_OUT)/program.schema.json
+	$(Q)$(call need-cmd,python3,Install Python 3: brew install python)
+	$(Q)python3 scripts/landing-prompt.py $(LANDING_OUT)/index.html programs/ai-prompt.md
 	$(Q)echo "Landing page: $(LANDING_OUT)"
 
 landing: landing-build ## Preview the landing page on http://localhost:LANDING_PORT (8000)

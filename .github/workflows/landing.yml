@@ -2,20 +2,26 @@ name: Landing page
 
 # Deploys the static landing page (landing/, see `make landing-build`) to GitHub Pages, served at
 # https://iron-oxyde.com (landing/CNAME). The site also publishes the program JSON Schema at
-# /program.schema.json, which the page's prompt points AI assistants at, so a schema change
-# redeploys it too.
+# /program.schema.json and shows the canonical AI prompt (programs/ai-prompt.md), so a change to
+# either (or to the build) redeploys it too.
 on:
   push:
     branches: [main]
     paths:
       - "landing/**"
       - "schemas/program.schema.json"
+      - "programs/ai-prompt.md"
+      - "scripts/landing-prompt.py"
+      - "Makefile"
       - ".github/workflows/landing.yml"
   # Pull requests touching the site only build it (no deploy), so a broken build shows up early.
   pull_request:
     paths:
       - "landing/**"
       - "schemas/program.schema.json"
+      - "programs/ai-prompt.md"
+      - "scripts/landing-prompt.py"
+      - "Makefile"
       - ".github/workflows/landing.yml"
   workflow_dispatch:
 
