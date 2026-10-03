@@ -260,6 +260,9 @@ pub async fn add_begin(
     ctx: &AuthContext,
     user: UserId,
 ) -> Result<CreationChallengeResponse, AuthError> {
+    // A new sign-in method needs a recent sign-in (#22): else a stale session could add its own
+    // passkey and sign in afresh with it.
+    ctx.require_recent_sign_in().await?;
     let existing = user_passkeys(ctx.db(), user).await?;
     if i64::try_from(existing.len()).unwrap_or(i64::MAX) >= MAX_PASSKEYS_PER_USER {
         return Err(AuthError::Invalid(format!(
@@ -305,6 +308,8 @@ pub async fn add_finish(
         CeremonyKind::PasskeyAdd,
         Some(user),
         async |tx, registration: PasskeyRegistration| {
+            // Checked again: the sign-in may have aged past the window since `add_begin`.
+            ctx.require_recent_sign_in().await?;
             check_discoverable(credential)?;
             let passkey = ctx
                 .auth

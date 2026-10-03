@@ -156,7 +156,9 @@ pub async fn populate(pool: &PgPool, user: UserId) {
 async fn populate_auth(pool: &PgPool, user: UserId) {
     let id = user.as_uuid();
     for sql in [
-        "INSERT INTO webauthn_user_handles (user_id, user_handle) VALUES ($1, gen_random_uuid())",
+        // A user signed up through the API already has one.
+        "INSERT INTO webauthn_user_handles (user_id, user_handle) VALUES ($1, gen_random_uuid())
+         ON CONFLICT (user_id) DO NOTHING",
         "INSERT INTO passkeys (user_id, credential_id, passkey, backup_eligible, backup_state,
                                nickname)
          VALUES ($1, uuid_send($1), '{}', false, false, 'test')",

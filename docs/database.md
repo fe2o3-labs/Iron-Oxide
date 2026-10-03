@@ -34,7 +34,7 @@ erDiagram
         uuid user_id PK "FK users"
         text unit "kg | lb"
         bigint bar_weight_ng
-        jsonb plate_inventory "array, at most 16 sizes"
+        jsonb plate_inventory "array, 1 to 16 sizes"
         bigint default_rest_s
         boolean sound_enabled
         timestamptz updated_at
@@ -113,7 +113,7 @@ types mirror them field for field, and switch to them once they are merged.
 
 | Column | Domain type | Storage |
 |---|---|---|
-| `*_ng` (`bar_weight_ng`, `weight_ng`) | `Weight` (#48) | Exact nanograms, `bigint`, `CHECK` 0 to 2 × 10¹⁵ (2000 kg, `Weight::MAX`). Never floats. |
+| `*_ng` (`bar_weight_ng`, `weight_ng`) | `Weight` (#48) | Exact nanograms, `bigint`, `CHECK` 0 to 2 × 10¹⁵ (2000 kg, `Weight::MAX`); the bar more than 0 (#34). Never floats. |
 | `reps`, `set_index` | `Reps` / `u16` (#48, #54) | `integer` with `CHECK` 0 to 65535 (`smallint` is too small for `u16`). |
 | `duration_s`, `default_rest_s` | `Seconds` / `u32` (#48) | `bigint` with `CHECK` 0 to 4294967295 (`integer` is too small for `u32`). |
 | `exercise_id`, `day_id`, `source_builtin_id` | `ExerciseId`, `DayId`, `BuiltinProgramId` (#48, #56) | `text`, `CHECK (is_slug(...))`: 1 to 64 of `[a-z0-9]` in words split by single hyphens. |
@@ -122,7 +122,7 @@ types mirror them field for field, and switch to them once they are merged.
 | `status` | `SessionStatus` (#54) | `text`, `CHECK` in `in_progress`, `completed`, `skipped`, `abandoned` (the domain's serde names). |
 | `started_at`, `finished_at`, `completed_at` | The session timestamp `T` (#54) | `timestamptz` (microseconds; the domain uses milliseconds, which fit exactly). |
 | `document` | `Program` JSON (#56) | `jsonb`: an object with a numeric `schema_version`, at most 1 MiB. Validated by the domain before it is written. |
-| `plate_inventory` | `PlateInventory` JSON (#53) | `jsonb` array of at most 16 entries. Validated by the domain before it is written. |
+| `plate_inventory` | `PlateInventory` JSON (#53) | `jsonb` array of 1 to 16 entries (default: the domain's kg set). Validated by the domain before it is written. Rows saved empty before the rule (#34) were given the default set by `20261003120000_settings_need_a_bar_and_plates`. |
 
 ## Isolation strategy
 
@@ -161,6 +161,13 @@ types mirror them field for field, and switch to them once they are merged.
 
 `sessions → program_versions` is `NO ACTION` (checked at the end of the statement), not
 `RESTRICT`, so deleting a user can cascade to both tables in one statement.
+
+**Deleting an account** (#22, `account::delete_user`) is that one statement, `DELETE FROM users
+WHERE id = $1`, in its own transaction. It is the only path the delete guards let through:
+`forbid_direct_delete` passes only cascades (`pg_trigger_depth() >= 2`), and `TRUNCATE` is refused
+on every table. No migration or trigger change was needed for it.
+`another_users_rows_survive_while_a_deleted_account_leaves_none` reads the tables to check from the
+catalog: every table with a `user_id` column, so a future table cannot be forgotten.
 
 ### In the repository (`server/db/`)
 
@@ -205,6 +212,7 @@ types mirror them field for field, and switch to them once they are merged.
 | `active_program` | `get`, `set`, `clear` |
 | `sessions` | `start` (idempotent), `finish` (idempotent), `get`, `get_in_progress`, `list` (history pages by `(started_at, id)`, optionally for one program) |
 | `history` | The history screens (#20): `page` (ended sessions, most recently finished first, paged by `(finished_at, id)` with microsecond cursors, served by the partial `workout_sessions_history_idx`), `entry` (one session with its program name, version number and working-set count), `exercise_sets` (weighted sets of one exercise in ended sessions, for the charts), `logged_exercises` |
+| `account` | The whole account (#22): the export reads (`snapshot`, then one function per table, all scoped by the user), the import writes (insert-only: `ON CONFLICT DO NOTHING` or a lookup first, bulk `UNNEST` inserts for sessions and sets), and `delete_user` (the cascade, see below) |
 | `sets` | `upsert_idempotent`, `list_for_session`, `completed_for_exercise` (sets of one exercise after a time, in completed sessions of any version of a program: the progression input of #57, served by the `(user_id, exercise_id, completed_at)` index) |
 
 A user has at most one session in progress: the partial unique index

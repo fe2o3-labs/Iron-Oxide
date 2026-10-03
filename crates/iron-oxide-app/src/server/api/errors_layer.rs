@@ -147,6 +147,20 @@ fn rebuild(
         object.insert("details".to_owned(), details);
     }
     let body = json!({ "message": message, "code": code, "data": { "ServerError": inner } });
+    // A retryable answer that says when to retry (`retry_after_secs` in its details) also says it
+    // in the standard header, unless its layer already set it (the 429s).
+    let retry_after = body["data"]["ServerError"]["details"]["retry_after_secs"].as_u64();
+    if let Some(secs) = retry_after.filter(|_| {
+        matches!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS
+        )
+    }) {
+        parts
+            .headers
+            .entry(header::RETRY_AFTER)
+            .or_insert(HeaderValue::from(secs));
+    }
     parts.status = status;
     parts.headers.remove(header::CONTENT_LENGTH);
     parts.headers.insert(

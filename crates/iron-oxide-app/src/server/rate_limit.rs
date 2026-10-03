@@ -70,17 +70,21 @@ pub enum RouteGroup {
     Session,
     /// Removing a passkey or unlinking Google.
     Account,
+    /// The user's data as a whole (#22): exporting, importing and deleting the account. Each call
+    /// reads or writes everything the user owns.
+    AccountData,
     /// Every other unsafe request (server functions that write).
     Write,
 }
 
 impl RouteGroup {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::AuthBegin,
         Self::AuthFinish,
         Self::GoogleCallback,
         Self::Session,
         Self::Account,
+        Self::AccountData,
         Self::Write,
     ];
 
@@ -91,7 +95,8 @@ impl RouteGroup {
             Self::GoogleCallback => 2,
             Self::Session => 3,
             Self::Account => 4,
-            Self::Write => 5,
+            Self::AccountData => 5,
+            Self::Write => 6,
         }
     }
 
@@ -102,6 +107,7 @@ impl RouteGroup {
             Self::GoogleCallback => "google_callback",
             Self::Session => "session",
             Self::Account => "account",
+            Self::AccountData => "account_data",
             Self::Write => "write",
         }
     }
@@ -120,6 +126,9 @@ pub const ROUTES: &[(&str, RouteGroup)] = &[
     ("/api/auth/sign-out", RouteGroup::Session),
     ("/api/auth/passkey/remove", RouteGroup::Account),
     ("/api/auth/google/unlink", RouteGroup::Account),
+    ("/api/account/export", RouteGroup::AccountData),
+    ("/api/account/import", RouteGroup::AccountData),
+    ("/api/account/delete", RouteGroup::AccountData),
 ];
 
 /// The group of a request, or `None` when it is not limited.
@@ -164,6 +173,7 @@ pub struct Limits {
     pub google_callback: GroupLimits,
     pub session: GroupLimits,
     pub account: GroupLimits,
+    pub account_data: GroupLimits,
     pub write: GroupLimits,
     /// The most keys (IPs or users) one limiter remembers; see [`limiter`].
     pub capacity: usize,
@@ -183,6 +193,10 @@ impl Default for Limits {
         // 5 per second on average.
         const SESSION_PER_IP: Quota = Quota::per(300, MINUTE);
         const ACCOUNT_PER_IP: Quota = Quota::per(60, MINUTE);
+        // Export, import and deletion read or write all of a user's data (an import body can be
+        // 16 MiB): a few in a row, then one every two minutes.
+        const ACCOUNT_DATA_PER_USER: Quota = Quota::per(10, Duration::from_secs(20 * 60));
+        const ACCOUNT_DATA_PER_IP: Quota = Quota::per(30, MINUTE);
         // The offline queue flushes a whole workout at once, for every user behind the IP:
         // 10 per second on average, 600 at once.
         const WRITE_PER_IP: Quota = Quota::per(600, MINUTE);
@@ -225,6 +239,12 @@ impl Default for Limits {
                 per_user: Some(ACCOUNT_PER_USER),
                 when_full: WhenFull::Allow,
             },
+            account_data: GroupLimits {
+                per_ip: Some(ACCOUNT_DATA_PER_IP),
+                per_ipv6_48: None,
+                per_user: Some(ACCOUNT_DATA_PER_USER),
+                when_full: WhenFull::Allow,
+            },
             write: GroupLimits {
                 per_ip: Some(WRITE_PER_IP),
                 per_ipv6_48: None,
@@ -245,6 +265,7 @@ impl Limits {
             RouteGroup::GoogleCallback => self.google_callback,
             RouteGroup::Session => self.session,
             RouteGroup::Account => self.account,
+            RouteGroup::AccountData => self.account_data,
             RouteGroup::Write => self.write,
         }
     }
@@ -471,6 +492,17 @@ mod tests {
             classify(&post, "/api/auth/passkey/sign-in/begin"),
             Some(RouteGroup::AuthBegin)
         );
+        for path in [
+            "/api/account/export",
+            "/api/account/import",
+            "/api/account/delete",
+        ] {
+            assert_eq!(
+                classify(&post, path),
+                Some(RouteGroup::AccountData),
+                "{path}"
+            );
+        }
         assert_eq!(
             classify(&Method::GET, GOOGLE_CALLBACK_PATH),
             Some(RouteGroup::GoogleCallback)
@@ -539,7 +571,12 @@ mod tests {
             assert_eq!(group.when_full, WhenFull::Refuse);
             assert!(group.per_ipv6_48.is_some());
         }
-        for group in [RouteGroup::Session, RouteGroup::Account, RouteGroup::Write] {
+        for group in [
+            RouteGroup::Session,
+            RouteGroup::Account,
+            RouteGroup::AccountData,
+            RouteGroup::Write,
+        ] {
             let group = limits.group(group);
             assert_eq!(group.when_full, WhenFull::Allow);
             assert!(group.per_ipv6_48.is_none());

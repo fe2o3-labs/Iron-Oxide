@@ -17,7 +17,7 @@ iron-oxide-domain = { path = "crates/iron-oxide-domain" }
 
 # Shared by the server and the wasm client (#5, sign-in).
 serde = { version = "1.0.229", features = ["derive"] }
-uuid = { version = "1.26.1", default-features = false, features = ["std", "serde"] }
+uuid = { version = "1.27.0", default-features = false, features = ["std", "serde"] }
 # WebAuthn JSON types exchanged by the server functions. Same version as `webauthn-rs`, which pins
 # it exactly. No `wasm` feature: its conversions unwrap, the client has its own (auth/browser.rs).
 webauthn-rs-proto = { version = "=0.5.5", default-features = false }

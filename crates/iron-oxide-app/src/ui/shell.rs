@@ -14,9 +14,11 @@ use iron_oxide_domain::{ExerciseId, SessionId};
 
 use super::account::Account;
 use super::components::icons::{HistoryIcon, HomeIcon, ProgramsIcon, SettingsIcon};
-use super::components::{Card, EmptyState, LoadingState};
+use super::components::{EmptyState, LoadingState};
 use super::errors::{BannerKind, use_errors};
 use super::history::{ExerciseProgress, History, HistoryLayout, HistorySession};
+use super::home::Home;
+use super::plates::PlateTool;
 use crate::api::error::{ApiFailure, FailureKind};
 use crate::auth::api::{is_unauthorized, me};
 use crate::auth::browser;
@@ -41,6 +43,8 @@ pub enum Route {
         Programs {},
         #[route("/settings")]
         Settings {},
+        #[route("/tools/plates")]
+        PlateTool {},
         #[route("/session")]
         Workout {},
         #[route("/:..segments")]
@@ -280,36 +284,13 @@ fn PageHeader(#[props(into)] title: String, #[props(into)] subtitle: Option<Stri
 }
 
 #[component]
-fn Home() -> Element {
-    rsx! {
-        PageHeader { title: "Today" }
-        EmptyState {
-            title: "Nothing planned",
-            message: "Your program's next workout will show up here.",
-        }
-    }
-}
-
-#[component]
 fn Programs() -> Element {
-    rsx! {
-        PageHeader { title: "Programs" }
-        EmptyState {
-            title: "No program yet",
-            message: "Pick a built-in program or upload your own here.",
-        }
-    }
+    rsx! { super::programs::ProgramsPage {} }
 }
 
 #[component]
 fn Settings() -> Element {
-    rsx! {
-        PageHeader { title: "Settings" }
-        Account {}
-        Card { title: "Units",
-            p { class: "io-muted", "Weights are shown in kilograms." }
-        }
-    }
+    rsx! { super::settings::SettingsPage {} }
 }
 
 #[component]
@@ -356,6 +337,7 @@ mod tests {
         assert_eq!(Route::History {}.to_string(), "/history");
         assert_eq!(Route::Programs {}.to_string(), "/programs");
         assert_eq!(Route::Settings {}.to_string(), "/settings");
+        assert_eq!(Route::PlateTool {}.to_string(), "/tools/plates");
         assert_eq!(Route::Workout {}.to_string(), "/session");
         assert_eq!(Route::Gallery {}.to_string(), "/dev/components");
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(7));

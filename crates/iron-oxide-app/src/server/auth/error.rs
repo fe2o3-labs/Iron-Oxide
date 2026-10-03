@@ -9,6 +9,9 @@ use dioxus::prelude::ServerFnError;
 
 use crate::server::api::error::{TRANSIENT, is_transient};
 
+/// The `403` of a change that needs a recent sign-in.
+pub const REAUTHENTICATE: &str = "For your security, sign in again first, then try again.";
+
 /// Why a sign-in operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -47,6 +50,10 @@ pub enum AuthError {
     /// Removing this would leave the account with no way to sign in.
     #[error("cannot remove the last way to sign in")]
     LastSignInMethod,
+    /// The change needs a recent sign-in (the step-up of
+    /// [`AuthContext::require_recent_sign_in`](super::AuthContext::require_recent_sign_in)).
+    #[error("a recent sign-in is required")]
+    ReauthenticationRequired,
     /// The target (passkey, identity) does not exist for this user.
     #[error("not found")]
     NotFound,
@@ -94,6 +101,7 @@ impl AuthError {
                 409,
                 "This is your last way to sign in. Add another passkey or link Google first.",
             ),
+            Self::ReauthenticationRequired => (403, REAUTHENTICATE),
             Self::NotFound => (404, "Not found."),
             Self::Invalid(message) => (400, message),
             // The session store and the database unreachable (a cold or restarting Neon

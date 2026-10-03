@@ -6,6 +6,7 @@
 //!
 //! Adding an area is one line here; Dioxus registers every server function it finds.
 
+pub mod account;
 pub mod billing;
 #[allow(
     dead_code,
@@ -22,12 +23,5 @@ pub mod error;
 pub mod history;
 pub mod programs;
 pub mod sessions;
-#[cfg_attr(
-    not(feature = "server"),
-    allow(
-        dead_code,
-        reason = "the client only decodes them until the settings screens (#34) land"
-    )
-)]
 pub mod settings;
 pub mod time;

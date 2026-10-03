@@ -1536,3 +1536,173 @@ async fn a_callback_with_repeated_parameters_gets_the_error_page(db: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains(r#""type":"error""#), "{body}");
 }
+
+// --- Step-up for new sign-in methods (#22) -------------------------------------------------
+
+/// Moves the sign-in of every session of `user` `seconds` into the past (whole seconds, floored,
+/// so the age is exact).
+async fn age_sign_in(db: &PgPool, user: &Me, seconds: i64) {
+    sqlx::query(
+        "UPDATE sessions
+         SET data = jsonb_set(data, '{auth.signed_in_at}',
+                              to_jsonb(floor(extract(epoch FROM now()))::bigint - $2))
+         WHERE user_id = $1",
+    )
+    .bind(user.user_id.as_uuid())
+    .bind(seconds)
+    .execute(db)
+    .await
+    .unwrap();
+}
+
+// Ages with a margin: the database (which computes them) and the server may disagree on the
+// clock by a second or so (Docker's VM), so neither is put at the window's edge.
+const STALE: i64 = 10 * 60 + 60;
+const FRESH: i64 = 60;
+const STEP_UP: &str = "For your security, sign in again first, then try again.";
+
+async fn passkey_count(db: &PgPool, user: &Me) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM passkeys WHERE user_id = $1")
+        .bind(user.user_id.as_uuid())
+        .fetch_one(db)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn adding_a_passkey_needs_a_recent_sign_in(db: PgPool) {
+    let app = TestApp::new(db.clone()).await;
+    let mut browser = app.browser();
+    let mut passkey = Passkey::new();
+    let (me1, credential_id) = sign_up(&mut browser, &mut passkey, "a").await;
+
+    // A stale session cannot even start.
+    age_sign_in(&db, &me1, STALE).await;
+    let error = browser
+        .call::<CreationChallengeResponse>(ADD_BEGIN, json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (error.status, error.message.as_str()),
+        (StatusCode::FORBIDDEN, STEP_UP)
+    );
+
+    // Started while fresh, finished once stale: refused at the finish too.
+    age_sign_in(&db, &me1, FRESH).await;
+    let ccr: CreationChallengeResponse = browser.call(ADD_BEGIN, json!({})).await.unwrap();
+    let credential = Passkey::new().register(ccr);
+    age_sign_in(&db, &me1, STALE).await;
+    let error = browser
+        .call::<Me>(
+            ADD_FINISH,
+            json!({ "credential": credential, "nickname": "late" }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(passkey_count(&db, &me1).await, 1);
+
+    // Signing in again with the account's own passkey (a new session) allows it.
+    let assertion = sign_in_assertion(&mut browser, &mut passkey, &credential_id).await;
+    let _: Me = browser
+        .call(SIGN_IN_FINISH, json!({ "credential": assertion }))
+        .await
+        .unwrap();
+    let ccr: CreationChallengeResponse = browser.call(ADD_BEGIN, json!({})).await.unwrap();
+    let credential = Passkey::new().register(ccr);
+    let _: Me = browser
+        .call(
+            ADD_FINISH,
+            json!({ "credential": credential, "nickname": "second" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(passkey_count(&db, &me1).await, 2);
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn linking_google_needs_a_recent_sign_in(db: PgPool) {
+    let app = TestApp::new(db.clone()).await;
+    let mut browser = app.browser();
+    let (me1, _) = sign_up(&mut browser, &mut Passkey::new(), "a").await;
+
+    // A stale session cannot start a link.
+    age_sign_in(&db, &me1, STALE).await;
+    let error = browser
+        .call::<String>(GOOGLE_BEGIN, json!({ "intent": "Link", "popup": true }))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (error.status, error.message.as_str()),
+        (StatusCode::FORBIDDEN, STEP_UP)
+    );
+    // "Continue with Google" while signed in links too: the same refusal.
+    let error = browser
+        .call::<String>(GOOGLE_BEGIN, json!({ "intent": "SignIn", "popup": true }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+    // Started while fresh, completed once stale: the callback refuses to link.
+    age_sign_in(&db, &me1, FRESH).await;
+    let url = google_begin(&mut browser, "Link").await;
+    age_sign_in(&db, &me1, STALE).await;
+    let claims = app.google.claims(&url, "sub-late");
+    app.google.grant(
+        "code-1",
+        Grant {
+            code_challenge: query_param(&url, "code_challenge"),
+            claims,
+            sign_with_unpublished_key: false,
+            sign_hs256_with_client_secret: false,
+        },
+    );
+    let (status, _, body) = browser
+        .get(&callback_path("code-1", &query_param(&url, "state")))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains(r#""type":"done""#), "{body}");
+    assert!(!me(&mut browser).await.unwrap().google_linked);
+
+    // Fresh, it links.
+    age_sign_in(&db, &me1, FRESH).await;
+    google_sign_in_or_link(&app, &mut browser, "Link", "sub-fresh")
+        .await
+        .unwrap();
+    assert!(me(&mut browser).await.unwrap().google_linked);
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn a_method_added_in_a_session_does_not_refresh_its_sign_in(db: PgPool) {
+    let app = TestApp::new(db.clone()).await;
+    let mut browser = app.browser();
+    let (me1, _) = sign_up(&mut browser, &mut Passkey::new(), "a").await;
+    let ccr: CreationChallengeResponse = browser.call(ADD_BEGIN, json!({})).await.unwrap();
+    let credential = Passkey::new().register(ccr);
+    let _: Me = browser
+        .call(
+            ADD_FINISH,
+            json!({ "credential": credential, "nickname": "new" }),
+        )
+        .await
+        .unwrap();
+    google_sign_in_or_link(&app, &mut browser, "Link", "sub-new")
+        .await
+        .unwrap();
+    // The session's step-up is still the sign-up's: once that is old, neither the passkey nor
+    // the Google account added in this session counts as a fresh sign-in.
+    age_sign_in(&db, &me1, STALE).await;
+    let error = browser
+        .call::<CreationChallengeResponse>(ADD_BEGIN, json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    let error = browser
+        .call::<()>("/api/account/delete", json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+}
