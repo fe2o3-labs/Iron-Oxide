@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/guizmaii-opensource/Iron-Oxide/main/schemas/program.schema.json",
+  "$schema": "https://raw.githubusercontent.com/fe2o3-labs/Iron-Oxide/main/schemas/program.schema.json",
   "schema_version": 1,
   "name": "Upper/lower in pounds",
   "description": "Uses every feature of the format.",
