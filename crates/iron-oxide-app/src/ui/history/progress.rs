@@ -7,6 +7,7 @@ use iron_oxide_domain::{ExerciseId, Unit};
 use super::chart::{self, VIEW_HEIGHT, VIEW_WIDTH, WeightPoint};
 use super::view::{chart_series, chart_summary, latest_number, series_rows};
 use super::{BackToHistory, ChartAccess, local_date, use_history};
+use crate::api::error::{ApiFailure, FailureKind};
 use crate::api::history::{ExerciseSeries, exercise_series};
 use crate::ui::components::{Card, EmptyState, LoadingState};
 use crate::ui::errors::use_errors;
@@ -91,6 +92,10 @@ fn Charts(exercise: ExerciseId) -> Element {
 
     match &*series.read() {
         None => rsx! { LoadingState { message: "Loading your progress…" } },
+        // The plan changed since it was checked: the server refused the charts.
+        Some(Err(error)) if ApiFailure::classify(error).kind == FailureKind::Forbidden => {
+            rsx! { LockedCharts {} }
+        }
         Some(Err(_)) => rsx! {
             EmptyState {
                 title: "Couldn't load",
