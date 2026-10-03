@@ -13,7 +13,7 @@ use super::storage::MemoryStorage;
 
 thread_local! {
     /// Where the outbox lives when `localStorage` is unavailable (or outside the browser).
-    static MEMORY: MemoryStorage = MemoryStorage::default();
+    static MEMORY: MemoryStorage = MemoryStorage::volatile();
 }
 
 /// Something the browser tells the outbox.

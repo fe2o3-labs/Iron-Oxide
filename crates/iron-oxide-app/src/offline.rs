@@ -15,6 +15,12 @@
 //!
 //! - [`Outbox::enqueue`] stores the write on the device before it returns, then sends it in
 //!   the background. Enqueueing the same write twice does nothing.
+//! - **Edits.** Enqueueing a set again with the same `SetId` and edited values replaces the
+//!   queued payload in place, so only one version of the id is ever sent. If the original
+//!   values were already delivered, the server keeps them: an edit enqueued while they were in
+//!   flight is held as refused with `queue::EDITED_AFTER_SAVE_MESSAGE`, and one enqueued after
+//!   delivery is answered `409` and shown. Editing a saved set needs its own server write,
+//!   which does not exist yet.
 //! - Ids come from the domain's `new_v7()` (`SessionId`, `SetId`) and timestamps from the
 //!   client. A retry resends exactly the same arguments, which the server answers unchanged
 //!   (`docs/api.md`, "Idempotency"). Never regenerate an id or a time for a retry.
@@ -30,7 +36,10 @@
 //! - Rejected writes (`409`, `422`, …) stop the queue at that write, with the server's message
 //!   in `last_error`. They are never dropped on their own. The user either fixes the cause and
 //!   calls [`Outbox::retry_failed`], or gives the writes up with [`Outbox::discard_failed`].
-//!   [`Outbox::retry_now`] skips the backoff.
+//!   Discarding also gives up the queued writes that cannot succeed without them: a refused
+//!   start takes its session's sets and finish (the server would answer each `404`).
+//!   [`Outbox::discard_count`] gives the number for the confirmation. [`Outbox::retry_now`]
+//!   skips the backoff.
 //!
 //! The session screen keeps a [`LocalSession`] and saves it after every change
 //! (`LocalSession::save(storage, user)`, with [`platform::with_storage`]). On load it restores
@@ -39,13 +48,15 @@
 //!
 //! # Delivery
 //!
-//! - Retryable failures (network, `429`, `502`-`504`) retry with exponential backoff and full
+//! - Retryable failures (network, `408`, `429`, `502`-`504`) retry with exponential backoff and full
 //!   jitter ([`backoff::Backoff::DEFAULT`]: 1 s doubling, capped at 5 min). A `429` is never
 //!   retried before its `retry_after_secs`. The `online` event, the app start and a sign-in
 //!   retry at once, but never before a `429`'s delay.
-//! - `401` pauses the queue until the user signs in again. Before sending, the drain checks
-//!   with `me()` that the browser's session is still the queue's user, so writes never land in
-//!   another account.
+//! - `401` pauses the queue until the user signs in again. Before **each** send, the drain
+//!   checks with `me()` that the browser's session is still the queue's user (another tab may
+//!   have switched accounts), so writes never land in another account: a mismatch stops the
+//!   drain and pauses the queue until the user signs in again. A failed check is retried later
+//!   and never refuses the write.
 //! - Everything else, `500` included (`docs/api.md` classifies it as not retryable), is a
 //!   rejection.
 //! - Single flight. In one tab a single task sends. Across tabs, a Web Lock
@@ -54,14 +65,15 @@
 //!   server answers the second copy unchanged, so the only cost is a request.
 //! - Every change to the queue re-reads it from storage, applies the change and writes it back
 //!   in one synchronous step, and the `storage` event refreshes the other tabs. This way tabs
-//!   do not overwrite each other's writes.
+//!   do not overwrite each other's writes. A tab that could not save for a while merges its
+//!   memory copy into what is stored (in enqueue order) instead of writing over it.
 //!
 //! # Storage
 //!
 //! `localStorage`, per user (`iron-oxide:outbox:<user id>`, `iron-oxide:session:<user id>`),
 //! versioned records ([`storage`]). Unreadable records or entries are moved to
-//! `<key>:unreadable` rather than deleted. When storage is blocked or full, the outbox carries on
-//! in memory and says so in `last_error`. A user's undelivered writes stay on the device after
+//! `<key>:unreadable` rather than deleted. When storage is blocked (the memory fallback) or full,
+//! the outbox carries on in memory and says so in `last_error` ("Not saved on this device"). A user's undelivered writes stay on the device after
 //! sign-out and are sent at their next sign-in.
 //!
 //! The pure parts ([`backoff`], [`queue`], [`storage`], [`session`]) have no browser

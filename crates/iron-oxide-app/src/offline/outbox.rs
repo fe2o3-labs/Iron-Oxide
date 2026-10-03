@@ -186,7 +186,20 @@ impl Outbox {
         self.commands.send(Command::Drain);
     }
 
-    /// Gives up the writes the server rejected (the user chose to) and returns them.
+    /// How many writes [`Outbox::discard_failed`] would give up: the refused ones and those
+    /// that cannot succeed without them (a refused start takes its session's sets and finish).
+    /// For the confirmation.
+    #[must_use]
+    pub fn discard_count(&self) -> usize {
+        let mut store = self.store;
+        let mut store = store.write();
+        store.as_mut().map_or(0, |store| {
+            platform::with_storage(|storage| store.load(storage).discard_plan().len())
+        })
+    }
+
+    /// Gives up the writes the server refused and the writes that depend on them (the user
+    /// chose to, in one action) and returns them.
     pub fn discard_failed(&self) -> Vec<Write> {
         let discarded = self
             .update(|queue| queue.discard_failed())
@@ -289,21 +302,6 @@ impl Outbox {
             self.schedule_in(LOCKED_RECHECK);
             return;
         };
-        // The server takes the user from the cookie: make sure it is still this queue's user.
-        match me().await {
-            Ok(me) if me.user_id == user => {}
-            result => {
-                let failure = match result {
-                    Ok(_) => Failure::SignedOut {
-                        message: OTHER_ACCOUNT_MESSAGE.to_owned(),
-                    },
-                    Err(error) => failure_of(&error),
-                };
-                self.fail_head(failure);
-                self.schedule();
-                return;
-            }
-        }
         loop {
             if *self.user.peek() != Some(user) {
                 return;
@@ -315,6 +313,18 @@ impl Outbox {
             else {
                 break;
             };
+            // The server takes the user from the cookie, which another tab may have changed:
+            // before every send, make sure it is still this queue's user. A mismatch stops the
+            // drain; a failed check is a retry later, never a refusal of the write.
+            let checked = me().await.map(|me| me.user_id);
+            if let Err(failure) = account_check(user, &checked) {
+                self.fail_head(failure);
+                self.schedule();
+                return;
+            }
+            if *self.user.peek() != Some(user) {
+                return;
+            }
             let result = send(&write).await;
             let now = platform::now();
             if *self.user.peek() != Some(user) {
@@ -392,6 +402,14 @@ async fn send(write: &Write) -> Result<(), ServerFnError> {
 #[must_use]
 pub fn failure_of(error: &ServerFnError) -> Failure {
     let ApiFailure { kind, message, .. } = ApiFailure::classify(error);
+    if status_of(error) == Some(408) && !kind.is_retryable() {
+        // A request timeout (a proxy, or the server's own slow-body limit): retry, whatever
+        // `ApiFailure` calls it.
+        return Failure::Retry {
+            message: crate::api::error::TRANSIENT_MESSAGE.to_owned(),
+            retry_after: None,
+        };
+    }
     match kind {
         FailureKind::Unauthorized => Failure::SignedOut { message },
         FailureKind::RateLimited => Failure::Retry {
@@ -403,6 +421,44 @@ pub fn failure_of(error: &ServerFnError) -> Failure {
             retry_after: None,
         },
         _ => Failure::Rejected { message },
+    }
+}
+
+/// The HTTP status of a failed call, if it got one.
+fn status_of(error: &ServerFnError) -> Option<u16> {
+    match error {
+        ServerFnError::ServerError { code, .. }
+        | ServerFnError::Request(dioxus::fullstack::RequestError::Status(_, code)) => Some(*code),
+        _ => None,
+    }
+}
+
+/// Whether the browser's session (`me()`, done before every send) is still `user`'s. Another
+/// account pauses the queue until `user` signs in again; a failed check is
+/// [`account_check_failure`].
+///
+/// # Errors
+/// The failure to record against the head write; the drain stops.
+pub fn account_check(user: UserId, checked: &Result<UserId, ServerFnError>) -> Result<(), Failure> {
+    match checked {
+        Ok(signed_in) if *signed_in == user => Ok(()),
+        Ok(_) => Err(Failure::SignedOut {
+            message: OTHER_ACCOUNT_MESSAGE.to_owned(),
+        }),
+        Err(error) => Err(account_check_failure(error)),
+    }
+}
+
+/// What a failed `me()` check before a send means: `401` waits for sign-in; anything else is a
+/// retry later (`429` after its delay). The write was not sent, so it is never refused.
+#[must_use]
+pub fn account_check_failure(error: &ServerFnError) -> Failure {
+    match failure_of(error) {
+        Failure::Rejected { message } => Failure::Retry {
+            message,
+            retry_after: None,
+        },
+        other => other,
     }
 }
 
@@ -480,5 +536,66 @@ mod tests {
                 message: "message 401".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn a_request_timeout_retries_in_either_shape() {
+        let decoded = ServerFnError::ServerError {
+            message: "HTTP 408: Request Timeout".to_owned(),
+            code: 408,
+            details: None,
+        };
+        let ours = server(408, None);
+        let bare = ServerFnError::Request(RequestError::Status("x".to_owned(), 408));
+        for error in [decoded, ours, bare] {
+            assert!(
+                matches!(
+                    failure_of(&error),
+                    Failure::Retry {
+                        retry_after: None,
+                        ..
+                    }
+                ),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_account_check_is_retried_never_refused() {
+        for code in [404, 409, 422, 500, 503] {
+            assert!(
+                matches!(
+                    account_check_failure(&server(code, None)),
+                    Failure::Retry { .. }
+                ),
+                "{code}"
+            );
+        }
+        assert!(matches!(
+            account_check_failure(&server(401, None)),
+            Failure::SignedOut { .. }
+        ));
+        assert!(matches!(
+            account_check_failure(&server(429, Some(serde_json::json!({ "retry_after_secs": 9 })))),
+            Failure::Retry { retry_after: Some(delay), .. } if delay == Duration::from_secs(9)
+        ));
+    }
+
+    #[test]
+    fn another_account_stops_the_drain_and_pauses_the_queue() {
+        let a = UserId::from_uuid(uuid::Uuid::from_u128(1));
+        let b = UserId::from_uuid(uuid::Uuid::from_u128(2));
+        assert_eq!(account_check(a, &Ok(a)), Ok(()));
+        assert_eq!(
+            account_check(a, &Ok(b)),
+            Err(Failure::SignedOut {
+                message: OTHER_ACCOUNT_MESSAGE.to_owned()
+            })
+        );
+        assert!(matches!(
+            account_check(a, &Err(server(500, None))),
+            Err(Failure::Retry { .. })
+        ));
     }
 }

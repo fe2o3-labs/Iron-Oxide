@@ -9,8 +9,12 @@ use crate::offline::{OutboxStatus, use_outbox};
 /// Its styles: Forge tokens (#26) with literal fallbacks, until the theme stylesheet takes them.
 const UNSAVED_CSS: Asset = asset!("/assets/unsaved.css");
 
-/// Asked before giving up the writes the server rejected: they are lost for good.
-const DISCARD_CONFIRM: &str = "Discard the changes the server refused? They will not be saved.";
+/// Asked before giving up the refused writes and those that depend on them (a refused start
+/// takes its session's sets and finish): they are lost for good, so it says how many.
+fn discard_confirm(count: usize) -> String {
+    let changes = if count == 1 { "change" } else { "changes" };
+    format!("Discard {count} unsaved {changes}? They will not be saved.")
+}
 
 /// What the pill says.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,7 +94,8 @@ pub fn Unsaved() -> Element {
                     class: "io-unsaved__button",
                     r#type: "button",
                     onclick: move |_| {
-                        if browser::confirm(DISCARD_CONFIRM) {
+                        let count = outbox.discard_count();
+                        if count > 0 && browser::confirm(&discard_confirm(count)) {
                             outbox.discard_failed();
                         }
                     },
@@ -136,6 +141,18 @@ mod tests {
         assert_eq!(
             failed.detail.as_deref(),
             Some("This session has already ended.")
+        );
+    }
+
+    #[test]
+    fn the_discard_confirmation_says_how_many_changes_go() {
+        assert_eq!(
+            discard_confirm(1),
+            "Discard 1 unsaved change? They will not be saved."
+        );
+        assert_eq!(
+            discard_confirm(4),
+            "Discard 4 unsaved changes? They will not be saved."
         );
     }
 }

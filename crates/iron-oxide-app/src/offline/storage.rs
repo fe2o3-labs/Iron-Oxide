@@ -40,6 +40,12 @@ pub trait Storage {
     /// # Errors
     /// When the storage cannot be written.
     fn remove(&self, key: &str) -> Result<(), StorageError>;
+
+    /// Whether what is stored survives a reload. `false` for the memory fallback used when
+    /// `localStorage` is blocked.
+    fn is_persistent(&self) -> bool {
+        true
+    }
 }
 
 /// An in-memory store: the fallback when `localStorage` is unavailable, and the tests' store.
@@ -48,9 +54,21 @@ pub struct MemoryStorage {
     items: RefCell<BTreeMap<String, String>>,
     /// Test switch: every write fails, as with a full `localStorage`.
     full: Cell<bool>,
+    /// The fallback for a blocked `localStorage`: lost on reload.
+    volatile: bool,
 }
 
 impl MemoryStorage {
+    /// The fallback when `localStorage` is unavailable: works, but [`Storage::is_persistent`]
+    /// says it is lost on reload.
+    #[must_use]
+    pub fn volatile() -> Self {
+        Self {
+            volatile: true,
+            ..Self::default()
+        }
+    }
+
     /// Makes every write fail (`true`) or succeed again.
     #[cfg(test)]
     pub fn set_full(&self, full: bool) {
@@ -76,6 +94,10 @@ impl Storage for MemoryStorage {
     fn remove(&self, key: &str) -> Result<(), StorageError> {
         self.items.borrow_mut().remove(key);
         Ok(())
+    }
+
+    fn is_persistent(&self) -> bool {
+        !self.volatile
     }
 }
 
@@ -172,8 +194,12 @@ pub const NOT_PERSISTED_MESSAGE: &str =
 /// One user's outbox in storage. Every change reads the stored queue, applies the change and
 /// writes it back in the same synchronous step, so writes queued by another tab are kept.
 ///
-/// When storage fails (blocked, full), the queue lives on in memory: changes keep working for as
-/// long as the page is open, and [`OutboxStatus::last_error`] says they are not on the device.
+/// When storage fails (blocked, full, or only the memory fallback is there), the queue lives on
+/// in memory: changes keep working for as long as the page is open, and
+/// [`OutboxStatus::last_error`] says they are not on the device. Storage is still read before
+/// every change, and the memory copy is merged into what is stored (another tab's writes), so
+/// neither side's writes are overwritten once saving works again. A write delivered meanwhile
+/// may come back from storage: it is sent again, and the server answers the replay unchanged.
 #[derive(Debug)]
 pub struct QueueStore {
     key: String,
@@ -204,27 +230,28 @@ impl QueueStore {
     /// The current queue: the stored one, or the memory copy while storage fails. Entries that do
     /// not decode are moved aside.
     pub fn load(&mut self, storage: &dyn Storage) -> &Queue {
-        if !self.not_persisted {
-            match read(storage, &self.key, Self::VERSION) {
-                Ok(Some(data)) => {
-                    let (queue, unreadable) = Queue::from_json(data);
-                    self.mirror = queue;
-                    if !unreadable.is_empty() {
-                        tracing::warn!(
-                            key = self.key,
-                            count = unreadable.len(),
-                            "unreadable outbox entries, kept aside"
-                        );
-                        for entry in unreadable {
-                            set_aside(storage, &self.key, entry);
-                        }
-                        self.save(storage);
+        match read(storage, &self.key, Self::VERSION) {
+            Ok(stored) => {
+                let (queue, unreadable) = stored.map(Queue::from_json).unwrap_or_default();
+                self.mirror = if self.not_persisted {
+                    std::mem::take(&mut self.mirror).merged_into(queue)
+                } else {
+                    queue
+                };
+                if !unreadable.is_empty() {
+                    tracing::warn!(
+                        key = self.key,
+                        count = unreadable.len(),
+                        "unreadable outbox entries, kept aside"
+                    );
+                    for entry in unreadable {
+                        set_aside(storage, &self.key, entry);
                     }
+                    self.save(storage);
                 }
-                Ok(None) => self.mirror = Queue::default(),
-                // Storage blocked: keep using the memory copy.
-                Err(_) => self.not_persisted = true,
             }
+            // Storage blocked: keep using the memory copy.
+            Err(_) => self.not_persisted = true,
         }
         &self.mirror
     }
@@ -263,7 +290,7 @@ impl QueueStore {
                 .and_then(|data| write(storage, &self.key, Self::VERSION, data))
         };
         match saved {
-            Ok(()) => self.not_persisted = false,
+            Ok(()) => self.not_persisted = !storage.is_persistent(),
             Err(error) => {
                 if !self.not_persisted {
                     tracing::warn!(key = self.key, ?error, "outbox kept in memory only");
@@ -401,6 +428,39 @@ mod tests {
                 .pending_count,
             3
         );
+    }
+
+    #[test]
+    fn the_memory_fallback_says_the_outbox_is_not_on_the_device() {
+        let fallback = MemoryStorage::volatile();
+        let mut store = QueueStore::new(user());
+        store.update(&fallback, |queue| {
+            queue.enqueue(start(SessionId::new_v7()), at(0))
+        });
+        let status = store.status();
+        assert_eq!(status.pending_count, 1);
+        assert_eq!(status.last_error.as_deref(), Some(NOT_PERSISTED_MESSAGE));
+    }
+
+    #[test]
+    fn a_tab_that_could_not_save_never_overwrites_another_tabs_writes() {
+        let storage = MemoryStorage::default();
+        let (mut tab_a, mut tab_b) = (QueueStore::new(user()), QueueStore::new(user()));
+        let session = SessionId::new_v7();
+        let from_b = set(session, 0);
+        let from_a = set(session, 1);
+        storage.set_full(true);
+        tab_a.update(&storage, |queue| queue.enqueue(start(session), at(0)));
+        storage.set_full(false);
+        tab_b.update(&storage, |queue| queue.enqueue(from_b.clone(), at(1)));
+        tab_a.update(&storage, |queue| queue.enqueue(from_a.clone(), at(2)));
+        let kept: Vec<_> = QueueStore::new(user())
+            .load(&storage)
+            .entries()
+            .map(|entry| entry.write.clone())
+            .collect();
+        assert_eq!(kept, vec![start(session), from_b, from_a]);
+        assert_eq!(tab_a.status().last_error, None);
     }
 
     #[test]

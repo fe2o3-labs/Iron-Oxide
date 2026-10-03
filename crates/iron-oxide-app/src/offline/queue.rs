@@ -62,6 +62,15 @@ impl Write {
         }
     }
 
+    /// Whether this write cannot succeed once `other` is given up: every later write of a
+    /// session depends on its start (the server answers `404` for a session it never created).
+    /// Sets and finishes stand on their own.
+    #[must_use]
+    pub fn depends_on(&self, other: &Self) -> bool {
+        matches!(other, Self::StartSession { session_id, .. }
+            if *session_id == self.session_id() && self != other)
+    }
+
     /// The session the write belongs to.
     #[must_use]
     pub const fn session_id(&self) -> SessionId {
@@ -116,7 +125,16 @@ pub enum Enqueued {
     Added,
     /// The same write is already queued: nothing changed.
     Duplicate,
+    /// A write with the same key (an edited set) was still queued: its payload was replaced in
+    /// place, keeping its turn. A refusal on it is cleared, since the content changed.
+    Replaced,
 }
+
+/// Shown when a set was edited while its earlier values were being sent and the server saved
+/// those: the server refuses a second version of the same set id (`409`), so the edit is held
+/// here, refused, instead of being sent for a certain `409`.
+pub const EDITED_AFTER_SAVE_MESSAGE: &str =
+    "This set was already saved with its earlier values. Editing a saved set is not supported yet.";
 
 /// When the queue wants to run next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,10 +200,22 @@ impl Queue {
         self.entries.is_empty()
     }
 
-    /// Appends `write`, unless the same write is already queued.
+    /// Appends `write`. The same write already queued is not added twice, and a queued write
+    /// with the same key (the same `SetId` with edited values) gets the new payload in place:
+    /// two versions of one id would make the second a certain `409`.
     pub fn enqueue(&mut self, write: Write, now: Timestamp) -> Enqueued {
         if self.entries.iter().any(|entry| entry.write == write) {
             return Enqueued::Duplicate;
+        }
+        let key = write.key();
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.write.key() == key)
+        {
+            entry.write = write;
+            entry.failed = None;
+            return Enqueued::Replaced;
         }
         self.entries.push_back(Entry {
             write,
@@ -220,10 +250,18 @@ impl Queue {
     }
 
     /// `write` was delivered (`2xx`): removes it and resets the retry state. Does nothing if it is
-    /// no longer queued (another tab delivered it first).
+    /// no longer queued (another tab delivered it first). If the queue meanwhile holds an edited
+    /// version of it (same key, other values), that version is marked refused with
+    /// [`EDITED_AFTER_SAVE_MESSAGE`]: the server would answer it `409`.
     pub fn on_success(&mut self, write: &Write) {
         if let Some(index) = self.position(write) {
             self.entries.remove(index);
+        } else if let Some(edited) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.write.key() == write.key())
+        {
+            edited.failed = Some(EDITED_AFTER_SAVE_MESSAGE.to_owned());
         }
         self.failures = 0;
         self.retry_at = None;
@@ -282,13 +320,55 @@ impl Queue {
         self.nudge();
     }
 
-    /// Removes the failed writes (the user chose to give them up) and returns them.
+    /// The writes [`Queue::discard_failed`] would remove, in queue order: the failed writes, and
+    /// after each the writes that cannot succeed without it (see [`Write::depends_on`]).
+    #[must_use]
+    pub fn discard_plan(&self) -> Vec<&Write> {
+        let mut doomed: Vec<&Write> = Vec::new();
+        for entry in &self.entries {
+            if entry.failed.is_some() || doomed.iter().any(|gone| entry.write.depends_on(gone)) {
+                doomed.push(&entry.write);
+            }
+        }
+        doomed
+    }
+
+    /// Removes the failed writes and the writes that depend on them (the user chose to give
+    /// them up, in one action) and returns them, in queue order.
     pub fn discard_failed(&mut self) -> Vec<Write> {
-        let (failed, kept) = std::mem::take(&mut self.entries)
-            .into_iter()
-            .partition::<Vec<_>, _>(|entry| entry.failed.is_some());
-        self.entries = kept.into();
-        failed.into_iter().map(|entry| entry.write).collect()
+        let doomed: Vec<Write> = self.discard_plan().into_iter().cloned().collect();
+        let mut removed = doomed.iter().peekable();
+        let mut kept = VecDeque::with_capacity(self.entries.len());
+        for entry in std::mem::take(&mut self.entries) {
+            if removed.peek().is_some_and(|gone| **gone == entry.write) {
+                removed.next();
+            } else {
+                kept.push_back(entry);
+            }
+        }
+        self.entries = kept;
+        if !self.entries.iter().any(|entry| entry.failed.is_some()) {
+            self.nudge();
+        }
+        doomed
+    }
+
+    /// Merges this copy into `stored` (what another tab stored meanwhile): every write of both,
+    /// once, in the order they were enqueued on this device (stable, so equal times keep the
+    /// stored order). Retry state is the stored one. Used when this tab could not save for a
+    /// while, so neither side's writes are lost.
+    #[must_use]
+    pub fn merged_into(self, mut stored: Self) -> Self {
+        for entry in self.entries {
+            if !stored.entries.iter().any(|kept| kept.write == entry.write) {
+                stored.entries.push_back(entry);
+            }
+        }
+        stored
+            .entries
+            .make_contiguous()
+            .sort_by_key(|entry| entry.enqueued_at);
+        stored
     }
 
     /// Whether `key` is still waiting to be delivered.
@@ -668,5 +748,112 @@ pub(crate) mod tests {
         let (queue, rejected) = Queue::from_json(serde_json::json!("garbage"));
         assert!(queue.is_empty());
         assert_eq!(rejected, vec![serde_json::json!("garbage")]);
+    }
+
+    fn edited(write: &Write) -> Write {
+        let Write::SaveSet { session_id, set } = write else {
+            unreachable!()
+        };
+        Write::SaveSet {
+            session_id: *session_id,
+            set: LoggedSet {
+                reps: Reps::new(3),
+                ..set.clone()
+            },
+        }
+    }
+
+    #[test]
+    fn discarding_a_refused_start_discards_its_session_in_one_action() {
+        let (a, b) = (SessionId::new_v7(), SessionId::new_v7());
+        let (a0, a1) = (set(a, 0), set(a, 1));
+        let mut queue = Queue::default();
+        for write in [start(a), a0.clone(), a1.clone(), finish(a), start(b)] {
+            queue.enqueue(write, at(0));
+        }
+        queue.on_failure(
+            &start(a),
+            rejected("Another session is in progress."),
+            at(0),
+            0.5,
+            &B,
+        );
+        // What the confirmation counts.
+        assert_eq!(queue.discard_plan(), vec![&start(a), &a0, &a1, &finish(a)]);
+        assert_eq!(queue.discard_failed(), vec![start(a), a0, a1, finish(a)]);
+        // The next session goes out at once, not behind orphaned writes.
+        assert_eq!(deliver_all(&mut queue, at(0)), vec![start(b)]);
+    }
+
+    #[test]
+    fn discarding_a_refused_set_keeps_the_rest_of_its_session() {
+        let session = SessionId::new_v7();
+        let (s0, s1) = (set(session, 0), set(session, 1));
+        let mut queue = Queue::default();
+        for write in [start(session), s0.clone(), s1.clone(), finish(session)] {
+            queue.enqueue(write, at(0));
+        }
+        let first = queue.next_ready(at(0)).cloned().unwrap();
+        queue.on_success(&first);
+        queue.on_failure(&s0, rejected("Some values are not valid."), at(0), 0.5, &B);
+        assert_eq!(queue.discard_plan(), vec![&s0]);
+        assert_eq!(queue.discard_failed(), vec![s0]);
+        assert_eq!(deliver_all(&mut queue, at(0)), vec![s1, finish(session)]);
+    }
+
+    #[test]
+    fn an_edited_set_replaces_its_queued_version() {
+        let session = SessionId::new_v7();
+        let original = set(session, 0);
+        let edit = edited(&original);
+        let mut queue = Queue::default();
+        queue.enqueue(start(session), at(0));
+        queue.enqueue(original.clone(), at(0));
+        queue.enqueue(finish(session), at(0));
+        assert_eq!(queue.enqueue(edit.clone(), at(1)), Enqueued::Replaced);
+        // One write per id, in its original turn, with the new values.
+        assert_eq!(
+            deliver_all(&mut queue, at(0)),
+            vec![start(session), edit, finish(session)]
+        );
+    }
+
+    #[test]
+    fn an_edit_made_while_the_original_was_being_saved_is_held_as_refused() {
+        let session = SessionId::new_v7();
+        let original = set(session, 0);
+        let mut queue = Queue::default();
+        queue.enqueue(original.clone(), at(0));
+        let in_flight = queue.next_ready(at(0)).cloned().unwrap();
+        queue.enqueue(edited(&original), at(1));
+        // The original values reached the server: the edit would be a certain 409.
+        queue.on_success(&in_flight);
+        let status = queue.status();
+        assert_eq!(status.failed_count, 1);
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some(EDITED_AFTER_SAVE_MESSAGE)
+        );
+        assert_eq!(queue.next_ready(at(0)), None);
+    }
+
+    #[test]
+    fn a_memory_copy_merges_into_the_stored_queue_without_losing_either_side() {
+        let session = SessionId::new_v7();
+        let (mine, theirs) = (set(session, 0), set(session, 1));
+        let mut stored = Queue::default();
+        stored.enqueue(start(session), at(0));
+        stored.enqueue(theirs.clone(), at(1));
+        let mut memory = Queue::default();
+        memory.enqueue(start(session), at(0));
+        memory.enqueue(mine.clone(), at(2));
+        let merged = memory.merged_into(stored);
+        assert_eq!(
+            merged
+                .entries()
+                .map(|entry| entry.write.clone())
+                .collect::<Vec<_>>(),
+            vec![start(session), theirs, mine]
+        );
     }
 }
