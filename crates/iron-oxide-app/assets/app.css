@@ -1488,6 +1488,44 @@ a.io-chip {
   flex: none;
 }
 
+/* --- Session summary (#32) -------------------------------------------------------------------- */
+
+.io-summary-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.io-summary-stat {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 4px;
+  min-width: 0;
+  padding: 14px 12px;
+  background: var(--io-surface);
+  border: 1px solid var(--io-surface-edge);
+  border-radius: var(--io-radius-card);
+}
+
+.io-summary-stat dt {
+  font-family: var(--io-font-mono);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--io-muted);
+}
+
+.io-summary-stat dd {
+  margin: 0;
+  font-family: var(--io-font-display);
+  font-size: 32px;
+  font-weight: 900;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* --- Component gallery (debug builds) --------------------------------------------------------- */
 
 .io-gallery-theme {
