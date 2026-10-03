@@ -20,6 +20,9 @@
 //! - Every 5xx except 503 gets the generic message and no details: nothing a function puts in a
 //!   500 (`ServerFnError::new(detail)`, an `anyhow` error) reaches the client. The original is
 //!   logged.
+//! - A 5xx whose body is not one of these shapes (not JSON: a panic's text, which Dioxus includes
+//!   in debug builds; or JSON of another shape) gets the generic message too, keeping its status
+//!   (a 503 gets the retry message). Other non-JSON 4xx bodies (axum's own 405 or 415) are kept.
 
 use dioxus::logger::tracing;
 use dioxus::server::axum::{
@@ -31,7 +34,7 @@ use dioxus::server::axum::{
 };
 use serde_json::{Value, json};
 
-use super::error::INTERNAL;
+use super::error::{INTERNAL, TRANSIENT};
 
 /// The message of a request whose arguments do not decode.
 pub const INVALID_REQUEST: &str = "Invalid request.";
@@ -57,14 +60,40 @@ pub async fn normalize(request: Request, next: Next) -> Response {
     let (parts, body) = response.into_parts();
     let Ok(bytes) = to_bytes(body, MAX_ERROR_BODY).await else {
         tracing::error!(%status, "server function error body too large or unreadable");
-        return rebuild(parts, status, INTERNAL, None);
+        return rebuild(parts, status, generic(status), None);
     };
-    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-        return Response::from_parts(parts, Body::from(bytes));
-    };
-    match rewrite(status, &value) {
+    let rewritten = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|value| rewrite(status, &value));
+    match rewritten {
         Some((status, message, details)) => rebuild(parts, status, &message, details),
+        // A 5xx we cannot read (a panic's text, a layer's plain-text error): its text may say
+        // anything, so it never reaches the client.
+        None if status.is_server_error() => {
+            tracing::error!(
+                %status,
+                body = %String::from_utf8_lossy(&bytes),
+                "server function failed with an unknown error body"
+            );
+            rebuild(parts, status, generic(status), None)
+        }
         None => Response::from_parts(parts, Body::from(bytes)),
+    }
+}
+
+/// An `/api/` error response in the shape every `/api/` error has, for layers that refuse a
+/// request before any server function runs.
+pub fn error_response(status: StatusCode, message: &str, details: Option<Value>) -> Response {
+    let parts = Response::new(()).into_parts().0;
+    rebuild(parts, status, message, details)
+}
+
+/// The generic message of a 5xx: retry for a 503, "something went wrong" otherwise.
+fn generic(status: StatusCode) -> &'static str {
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        TRANSIENT
+    } else {
+        INTERNAL
     }
 }
 
@@ -276,6 +305,63 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(message, "The server is busy.");
+    }
+
+    /// `normalize` around a route answering `status` with `body`.
+    async fn normalized(
+        path: &str,
+        status: StatusCode,
+        body: &'static str,
+    ) -> (StatusCode, String) {
+        use dioxus::server::axum::{Router, middleware::from_fn, routing::get};
+        use tower::ServiceExt;
+        let router = Router::new()
+            .route(path, get(move || async move { (status, body) }))
+            .layer(from_fn(normalize));
+        let response = router
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), MAX_ERROR_BODY)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_5xx_body_of_another_shape_never_reaches_the_client() {
+        let secret = "Server function panicked: task 7 panicked with message \"at 10.0.0.3\"";
+        for (status, body, message) in [
+            (StatusCode::INTERNAL_SERVER_ERROR, secret, INTERNAL),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"other": "at 10.0.0.3"}"#,
+                INTERNAL,
+            ),
+            (StatusCode::BAD_GATEWAY, secret, INTERNAL),
+            (StatusCode::SERVICE_UNAVAILABLE, secret, TRANSIENT),
+        ] {
+            let (got, text) = normalized("/api/x", status, body).await;
+            assert_eq!(got, status);
+            assert!(!text.contains("10.0.0.3"), "{text}");
+            let value: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(value["data"]["ServerError"]["message"], message);
+            assert_eq!(value["code"], status.as_u16());
+        }
+        // Outside `/api/`, and for a 4xx of another shape, the body is kept.
+        assert_eq!(
+            normalized("/page", StatusCode::INTERNAL_SERVER_ERROR, secret)
+                .await
+                .1,
+            secret
+        );
+        assert_eq!(
+            normalized("/api/x", StatusCode::METHOD_NOT_ALLOWED, "nope")
+                .await
+                .1,
+            "nope"
+        );
     }
 
     #[test]

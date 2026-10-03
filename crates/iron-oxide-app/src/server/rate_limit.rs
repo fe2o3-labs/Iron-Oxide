@@ -431,10 +431,7 @@ fn too_many_requests(
         retry_after_secs = secs,
         "rate limited"
     );
-    let message = format!(
-        "Too many requests. Please try again in {}.",
-        wait_text(secs)
-    );
+    let message = too_many_requests_message(secs);
     let (content_type, body) = if path.starts_with("/api/") {
         // The `/api/` error shape (docs/api.md): the client decodes `data.ServerError` into
         // `ServerFnError::ServerError { message, code: 429, details }`.
@@ -458,6 +455,14 @@ fn too_many_requests(
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+/// The message of a `429`, shown as it is by the client (`ui::errors::surface`).
+pub(crate) fn too_many_requests_message(secs: u64) -> String {
+    format!(
+        "Too many requests. Please try again in {}.",
+        wait_text(secs)
+    )
 }
 
 /// "1 second", "42 seconds", "3 minutes" (rounded up).

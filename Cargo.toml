@@ -8,7 +8,7 @@ edition = "2024"
 rust-version = "1.98"
 publish = false
 license = "AGPL-3.0-only"
-repository = "https://github.com/guizmaii-opensource/Iron-Oxide"
+repository = "https://github.com/fe2o3-labs/Iron-Oxide"
 
 [workspace.dependencies]
 # Pinned exactly: the `dx` CLI must be the same version as the `dioxus` crates (see README).
@@ -71,6 +71,9 @@ webauthn-rs = { version = "0.5.5", default-features = false, features = [
 # webauthn-rs-core) to generate the mock Google signing key.
 openssl = "0.10.81"
 webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = ["softpasskey"] }
+
+# Test-only: a request body sent in chunks, or never finished (#74). Already in the tree via axum.
+http-body = "1.1.0"
 
 # Dev-dependencies for tests (tokio: the app also enables runtime features for its server build).
 # serde_json is also a server dependency of the app (jsonb columns).

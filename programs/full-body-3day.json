@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/guizmaii-opensource/Iron-Oxide/main/schemas/program.schema.json",
+  "$schema": "https://raw.githubusercontent.com/fe2o3-labs/Iron-Oxide/main/schemas/program.schema.json",
   "schema_version": 1,
   "name": "Full-body 3-day barbell",
   "description": "Three full-body barbell sessions a week on non-consecutive days (e.g. Monday, Wednesday, Friday), rotating A, B, C. Squat every session, bench and overhead press alternate, one hinge per session. The starting loads are deliberately light: set each one so the first session feels easy with clean technique, then let the progression add weight. Warm-up sets that come out lighter than the empty bar are done with the bar. Increments are 2.5 kg (1.25 kg plates on each side), and 5 kg on the deadlift; with lighter change plates, smaller jumps on the overhead press are fine.",

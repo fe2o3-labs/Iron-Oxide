@@ -27,6 +27,7 @@ use tower_sessions::{
 use uuid::Uuid;
 
 use crate::auth::types::UserId;
+use crate::server::api::error::is_transient;
 
 /// A signed-in session ends after this long without a request that refreshes it.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(14 * 24 * 60 * 60);
@@ -173,8 +174,30 @@ fn record_user(record: &Record) -> Option<Uuid> {
         .map(|user| user.as_uuid())
 }
 
+/// The prefix of a [`session_store::Error::Backend`] message for a failure worth retrying.
+///
+/// `tower-sessions` errors carry only a message, and the store is the only place that still sees
+/// the typed `sqlx::Error`, so it classifies the error there:
+/// - `Backend("retryable: …")`: the database was unreachable or the statement lost a race (pool
+///   timeout, I/O error, serialization failure, deadlock, admin shutdown: the same as
+///   `server::api::error::is_transient`). `503`, retried by the client.
+/// - any other `Backend`: a permanent database failure (a missing table, a constraint, a type
+///   mismatch), or no free session id. `500`.
+/// - `Encode` and `Decode`: the session data does not serialize or the stored data does not
+///   deserialize. `500`.
+const RETRYABLE: &str = "retryable: ";
+
+/// Whether a store error is worth retrying (`503`); see [`RETRYABLE`].
+pub fn is_retryable(error: &session_store::Error) -> bool {
+    matches!(error, session_store::Error::Backend(message) if message.starts_with(RETRYABLE))
+}
+
 fn backend(error: sqlx::Error) -> session_store::Error {
-    session_store::Error::Backend(error.to_string())
+    if is_transient(&error) {
+        session_store::Error::Backend(format!("{RETRYABLE}{error}"))
+    } else {
+        session_store::Error::Backend(error.to_string())
+    }
 }
 
 fn encode(record: &Record) -> session_store::Result<serde_json::Value> {
@@ -295,10 +318,28 @@ pub fn needs_touch(last_seen_at: Option<i64>, now: i64) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const DAY: i64 = 24 * 60 * 60;
+
+    /// The store's error for a database failure.
+    pub(crate) fn backend_error(error: sqlx::Error) -> session_store::Error {
+        backend(error)
+    }
+
+    #[test]
+    fn only_transient_database_failures_are_retryable() {
+        assert!(is_retryable(&backend(sqlx::Error::PoolTimedOut)));
+        assert!(is_retryable(&backend(sqlx::Error::PoolClosed)));
+        assert!(!is_retryable(&backend(sqlx::Error::RowNotFound)));
+        assert!(!is_retryable(&backend(sqlx::Error::Protocol(
+            "retryable: spoofed".to_owned()
+        ))));
+        assert!(!is_retryable(&session_store::Error::Decode(
+            "retryable: no".to_owned()
+        )));
+    }
 
     #[test]
     fn absolute_timeout_boundaries() {

@@ -44,6 +44,9 @@ pub enum AuthError {
     /// Google (or the ID token it returned) failed a check.
     #[error("Google sign-in failed: {0}")]
     Google(String),
+    /// Google could not be reached in time (connection, timeout, a 5xx): retrying may work.
+    #[error("Google unreachable: {0}")]
+    GoogleUnavailable(String),
     /// Removing this would leave the account with no way to sign in.
     #[error("cannot remove the last way to sign in")]
     LastSignInMethod,
@@ -96,11 +99,16 @@ impl AuthError {
             Self::NotFound => (404, "Not found."),
             Self::Invalid(message) => (400, message),
             // The session store and the database unreachable (a cold or restarting Neon
-            // compute): nothing happened, retrying is safe (#68).
-            Self::Session(tower_sessions::session::Error::Store(
-                tower_sessions::session_store::Error::Backend(_),
-            )) => (503, TRANSIENT),
+            // compute): nothing happened, retrying is safe (#68). A permanent store failure
+            // (decode, encode, a non-transient database error) is a 500 (see
+            // `session::is_retryable`).
+            Self::Session(tower_sessions::session::Error::Store(error))
+                if super::session::is_retryable(error) =>
+            {
+                (503, TRANSIENT)
+            }
             Self::Database(error) if is_transient(error) => (503, TRANSIENT),
+            Self::GoogleUnavailable(_) => (503, TRANSIENT),
             Self::Database(_) | Self::Session(_) | Self::Internal(_) => {
                 (500, "Something went wrong. Please try again.")
             }
@@ -110,7 +118,10 @@ impl AuthError {
     /// Logs the details at a level matching the cause.
     fn log(&self) {
         match self {
-            Self::Database(_) | Self::Session(_) | Self::Internal(_) => {
+            Self::Database(_)
+            | Self::Session(_)
+            | Self::Internal(_)
+            | Self::GoogleUnavailable(_) => {
                 tracing::error!(error = %self, "sign-in error");
             }
             Self::Unauthenticated => tracing::debug!(error = %self, "sign-in error"),
@@ -175,11 +186,15 @@ mod tests {
         }
     }
 
+    fn store(error: tower_sessions::session_store::Error) -> AuthError {
+        AuthError::Session(tower_sessions::session::Error::Store(error))
+    }
+
     #[test]
     fn an_unreachable_database_is_a_retryable_503() {
-        let backend = tower_sessions::session_store::Error::Backend("pool timed out".to_owned());
+        let backend = super::super::session::tests::backend_error(sqlx::Error::PoolTimedOut);
         for error in [
-            AuthError::Session(tower_sessions::session::Error::Store(backend)),
+            store(backend),
             AuthError::Database(sqlx::Error::PoolTimedOut),
         ] {
             assert_eq!(error.public(), (503, TRANSIENT));
@@ -188,6 +203,20 @@ mod tests {
             AuthError::Database(sqlx::Error::RowNotFound).public().0,
             500
         );
+    }
+
+    #[test]
+    fn a_permanent_session_store_failure_is_a_500() {
+        use tower_sessions::session_store::Error;
+        for error in [
+            super::super::session::tests::backend_error(sqlx::Error::RowNotFound),
+            super::super::session::tests::backend_error(sqlx::Error::Protocol("bad".to_owned())),
+            Error::Backend("could not allocate a unique session id".to_owned()),
+            Error::Decode("invalid type: string, expected i64".to_owned()),
+            Error::Encode("key must be a string".to_owned()),
+        ] {
+            assert_eq!(store(error).public().0, 500);
+        }
     }
 
     #[test]

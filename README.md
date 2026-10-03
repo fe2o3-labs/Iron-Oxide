@@ -373,7 +373,8 @@ The app is an installable Progressive Web App.
 | `public/sw.js` | Service worker, served at `/sw.js` so that its scope is the whole app |
 | `public/icons/`, `public/favicon.ico` | Generated icons (192, 512, maskable 512, apple-touch 180, favicon) |
 | `icons/` | SVG sources for the icons, plus `render.sh` to regenerate them: `make icons` (needs `rsvg-convert` and ImageMagick) |
-| `assets/tokens.css` | Colour tokens (`--io-*`), documented in [docs/palette.md](docs/palette.md) |
+| `public/fonts/` | Self-hosted fonts (woff2) with their SIL OFL licences, precached by the service worker |
+| `assets/app.css` | The only stylesheet: design tokens (`--io-*`, dark and light), fonts, shell and components; documented in [docs/palette.md](docs/palette.md) |
 | `src/pwa.rs` | Manifest link, icons and iOS meta tags in `<head>`, plus service worker registration |
 
 `dx` copies `public/` unchanged to the root of the site. The service worker is only registered in

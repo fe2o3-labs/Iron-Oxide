@@ -1,38 +1,89 @@
-# Colour palette
+# Colours, type and components
 
-Iron Oxide is dark-first. It is meant to be read on a phone, at arm's length, under gym lighting. The palette is iron grey surfaces, rust-orange primary, oxide-red accents and warm off-white text.
+Iron Oxide uses the **Forge** direction (#26): dark-first, with a light theme that follows the
+system (`prefers-color-scheme`). It is meant to be read on a phone, at arm's length, under gym
+lighting: huge numerals, 72 px steppers, a 76 px Done button.
 
-The tokens live in `crates/iron-oxide-app/assets/tokens.css` as CSS custom properties (`--io-*`), loaded on every page by the root component. Use the tokens and never hard-code hex values in components. The same `#141619` is also hard-coded in `crates/iron-oxide-app/public/manifest.webmanifest` (`theme_color`, `background_color`) and in `THEME_COLOR` in `crates/iron-oxide-app/src/pwa.rs` (the `theme-color` meta tag), so change them together.
+Everything lives in one stylesheet, `crates/iron-oxide-app/assets/app.css`, loaded by the root
+component. Components use the `--io-*` tokens and never hard-code hex values. `data-theme="light"`
+or `data-theme="dark"` on an element forces one theme for its subtree (the component gallery uses
+it). The light tokens are written twice (in the media query and under `[data-theme="light"]`); a
+unit test keeps the two blocks identical.
+
+The dark ground `#121416` is also in `public/manifest.webmanifest` (`theme_color`,
+`background_color`) and in `THEME_COLOR` in `src/pwa.rs`; the light ground `#f1ede6` in
+`THEME_COLOR_LIGHT`. Tests check they match.
 
 ## Tokens
 
-Contrast ratios are WCAG 2.x, measured against `bg` / `surface` / `surface-2`. AA requires 4.5:1 for normal text, and 3:1 for large text and for UI component boundaries.
-
-| Token | Hex | Use | Contrast |
+| Token | Dark | Light | Use |
 |---|---|---|---|
-| `--io-bg` | `#141619` | App background, manifest theme/background colour | |
-| `--io-surface` | `#1d2024` | Cards, sheets | |
-| `--io-surface-2` | `#272b30` | Raised elements, inputs, pressed states | |
-| `--io-border` | `#3b4047` | Decorative dividers only | 1.7 (not for meaning) |
-| `--io-border-strong` | `#707780` | Input and control outlines | 4.0 / 3.6 / 3.2 |
-| `--io-text` | `#f4efe8` | Body text | 15.9 / 14.3 / 12.5 |
-| `--io-text-muted` | `#b9b1a7` | Secondary text, labels | 8.6 / 7.7 / 6.7 |
-| `--io-primary` | `#e8703a` | Rust orange: primary buttons, active states, primary icons | 5.9 / 5.3 / 4.6 |
-| `--io-primary-strong` | `#f08a4b` | Hover/pressed primary, focus ring | 7.3 / 6.6 / 5.7 |
-| `--io-on-primary` | `#141619` | Text on primary fills | 5.9 on primary, 7.3 on primary-strong |
-| `--io-accent` | `#b3362b` | Oxide red **fills only**: badges, PR highlights, destructive buttons | 3.0 / 2.7 / 2.4 (not for text) |
-| `--io-accent-strong` | `#8f2a21` | Pressed accent fill | |
-| `--io-on-accent` | `#f4efe8` | Text on accent fills | 5.3 on accent, 7.3 on accent-strong |
-| `--io-accent-text` | `#f06a5b` | Oxide red as text or icon; also `--io-danger` | 6.0 / 5.4 / 4.7 |
-| `--io-success` | `#5fbf7f` | Success text/icons | 8.0 / 7.2 / 6.3 |
-| `--io-warning` | `#e8b04a` | Warning text/icons | 9.3 / 8.4 / 7.3 |
-| `--io-focus` | = `primary-strong` | Focus outline | |
+| `--io-ground` | `#121416` | `#f1ede6` | Page background |
+| `--io-surface` | `#1b1e22` | `#ffffff` | Cards |
+| `--io-surface-edge` | `#1b1e22` | `#e2dcd2` | Card border (invisible in dark) |
+| `--io-raised` | `#2a2f35` | `#ece7df` | Secondary buttons, the stepper's minus |
+| `--io-chip` | `#24282d` | `#e6e1d8` | Chips |
+| `--io-track` | `#3a3f46` | `#d6d0c6` | Empty progress segments |
+| `--io-track-soft` | `#2a2f35` | `#ddd7cd` | Empty progress bars |
+| `--io-line` | `#2e3339` | `#d3ccc1` | Decorative borders |
+| `--io-line-strong` | `#707780` | `#8c857b` | Input outlines (3:1) |
+| `--io-text` | `#f2ece4` | `#17191c` | Text |
+| `--io-muted` | `#a79f95` | `#5f5850` | Secondary text, labels |
+| `--io-accent` | `#e8703a` | `#e8703a` | Accent **fills only** (stepper plus, progress, selected chip) |
+| `--io-on-accent` | `#121416` | `#17191c` | Text on accent fills |
+| `--io-accent-text` | `#f08a4b` | `#b04e1a` | Accent as text: labels, links, the active tab |
+| `--io-action` / `--io-on-action` | `#e8703a` / `#121416` | `#17191c` / `#f1ede6` | The primary action (Done, primary buttons) |
+| `--io-danger` | `#f06a5b` | `#b3261e` | Errors, destructive buttons |
+| `--io-success` | `#5fbf7f` | `#256b40` | Success notes |
+| `--io-warning` | `#e8b04a` | `#8a5a00` | Warnings |
+| `--io-focus` | `#f08a4b` | `#b04e1a` | Focus ring |
 
-## Rules
+The older names (`--io-bg`, `--io-surface-2`, `--io-border`, `--io-text-muted`, `--io-primary`,
+`--io-on-primary`, `--io-primary-strong`) remain as aliases.
 
-- Text on a primary button uses `--io-on-primary` (dark), not white: white on rust orange is only 2.95:1.
-- Never put `--io-accent` text on a dark surface. Use `--io-accent-text`.
-- Every pair in the table passes AA for normal text, except the rows marked otherwise.
+## Contrast
+
+WCAG 2.x ratios. AA needs 4.5:1 for text, 3:1 for large text and UI component boundaries. The unit
+tests in `src/ui/theme.rs` read the stylesheet and fail below these thresholds.
+
+| Pair | Dark | Light |
+|---|---|---|
+| text on ground / surface | 15.73 / 14.25 | 15.09 / 17.61 |
+| muted on ground / surface | 7.07 / 6.40 | 6.00 / 7.00 |
+| accent-text on ground / surface | 7.42 / 6.72 | 4.56 / 5.32 |
+| on-accent on accent | 5.99 | 5.71 |
+| on-action on action | 5.99 | 15.09 |
+| danger on ground / surface | 6.08 / 5.51 | 5.60 / 6.54 |
+| line-strong on surface / ground | 3.70 | 3.65 / 3.13 |
+
+Rules:
+
+- Never use `--io-accent` as text: on the light ground it is 2.6:1. Use `--io-accent-text`.
+- The accent progress segments against the light track are below 3:1; progress is always also
+  given as text ("SET 2 / 5") and through `aria-valuenow`.
+
+## Type
+
+Self-hosted from `public/fonts/` (Fontsource variable builds, Latin subset, SIL Open Font License
+1.1, licence files next to them), preloaded and precached, so the app makes no third-party request
+and works offline.
+
+| Family | Use |
+|---|---|
+| Big Shoulders Display 700/900 | Numbers, titles (uppercase), big buttons |
+| IBM Plex Sans 400/500/600 | Body |
+| JetBrains Mono 500/700 | Labels: uppercase, letter-spacing 0.12em |
+
+## Components
+
+`src/ui/components/`: `Button` (primary, secondary, ghost, danger; 56 px, `xl` 76 px),
+`IconButton` (44 px), `Stepper` and `WeightStepper` (72 px buttons), `Card`, `Chip`,
+`ProgressSegments`, `BannerHost` (the error banner), `LoadingState` and `EmptyState`.
+Debug builds show all of them, in both themes, at `/dev/components`.
+
+Server errors go to the banner through `ui::errors::use_errors().report(&error)`, which uses
+`ApiFailure::classify` (`docs/api.md`): a `401` shows the sign-in screen, a `429` says how long to
+wait. Weights are shown with `ui::weight` (`weight_number`, `weight_text`) in the user's unit.
 
 ## Icon
 

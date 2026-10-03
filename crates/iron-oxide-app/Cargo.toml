@@ -9,7 +9,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-dioxus = { workspace = true, features = ["fullstack"] }
+dioxus = { workspace = true, features = ["fullstack", "router"] }
 iron-oxide-domain = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -52,6 +52,7 @@ url = { workspace = true, optional = true }
 webauthn-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
+http-body = { workspace = true }
 openssl = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

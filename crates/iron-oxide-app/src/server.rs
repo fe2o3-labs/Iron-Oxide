@@ -7,6 +7,7 @@ pub mod config;
 pub mod db;
 pub mod dotenv;
 pub mod entitlements;
+pub mod limits;
 pub mod logging;
 pub mod rate_limit;
 pub mod state;
@@ -213,12 +214,15 @@ impl ShutdownSignals {
 /// Full server router: the Dioxus application merged with the custom routes, with the shared
 /// state attached to every request (server functions included).
 ///
-/// Layers, outermost first: the state, the CSRF check, the per-IP rate limit (before anything
-/// touches the session or the database), the session, then the per-user rate limit.
+/// Layers, outermost first: the state, the `/api/` error body, the CSRF check, the per-IP rate limit (before anything touches the session or the database), the
+/// session, the per-user rate limit, then the body cap (#74: the body is read, at most
+/// [`limits::RequestLimits::body`] of it, only for a request that got that far).
 pub fn router(state: AppState, auth: auth::AuthState) -> Router {
     let limiter = rate_limit::RateLimiter::new(&state.config.rate_limit);
+    let request_limits = state.config.request_limits;
     let app = dioxus::server::router(App)
         .merge(custom_routes())
+        .layer(from_fn_with_state(request_limits, limits::cap_body))
         .layer(from_fn(missing_assets_are_not_found))
         .layer(from_fn_with_state(limiter.clone(), rate_limit::per_user));
     // Sign-in (#5): sessions, the CSRF check and the Google callback around the app.

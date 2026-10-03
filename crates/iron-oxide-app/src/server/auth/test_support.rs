@@ -84,10 +84,15 @@ impl TestApp {
 
     /// The app with other rate limits or client-IP source.
     pub async fn with_rate_limit(db: PgPool, rate_limit: RateLimitConfig) -> Self {
+        Self::with_config(db, |config| config.rate_limit = rate_limit).await
+    }
+
+    /// The app with the test configuration, changed by `change`.
+    pub async fn with_config(db: PgPool, change: impl FnOnce(&mut Config)) -> Self {
         ensure_public_dir();
         let google = MockGoogle::start().await;
         let mut config = config();
-        config.rate_limit = rate_limit;
+        change(&mut config);
         let auth = AuthState::with_google_issuer(&config, &google.issuer).unwrap();
         let state = AppState::new(Arc::new(config), db);
         Self {
