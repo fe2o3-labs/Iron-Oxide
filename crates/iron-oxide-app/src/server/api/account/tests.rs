@@ -231,7 +231,9 @@ async fn row_counts(db: &PgPool, user: UserId) -> Vec<(String, i64)> {
     counts
 }
 
-/// Moves the sign-in of every session of `user` `seconds` into the past.
+/// Moves the sign-in of every session of `user` `seconds` into the past. Give it a margin from the
+/// window's edge: the database computes the time and the server checks it, and their clocks may
+/// differ by a second or so (Docker's VM).
 async fn age_sign_in(db: &PgPool, user: UserId, seconds: i64) {
     sqlx::query(
         "UPDATE sessions
@@ -944,7 +946,7 @@ async fn deleting_the_account_needs_a_recent_sign_in(db: PgPool) {
     age_sign_in(
         &db,
         a.id,
-        i64::try_from(DELETE_REAUTH_WINDOW_SECS).unwrap() + 1,
+        i64::try_from(DELETE_REAUTH_WINDOW_SECS).unwrap() + 60,
     )
     .await;
 
@@ -1333,21 +1335,26 @@ async fn a_deletion_while_two_imports_run_is_a_retryable_503(db: PgPool) {
 
 /// Imports whose clients go away never hold more dedicated (60 s) connections than the slots:
 /// each slot is held by the import's work, which goes on without its client.
+///
+/// Two imports are kept running (their users' rows are locked by the test, so they wait inside
+/// their transaction on their dedicated connection), then their clients disconnect. Two more
+/// imports must still be refused, and the first two must still complete once released.
 #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
 #[ignore = "needs Postgres"]
 async fn abandoned_imports_never_hold_more_dedicated_connections_than_the_slots(db: PgPool) {
+    use std::time::Duration;
+
     let api = TestApi::new(db.clone()).await;
     let mut a = api.user("A").await;
     seed(&mut a).await;
-    let mut document = export(&mut a).await;
-    document.sessions[0].sets = (0..20_000_u16).map(|i| set(i % 100, t(1))).collect();
+    let document = export(&mut a).await;
     let body = json!({ "document": serde_json::to_string(&document).unwrap() }).to_string();
-    let mut importers = Vec::new();
-    for i in 0..6 {
-        importers.push(api.user(&format!("C{i}")).await);
+    let mut users = Vec::new();
+    for i in 0..4 {
+        users.push(api.user(&format!("C{i}")).await);
     }
-
-    let count_dedicated = || async {
+    let ids: Vec<Uuid> = users.iter().map(|user| user.id.as_uuid()).collect();
+    let dedicated = || async {
         sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM pg_stat_activity
              WHERE application_name = $1 AND datname = current_database()",
@@ -1357,39 +1364,178 @@ async fn abandoned_imports_never_hold_more_dedicated_connections_than_the_slots(
         .await
         .unwrap()
     };
-    let tasks: Vec<_> = importers
-        .into_iter()
-        .map(|user| {
-            let body = body.clone();
-            tokio::spawn(async move {
-                let mut user = user;
-                let request = user.post(IMPORT).body(Body::from(body)).unwrap();
-                user.send_response(request).await.status()
-            })
+    let send = |user: &TestUser| {
+        let (mut user, body) = (user.clone(), body.clone());
+        tokio::spawn(async move {
+            let request = user.post(IMPORT).body(Body::from(body)).unwrap();
+            user.send_response(request).await.status()
         })
-        .collect();
-    // The clients give up almost at once.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    for task in &tasks {
+    };
+    let wait_for = |what: &'static str, done: Box<dyn Fn(i64) -> bool>| async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let count = dedicated().await;
+            if done(count) {
+                return count;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "{what}: {count}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+
+    // Hold every importer's row: an import waits on it inside its transaction.
+    let mut blocker = db.begin().await.unwrap();
+    sqlx::query("SELECT id FROM users WHERE id = ANY($1) FOR UPDATE")
+        .bind(&ids)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+    // Two imports running, then their clients go away.
+    let first: Vec<_> = users[..2].iter().map(send).collect();
+    wait_for(
+        "the first imports never started",
+        Box::new(|count| count == 2),
+    )
+    .await;
+    for task in &first {
         task.abort();
     }
-    let slots = api.account_slots();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Two more: refused while the abandoned ones still run.
+    let more: Vec<_> = users[2..].iter().map(send).collect();
     let mut max = 0;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        max = max.max(count_dedicated().await);
-        let idle = slots.available_permits() == MAX_ACCOUNT_OPERATIONS;
-        if idle && count_dedicated().await == 0 {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "imports never finished"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    for _ in 0..25 {
+        max = max.max(dedicated().await);
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
         max <= i64::try_from(MAX_ACCOUNT_OPERATIONS).unwrap(),
         "{max} dedicated connections at once"
     );
+    blocker.rollback().await.unwrap();
+    for task in more {
+        assert_eq!(task.await.unwrap(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // The abandoned imports finish their work, then free their slots and connections.
+    wait_for(
+        "dedicated connections left open",
+        Box::new(|count| count == 0),
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while api.account_slots().available_permits() < MAX_ACCOUNT_OPERATIONS {
+        assert!(tokio::time::Instant::now() < deadline, "slots never freed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    for user in &users[..2] {
+        let sets: i64 = sqlx::query_scalar("SELECT count(*) FROM workout_sets WHERE user_id = $1")
+            .bind(user.id.as_uuid())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(sets, 4, "the abandoned import completed");
+    }
+}
+
+/// An import and a version upload to the same program at the same moment: they run one after the
+/// other (the import locks the account's programs it adds versions to, as `add_version` does), so
+/// neither takes a version number the other has read, and both succeed.
+///
+/// The program here is an existing companion: since an import never adds versions to the account's
+/// own programs, that is where an import and an upload can both add one.
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn an_import_and_a_concurrent_version_upload_both_succeed(db: PgPool) {
+    let api = TestApi::new(db.clone()).await;
+    for round in 0..5_u16 {
+        // A user per round: within the per-user limit of account calls.
+        let mut a = api.user(&format!("A{round}")).await;
+        let creation = CreationId::new_v7();
+        upload(
+            &mut a,
+            json!({ "kind": "new_program", "creation_id": creation }),
+            &program_json("Main", 5),
+        )
+        .await;
+        let mut document = export(&mut a).await;
+        document.active_program = None;
+        let with_version = |document: &ExportDocument, reps: u16| {
+            let mut document = document.clone();
+            let mut version = document.programs[0].versions[0].clone();
+            version.version = 2;
+            version.document = program_json("Main", reps);
+            document.programs[0].versions.push(version);
+            serde_json::to_string(&document).unwrap()
+        };
+        // A first import creates the companion, with version 1.
+        a.call::<ImportSummary>(IMPORT, json!({ "document": with_version(&document, 20) }))
+            .await
+            .unwrap();
+        let companion_id: ProgramId = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM programs WHERE user_id = $1 AND creation_id = $2",
+        )
+        .bind(a.id.as_uuid())
+        .bind(companion_creation_id(creation.as_uuid()))
+        .fetch_one(&db)
+        .await
+        .map(ProgramId::from_uuid)
+        .unwrap();
+
+        // Hold the companion's row, so the import and the upload both reach it and wait.
+        let mut blocker = db.begin().await.unwrap();
+        sqlx::query("SELECT id FROM programs WHERE id = $1 FOR UPDATE")
+            .bind(companion_id.as_uuid())
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let (mut importer, mut uploader) = (a.clone(), a.clone());
+        let body = with_version(&document, 30);
+        let imported = tokio::spawn(async move {
+            importer
+                .call::<ImportSummary>(IMPORT, json!({ "document": body }))
+                .await
+        });
+        let uploaded = tokio::spawn(async move {
+            uploader
+                .call::<UploadOutcome>(
+                    "/api/programs/upload",
+                    json!({
+                        "target": { "kind": "new_version", "program_id": companion_id },
+                        "document": program_json("Main", 40).to_string(),
+                    }),
+                )
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        blocker.rollback().await.unwrap();
+        let summary = imported.await.unwrap().unwrap();
+        let outcome = uploaded.await.unwrap().unwrap();
+        assert_eq!(
+            (summary.programs, summary.versions),
+            (0, 1),
+            "round {round}"
+        );
+        assert!(outcome.saved, "round {round}");
+
+        // The first import.s version keeps its number, 2; then the upload.s and this import.s, 3
+        // and 4 in either order.
+        let after = export(&mut a).await;
+        let companion = after
+            .programs
+            .iter()
+            .find(|p| p.creation_id.as_uuid() == companion_creation_id(creation.as_uuid()))
+            .unwrap();
+        let numbers: Vec<u32> = companion.versions.iter().map(|v| v.version).collect();
+        assert_eq!(numbers, [2, 3, 4], "round {round}");
+        let documents: Vec<&Value> = companion.versions.iter().map(|v| &v.document).collect();
+        for reps in [20, 30, 40] {
+            assert!(
+                documents.contains(&&program_json("Main", reps)),
+                "round {round}"
+            );
+        }
+    }
 }

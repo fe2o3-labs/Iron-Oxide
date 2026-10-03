@@ -158,9 +158,11 @@ and where it goes. A new table fails the test until it is added there and here.
    connection is closed afterwards, never returned to the pool with them.
 
    The transaction starts by locking the user's row, like every quota write
-   (`docs/billing.md`), so concurrent imports of one user run one after the other. Each existing
-   program's row is locked too (`FOR UPDATE`, as `add_version` does) before its versions are read,
-   so an upload of a version at the same moment waits instead of taking a number the import uses.
+   (`docs/billing.md`), so concurrent imports of one user run one after the other. Then the
+   account's programs the export names are locked (`FOR UPDATE`, in id order), and every program
+   the import adds versions to (a companion) is locked before its versions are read, as
+   `add_version` does: an upload of a version at the same moment waits instead of taking a number
+   the import has read (`an_import_and_a_concurrent_version_upload_both_succeed`).
 4. **Quota: refused, never trimmed.**
    - New unarchived programs count toward the plan's `CustomPrograms` limit. Programs the account
      already has, and archived ones, take no slot.

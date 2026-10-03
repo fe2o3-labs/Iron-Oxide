@@ -433,6 +433,24 @@ pub async fn lock_program(
     Ok(())
 }
 
+/// Locks the user's programs `programs` (`FOR UPDATE`, in id order, so two transactions locking
+/// overlapping sets never deadlock), until the end of the transaction. A concurrent upload of a
+/// version (`programs::add_version`, which locks the program's row) then waits for the import.
+pub async fn lock_programs(
+    tx: &mut PgConnection,
+    user: UserId,
+    programs: &[Uuid],
+) -> Result<(), RepoError> {
+    sqlx::query_scalar!(
+        "SELECT id FROM programs WHERE user_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE",
+        user.as_uuid(),
+        programs
+    )
+    .fetch_all(tx)
+    .await?;
+    Ok(())
+}
+
 /// The lowest-numbered version of one of the user's programs whose document equals `document`
 /// (compared as `jsonb`: formatting and key order do not matter).
 pub async fn version_with_document(

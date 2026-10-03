@@ -1403,7 +1403,10 @@ async fn age_sign_in(db: &PgPool, user: &Me, seconds: i64) {
     .unwrap();
 }
 
-const STALE: i64 = 10 * 60 + 1;
+// Ages with a margin: the database (which computes them) and the server may disagree on the
+// clock by a second or so (Docker's VM), so neither is put at the window's edge.
+const STALE: i64 = 10 * 60 + 60;
+const FRESH: i64 = 60;
 const STEP_UP: &str = "For your security, sign in again first, then try again.";
 
 async fn passkey_count(db: &PgPool, user: &Me) -> i64 {
@@ -1434,7 +1437,7 @@ async fn adding_a_passkey_needs_a_recent_sign_in(db: PgPool) {
     );
 
     // Started while fresh, finished once stale: refused at the finish too.
-    age_sign_in(&db, &me1, 0).await;
+    age_sign_in(&db, &me1, FRESH).await;
     let ccr: CreationChallengeResponse = browser.call(ADD_BEGIN, json!({})).await.unwrap();
     let credential = Passkey::new().register(ccr);
     age_sign_in(&db, &me1, STALE).await;
@@ -1491,7 +1494,7 @@ async fn linking_google_needs_a_recent_sign_in(db: PgPool) {
     assert_eq!(error.status, StatusCode::FORBIDDEN);
 
     // Started while fresh, completed once stale: the callback refuses to link.
-    age_sign_in(&db, &me1, 0).await;
+    age_sign_in(&db, &me1, FRESH).await;
     let url = google_begin(&mut browser, "Link").await;
     age_sign_in(&db, &me1, STALE).await;
     let claims = app.google.claims(&url, "sub-late");
@@ -1512,7 +1515,7 @@ async fn linking_google_needs_a_recent_sign_in(db: PgPool) {
     assert!(!me(&mut browser).await.unwrap().google_linked);
 
     // Fresh, it links.
-    age_sign_in(&db, &me1, 0).await;
+    age_sign_in(&db, &me1, FRESH).await;
     google_sign_in_or_link(&app, &mut browser, "Link", "sub-fresh")
         .await
         .unwrap();

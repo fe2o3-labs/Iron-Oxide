@@ -685,6 +685,12 @@ impl Import {
                 existing.insert(program.creation_id, id);
             }
         }
+        // The account's programs this import touches, locked now (after the user's row, as
+        // everywhere), so what the account has cannot change under the import: a concurrent
+        // version upload waits for it instead of taking a number the import has read.
+        let mut locked: Vec<Uuid> = existing.values().copied().collect();
+        locked.sort_unstable();
+        repo::lock_programs(tx, owner, &locked).await?;
         let new_unarchived = self
             .programs
             .iter()
