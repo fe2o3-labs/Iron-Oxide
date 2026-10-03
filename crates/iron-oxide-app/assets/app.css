@@ -1153,11 +1153,6 @@ a.io-chip {
   padding-bottom: 0;
 }
 
-/* A link styled as a button (the empty state's "Choose a program"). */
-a.io-button {
-  text-decoration: none;
-}
-
 .io-home-last {
   text-align: center;
 }
