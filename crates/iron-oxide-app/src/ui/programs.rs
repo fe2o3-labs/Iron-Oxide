@@ -304,7 +304,11 @@ impl Programs {
 
     /// Opens `screen` if the user is still on `from` (they may have moved on meanwhile).
     fn open_from(self, from: &Screen, screen: Screen) {
-        if self.screen.try_peek().is_ok_and(|current| *current == *from) {
+        if self
+            .screen
+            .try_peek()
+            .is_ok_and(|current| *current == *from)
+        {
             self.open(screen);
         }
     }
@@ -348,11 +352,17 @@ impl Programs {
     }
 
     fn pending_upload(self) -> Option<(String, CreationId)> {
-        self.pending_upload.try_peek().ok().and_then(|pending| pending.clone())
+        self.pending_upload
+            .try_peek()
+            .ok()
+            .and_then(|pending| pending.clone())
     }
 
     fn pending_copy(self) -> Option<(BuiltinProgramId, CreationId)> {
-        self.pending_copy.try_peek().ok().and_then(|pending| pending.clone())
+        self.pending_copy
+            .try_peek()
+            .ok()
+            .and_then(|pending| pending.clone())
     }
 }
 
@@ -861,7 +871,10 @@ fn BuiltinDetail(state: Programs, id: BuiltinProgramId) -> Element {
                         ),
                     );
                     state.changed();
-                    state.open_from(&Screen::Builtin(builtin_id), Screen::Mine(detail.program.id));
+                    state.open_from(
+                        &Screen::Builtin(builtin_id),
+                        Screen::Mine(detail.program.id),
+                    );
                 }
                 Err(error) => {
                     if !ApiFailure::classify(&error).is_retryable() {
