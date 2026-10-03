@@ -6,6 +6,7 @@
 //!
 //! Adding an area is one line here; Dioxus registers every server function it finds.
 
+pub mod account;
 pub mod billing;
 #[allow(
     dead_code,

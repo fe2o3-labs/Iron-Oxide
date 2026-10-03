@@ -54,6 +54,7 @@ const SAVE_SET: &str = "/api/sessions/save-set";
 const SHORT: RequestLimits = RequestLimits {
     body: DEFAULT_BODY_LIMIT,
     body_read_timeout: Duration::from_millis(200),
+    import_body_read_timeout: Duration::from_millis(200),
 };
 
 async fn signed_out(limits: RequestLimits) -> Browser {

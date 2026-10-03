@@ -59,12 +59,14 @@ logged, never returned.
 | `NotFound` | 404 | `Not found.` | No such row **among the caller's own**. Another user's id gives exactly the same answer as an id that does not exist. |
 | `Conflict(msg)` | 409 | `msg` | An id reused with different content, a session that has already ended |
 | `Invalid(msg)` | 422 | `msg` | Invalid input: a domain value, a program document, a database `CHECK` (`Invalid value.`) |
+| `InvalidProgramIn(message, problems)` | 422 | `message` | A program document inside a larger upload (an account import): the message names it and its first problem, and the `details` carry all of them as `ProgramProblems` |
 | `InvalidField { field, message }` | 422 | `message` | Invalid input in one named field; `{"field": path}` (e.g. `bar_weight`) is sent as the error details, so the UI can point at it |
 | `InvalidProgram(problems)` | 422 | `This program is not valid.` | An uploaded program document that does not parse or breaks a rule. `problems` (`ProgramProblems`) is sent as the error details, see [Programs](#programs-srcapiprogramsrs-19). |
 | `TooLarge(msg)` | 413 | `msg` | A request body or document past its size limit |
 | `Transient(detail)` | 503 | `The server is busy. Please try again.` | The same request can simply be retried: it may have been saved before a dropped connection, but every write is idempotent. Covers a concurrent write, a pool timeout, a dropped connection, a serialization failure or a deadlock. |
 | `Unauthorized` | 401 | `Please sign in.` | Not signed in (normally rejected earlier by `AuthUser`) |
 | `Forbidden(msg)` | 403 | `msg` | Plan gating (#21) |
+| `Busy(secs)` | 503 | `The server is busy. Please try again.` | Every slot for this work is taken (account imports and deletions). `details` carry `retry_after_secs`, and the error layer sends it as `Retry-After` too. |
 | `Internal(detail)` | 500 | `Something went wrong. Please try again.` | Bugs, corrupt stored data, any other database failure |
 
 The conversions:
@@ -164,10 +166,11 @@ happens:
 |---|---|---|
 | Request body, default (`DEFAULT_BODY_LIMIT`) | 64 KiB | `413 This request is too large.` |
 | Request body, `/api/programs/upload` (`UPLOAD_BODY_LIMIT`) | 528 KiB (2 × 256 KiB + 16 KiB), see [Programs](#programs-srcapiprogramsrs-19) | `413 The program file is too large (the limit is 256 KiB).` |
+| Request body, `/api/account/import` (`IMPORT_BODY_LIMIT`), see [`docs/export-format.md`](export-format.md) | 16 MiB + 64 KiB (document 8 MiB) | `413 The export file is too large (the limit is 8 MiB).` |
 | Request body, `POST /webhooks/stripe` (outside Dioxus, `DefaultBodyLimit`) | 256 KiB | axum's `413` |
-| Body read (`BODY_READ_TIMEOUT`), from the end of the headers | 10 s | `408 The request took too long to arrive. Please try again.` |
+| Body read (`BODY_READ_TIMEOUT`), from the end of the headers | 10 s; 60 s for `/api/account/import` | `408 The request took too long to arrive. Please try again.` |
 | Waiting for a pooled connection (`db::ACQUIRE_TIMEOUT`) | 10 s | `503 The server is busy. Please try again.` |
-| One statement, an idle transaction, a whole transaction (`db::STATEMENT_DEADLINE`, set by Postgres on every pooled connection) | 5 s each | the statement or session is aborted and the transaction rolled back: `503` (`57014`, `25P03`, `25P04` are transient) |
+| One statement, an idle transaction, a whole transaction (`db::STATEMENT_DEADLINE`, set by Postgres on every pooled connection) | 5 s each; 60 s for an account import or deletion (`db::account::long_connection`) | the statement or session is aborted and the transaction rolled back: `503` (`57014`, `25P03`, `25P04` are transient) |
 | Each call to Google (OIDC discovery, token exchange; `google::HTTP_TIMEOUT`, `CONNECT_TIMEOUT`) | 10 s in total, 5 s to connect | `503` (`AuthError::GoogleUnavailable`); WebAuthn makes no outbound calls |
 
 - **Why a cap of our own.** Dioxus 0.7.10 reads a server function's body with `unwrap`, so a body
@@ -392,6 +395,31 @@ completed session (`sets::completed_for_exercises_before`), replayed in order.
   comes from the server, since the point is "from now on". A retried request moves the anchor by a
   few seconds, which only matters if a set was logged in between. The weight must be more than
   zero.
+
+## Account data (`src/api/account.rs`, #22)
+
+The user's GDPR rights: export everything they own, import such an export, delete the account. The
+format, the import rules and the deletion are in [`docs/export-format.md`](export-format.md).
+
+| Function | Route | Arguments | Returns | Errors |
+|---|---|---|---|---|
+| `export_account_data` | `/api/account/export` | | `ExportDocument` | 413 past `MAX_EXPORT_BYTES` (8 MiB) |
+| `import_account_data` | `/api/account/import` | `document` (the export's JSON text) | `ImportSummary` (what was added) | 413 body or document too large; 422 not an export, unsupported `format_version`, invalid content (`InvalidProgramIn` for a program version); 403 over the plan's program limit; 503 with `Retry-After` when 2 account operations already run |
+| `delete_account` | `/api/account/delete` | | `()`, and the cookie is cleared | 403 without a sign-in in the last 10 minutes; 503 with `Retry-After` when 2 account operations already run |
+
+- **Import is idempotent.** Rows are matched by their keys and what the account already has wins:
+  the same export imported twice adds nothing the second time.
+- **Import body.** A middleware checks the session, takes one of the 2 import slots, then reads
+  the body with `limits::read_body` (`IMPORT_BODY_LIMIT`, 60 s read timeout) before anything else
+  does. The route is in `limits::OWN_BODY_LIMIT` and also raises axum's 2 MiB `DefaultBodyLimit`,
+  so a large export imports instead of panicking in Dioxus' extractor.
+- **Database deadlines.** An import and an account deletion run on a connection of their own with
+  60 s deadlines instead of the pool's 5 s (`docs/export-format.md`).
+- **Isolation.** Every read and write is scoped to the session's user. An export never contains
+  another user's rows. Importing someone else's export gives the importer their own copies (new
+  program ids) and never touches the owner's rows. The tests are the `another_users_*` in
+  `server::api::account::tests`.
+- **Rate limits.** The three routes share the `account_data` group (`docs/rate-limiting.md`).
 
 ## Programs (`src/api/programs.rs`, #19)
 

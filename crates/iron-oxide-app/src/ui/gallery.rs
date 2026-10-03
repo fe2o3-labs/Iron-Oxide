@@ -9,9 +9,10 @@ use iron_oxide_domain::Weight;
 use super::components::icons::PlateIcon;
 use super::components::{
     Button, ButtonVariant, Card, Chip, EmptyState, IconButton, LoadingState, ProgressSegments,
-    Stepper, WeightStepper,
+    Sheet, Stepper, WeightStepper,
 };
 use super::errors::{BannerKind, use_errors};
+use super::plates::{PlateLoadout, PlateSetup, PlateSource, plate_view};
 use super::shell::unverified_message;
 use super::weight::{use_unit, weight_text};
 use crate::api::error::FailureKind;
@@ -41,12 +42,13 @@ fn Showcase() -> Element {
     let mut weight = use_signal(|| Weight::from_kg(100.0).unwrap_or_default());
     let mut plate = use_signal(|| 2_usize);
     let mut sets_done = use_signal(|| 2_u32);
+    let mut sheet_open = use_signal(|| false);
     let target = weight_text(*weight.read(), unit);
 
     rsx! {
         div { class: "io-topbar",
             span { class: "io-label", "Day A · Set {sets_done} / 5" }
-            IconButton { label: "Plate calculator", PlateIcon {} }
+            IconButton { label: "Plate calculator", onclick: move |_| sheet_open.set(true), PlateIcon {} }
         }
         div { class: "io-page-header",
             h2 { class: "io-title", style: "font-size: 64px", "Back squat" }
@@ -83,6 +85,24 @@ fn Showcase() -> Element {
                     "{label} kg"
                 }
             }
+        }
+
+        if sheet_open() {
+            // The real sheet is `PlateCalculatorSheet`, which loads the user's settings; the
+            // gallery is signed out, so it shows the same sheet with the default plates.
+            Sheet { title: "Plate calculator", on_close: move |()| sheet_open.set(false),
+                PlateLoadout { view: plate_view(*weight.read(), &PlateSetup::defaults_for(unit)) }
+            }
+        }
+        span { class: "io-label", "Plate calculator" }
+        PlateLoadout { view: plate_view(*weight.read(), &PlateSetup::defaults_for(unit)) }
+        PlateLoadout {
+            view: plate_view(
+                Weight::from_kg(101.0).unwrap_or_default(),
+                &PlateSetup::defaults_for(unit),
+            ),
+            source: PlateSource::Failed,
+            on_retry: move |()| { errors.show(BannerKind::Info, "Retrying."); },
         }
 
         Button {

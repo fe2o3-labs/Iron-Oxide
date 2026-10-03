@@ -52,6 +52,10 @@ pub enum ApiError {
     /// JSON path ([`ProgramProblems`]), for the UI to list.
     #[error("invalid program: {} problem(s)", .0.errors.len() + .0.omitted)]
     InvalidProgram(ProgramProblems),
+    /// `422`: an invalid program document inside a larger upload (an account import): the message
+    /// says which one and why, for the user and support; the `details` carry all its problems.
+    #[error("invalid program in an upload: {0}")]
+    InvalidProgramIn(Cow<'static, str>, ProgramProblems),
     /// `413`: the request is larger than the endpoint accepts. The message is shown to the user.
     #[error("too large: {0}")]
     TooLarge(Cow<'static, str>),
@@ -69,6 +73,11 @@ pub enum ApiError {
     /// shown to the user.
     #[error("forbidden: {0}")]
     Forbidden(Cow<'static, str>),
+    /// `503` with `Retry-After`: every slot for this kind of work is taken (account imports and
+    /// deletions, #22). `details` carry `retry_after_secs`, which `errors_layer` also sends as the
+    /// `Retry-After` header.
+    #[error("busy, retry after {0} s")]
+    Busy(u64),
     /// `500`: a bug or an unexpected failure. The text is for the logs only.
     #[error("internal error: {0}")]
     Internal(String),
@@ -111,8 +120,9 @@ impl ApiError {
             Self::Conflict(message) => (409, message),
             Self::Invalid(message) | Self::InvalidField { message, .. } => (422, message),
             Self::InvalidProgram(_) => (422, INVALID_PROGRAM),
+            Self::InvalidProgramIn(message, _) => (422, message),
             Self::TooLarge(message) => (413, message),
-            Self::Transient(_) => (503, TRANSIENT),
+            Self::Transient(_) | Self::Busy(_) => (503, TRANSIENT),
             Self::Unauthorized => (401, UNAUTHORIZED),
             Self::Forbidden(message) => (403, message),
             Self::Internal(_) => (500, INTERNAL),
@@ -138,7 +148,10 @@ impl From<ApiError> for ServerFnError {
         let (code, message) = error.public();
         let details = match &error {
             // Plain data (strings and numbers): serializing it cannot fail.
-            ApiError::InvalidProgram(problems) => serde_json::to_value(problems).ok(),
+            ApiError::InvalidProgram(problems) | ApiError::InvalidProgramIn(_, problems) => {
+                serde_json::to_value(problems).ok()
+            }
+            ApiError::Busy(secs) => Some(serde_json::json!({ "retry_after_secs": secs })),
             ApiError::InvalidField { field, .. } => Some(serde_json::json!({ "field": field })),
             _ => None,
         };
@@ -219,6 +232,7 @@ impl From<AuthError> for ApiError {
         let (code, message) = error.public();
         match code {
             401 => Self::Unauthorized,
+            403 => Self::Forbidden(Cow::Owned(message.to_owned())),
             404 => Self::NotFound,
             409 => Self::conflict(message.to_owned()),
             503 => Self::Transient(error.to_string()),

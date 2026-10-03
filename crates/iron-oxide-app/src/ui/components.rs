@@ -7,6 +7,7 @@ mod card;
 mod chip;
 pub mod icons;
 mod progress;
+mod sheet;
 mod state;
 mod stepper;
 
@@ -15,5 +16,6 @@ pub use button::{Button, ButtonVariant, IconButton};
 pub use card::Card;
 pub use chip::Chip;
 pub use progress::ProgressSegments;
+pub use sheet::Sheet;
 pub use state::{EmptyState, LoadingState};
 pub use stepper::{Stepper, WeightStepper};

@@ -162,6 +162,13 @@ types mirror them field for field, and switch to them once they are merged.
 `sessions → program_versions` is `NO ACTION` (checked at the end of the statement), not
 `RESTRICT`, so deleting a user can cascade to both tables in one statement.
 
+**Deleting an account** (#22, `account::delete_user`) is that one statement, `DELETE FROM users
+WHERE id = $1`, in its own transaction. It is the only path the delete guards let through:
+`forbid_direct_delete` passes only cascades (`pg_trigger_depth() >= 2`), and `TRUNCATE` is refused
+on every table. No migration or trigger change was needed for it.
+`another_users_rows_survive_while_a_deleted_account_leaves_none` reads the tables to check from the
+catalog: every table with a `user_id` column, so a future table cannot be forgotten.
+
 ### In the repository (`server/db/`)
 
 - **Every function that touches a user's data takes the caller's `UserId`** and filters every
@@ -205,6 +212,7 @@ types mirror them field for field, and switch to them once they are merged.
 | `active_program` | `get`, `set`, `clear` |
 | `sessions` | `start` (idempotent), `finish` (idempotent), `get`, `get_in_progress`, `list` (history pages by `(started_at, id)`, optionally for one program) |
 | `history` | The history screens (#20): `page` (ended sessions, most recently finished first, paged by `(finished_at, id)` with microsecond cursors, served by the partial `workout_sessions_history_idx`), `entry` (one session with its program name, version number, the day's name in that version and working-set count), `exercise_sets` (weighted, untimed sets of one exercise in ended sessions, for the charts), `logged_exercises` |
+| `account` | The whole account (#22): the export reads (`snapshot`, then one function per table, all scoped by the user), the import writes (insert-only: `ON CONFLICT DO NOTHING` or a lookup first, bulk `UNNEST` inserts for sessions and sets), and `delete_user` (the cascade, see below) |
 | `sets` | `upsert_idempotent`, `list_for_session`, `list_for_sessions` (the sets of a history page, one query), `completed_for_exercise` (sets of one exercise after a time, in completed sessions of any version of a program: the progression input of #57, served by the `(user_id, exercise_id, completed_at)` index) |
 
 A user has at most one session in progress: the partial unique index

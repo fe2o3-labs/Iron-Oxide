@@ -23,7 +23,7 @@ impl Unit {
         }
     }
 
-    fn parse(value: &str) -> Result<Self, RepoError> {
+    pub(super) fn parse(value: &str) -> Result<Self, RepoError> {
         match value {
             "kg" => Ok(Self::Kg),
             "lb" => Ok(Self::Lb),

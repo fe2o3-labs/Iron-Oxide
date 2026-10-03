@@ -14,18 +14,17 @@ use iron_oxide_domain::timer::{HoldTimer, IntervalPhase, IntervalTimer};
 use iron_oxide_domain::{LoggedSet, Reps, SessionOutcome, SetId, Weight};
 
 use super::flow::{self, Entry, Step};
-use super::plates::PlateCalculator;
 use super::rest::{self, Rest, RestScreen};
-use super::sheet::Sheet;
 use super::summary::Finished;
 use super::{Active, forget, note, platform, store_skipped, writes};
 use crate::api::error::{ApiFailure, FailureKind};
 use crate::auth::browser::sleep;
 use crate::ui::components::icons::PlateIcon;
 use crate::ui::components::{
-    Button, ButtonVariant, Chip, IconButton, ProgressSegments, Stepper, WeightStepper,
+    Button, ButtonVariant, Chip, IconButton, ProgressSegments, Sheet, Stepper, WeightStepper,
 };
 use crate::ui::errors::use_errors;
+use crate::ui::plates::PlateCalculatorSheet;
 use crate::ui::shell::Route;
 use crate::ui::weight::use_unit;
 
@@ -408,7 +407,7 @@ fn SetCard(
                 if let Some(value) = shown_weight {
                     IconButton { label: "Plate calculator", onclick: move |_| plates.set(true), PlateIcon {} }
                     if plates() {
-                        PlateCalculator { weight: value, on_close: move |()| plates.set(false) }
+                        PlateCalculatorSheet { weight: value, on_close: move |()| plates.set(false) }
                     }
                 }
             }
