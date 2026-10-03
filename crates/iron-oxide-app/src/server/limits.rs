@@ -8,7 +8,9 @@
 //!   a panic: the body must be complete and within the limit before Dioxus sees it. A body that
 //!   does not arrive within [`RequestLimits::body_read_timeout`] is refused with `408`.
 //! - [`api_timeout`] answers `503` when an `/api/` call takes longer than
-//!   [`RequestLimits::api_timeout`] in total (the body read included).
+//!   [`RequestLimits::api_timeout`] in total (the body read included). It is only a backstop: it
+//!   cannot stop the server function (see [`api_timeout`]). The deadlines that do stop work are
+//!   the database's own ([`crate::server::db::STATEMENT_DEADLINE`]).
 //!
 //! Routes with a larger limit read their body themselves with [`read_body`] and are listed in
 //! [`OWN_BODY_LIMIT`]: the program upload (`UPLOAD_BODY_LIMIT`, checked after the session so a
@@ -38,10 +40,18 @@ pub const DEFAULT_BODY_LIMIT: usize = 64 * 1024;
 /// How long a request body may take to arrive, counted from the end of the headers.
 pub const BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long an `/api/` call may take in total. Longer than the database pool's acquire timeout
-/// (10 s), so a call waiting for a connection still gets that error's own `503`, and shorter than
-/// the default shutdown grace period (20 s), so in-flight calls finish within it.
-pub const API_TIMEOUT: Duration = Duration::from_secs(15);
+/// The `/api/` backstop: how long a client waits for an answer at most. Longer than the pool's
+/// acquire timeout (10 s) plus the database's statement and transaction deadlines (5 s) plus a
+/// margin (3 s), so a call stuck on the database gets the database's own error (and its rollback)
+/// first; shorter than the default shutdown grace period (20 s).
+pub const API_TIMEOUT: Duration = Duration::from_secs(18);
+
+const _: () = assert!(
+    crate::server::db::ACQUIRE_TIMEOUT.as_secs() + crate::server::db::STATEMENT_DEADLINE.as_secs()
+        < API_TIMEOUT.as_secs()
+);
+const _: () =
+    assert!(API_TIMEOUT.as_secs() < crate::server::config::DEFAULT_SHUTDOWN_GRACE.as_secs());
 
 /// The paths that read their body themselves, with their own (larger) limit, through
 /// [`read_body`]. [`cap_body`] leaves their body alone.
@@ -168,11 +178,19 @@ pub async fn cap_body(
     }
 }
 
-/// The `/api/` timeout: `503` (retryable) when a call takes longer than
+/// The `/api/` backstop: `503` (retryable) when a call takes longer than
 /// [`RequestLimits::api_timeout`]. Other paths (pages, `/healthz`, `/readyz`) are not timed.
 ///
-/// The call is dropped at the deadline, like a dropped connection: a write may or may not have
-/// landed, and since every write is idempotent (`docs/api.md`), the client's retry is safe.
+/// **The server function is not stopped.** Dioxus 0.7.10 runs it in a detached task
+/// (`spawn_pinned`): dropping our wait does not cancel it, so it may still be finishing, and a
+/// write may still commit, after the client got this `503`. What bounds the work is the database:
+/// every connection has `statement_timeout`, `idle_in_transaction_session_timeout` and
+/// `transaction_timeout` ([`crate::server::db::STATEMENT_DEADLINE`]), so a stuck transaction is
+/// rolled back by Postgres, and the backstop is set above them plus the pool's acquire timeout.
+/// A late commit is still safe: every write is idempotent by its client-generated id, and the
+/// client's retry queue (#30, not built yet: its contract) replays the same request with the same
+/// id, first in first out, before sending the next one, so the late commit and the replay are the
+/// same write (`docs/api.md`, "Idempotency").
 pub async fn api_timeout(
     State(limits): State<RequestLimits>,
     request: Request,
