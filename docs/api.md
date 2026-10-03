@@ -147,7 +147,8 @@ show and any structured `details`:
 
 ### Request limits (#74)
 
-`server::limits` caps every request body and times every `/api/` call:
+`server::limits` caps every request body; everything else that can block a call is bounded where it
+happens:
 
 | Limit | Value | Answer |
 |---|---|---|
@@ -155,8 +156,9 @@ show and any structured `details`:
 | Request body, `/api/programs/upload` (`UPLOAD_BODY_LIMIT`) | 528 KiB (2 × 256 KiB + 16 KiB), see [Programs](#programs-srcapiprogramsrs-19) | `413 The program file is too large (the limit is 256 KiB).` |
 | Request body, `POST /webhooks/stripe` (outside Dioxus, `DefaultBodyLimit`) | 256 KiB | axum's `413` |
 | Body read (`BODY_READ_TIMEOUT`), from the end of the headers | 10 s | `408 The request took too long to arrive. Please try again.` |
-| Whole `/api/` call (`API_TIMEOUT`, a backstop), body read included | 18 s | `503 The server is busy. Please try again.` |
+| Waiting for a pooled connection (`db::ACQUIRE_TIMEOUT`) | 10 s | `503 The server is busy. Please try again.` |
 | One statement, an idle transaction, a whole transaction (`db::STATEMENT_DEADLINE`, set by Postgres on every pooled connection) | 5 s each | the statement or session is aborted and the transaction rolled back: `503` (`57014`, `25P03`, `25P04` are transient) |
+| Each call to Google (OIDC discovery, token exchange; `google::HTTP_TIMEOUT`, `CONNECT_TIMEOUT`) | 10 s in total, 5 s to connect | `503` (`AuthError::GoogleUnavailable`); WebAuthn makes no outbound calls |
 
 - **Why a cap of our own.** Dioxus 0.7.10 reads a server function's body with `unwrap`, so a body
   it cannot read (past axum's 2 MiB default, a dropped connection) panics into a `500`. The cap
@@ -175,21 +177,16 @@ show and any structured `details`:
   `none`, as the server asks), a settings update with a full plate inventory 751 bytes, a logged
   set 297 bytes. The test fails if one grows past an eighth of the cap. A new function whose
   arguments can be larger gets its own limit like the upload.
-- **The timeouts.** Dioxus 0.7.10 runs each server function in a detached task (`spawn_pinned`),
-  so the HTTP timeout **cannot stop it**: when it answers `503`, the function may still be
-  running, and a write may still commit afterwards. The deadlines that really stop work are the
-  database's: every pooled connection sets `statement_timeout`, `idle_in_transaction_session_timeout`
-  and `transaction_timeout` (Postgres 17+) to 5 s, so Postgres aborts a slow or stuck
-  transaction and rolls it back. The migrations run on a connection of their own without them
-  (they may wait for another instance's lock). The HTTP timeout is only a backstop for the client,
-  set above the pool's acquire timeout (10 s) plus the database deadline (5 s) plus a 3 s margin,
-  and below the shutdown grace period (20 s). `/healthz`, `/readyz` and pages are not timed.
-- **Why a late commit is safe.** Every write is idempotent by its client-generated id (see
-  [Idempotency](#idempotency)), and the retry queue (#30) must replay the same request with the
-  same id, first in first out, before sending the next one: the late commit and the replay are the
-  same write, and the next write is only sent once the replay has answered. The database bounds
-  each transaction, not a function that runs several one after the other: such a function can
-  still be finishing after the backstop, which is why every write must be idempotent on its own.
+- **No timeout on the call itself.** The server answers once the server function has finished
+  (or the database aborted its work). An HTTP timeout around the call could not stop it: Dioxus
+  0.7.10 runs each server function in a detached task (`spawn_pinned`), so a `503` sent early
+  would leave the function running, and an older write (settings, a training max, the active
+  program) could commit after the client had moved on and overwrite a newer value. So each wait
+  is bounded at its source instead (the table above). Every pooled connection sets
+  `statement_timeout`, `idle_in_transaction_session_timeout` and `transaction_timeout`
+  (Postgres 17+) to 5 s: Postgres aborts a slow or stuck transaction and rolls it back, and the
+  function fails with a `503`. The migrations run on a connection of their own without these
+  deadlines (they may wait for another instance's lock).
 - **408 is different.** The body is read before Dioxus starts the function, so a `408` means the
   function never ran.
 - **Not covered yet.** Nothing bounds how long a client takes to send its *headers*: hyper's
@@ -207,9 +204,8 @@ retried request is recognised:
   into it.
 
 **Every write endpoint, updates included, must succeed unchanged when replayed.** A `503` can
-follow a write that was committed (the connection dropped during `COMMIT`, or the `/api/` backstop
-answered while the function was still running, see [Request limits](#request-limits-74)), and the
-retry queue then sends it again.
+follow a write that was committed (the connection dropped during `COMMIT`), and the retry queue
+then sends it again.
 
 Timestamps that are part of what is saved (`started_at`, `completed_at`, `finished_at`) come from
 the client, in the request. If the server stamped `now()`, a retry would carry a different time

@@ -41,6 +41,9 @@ pub enum AuthError {
     /// Google (or the ID token it returned) failed a check.
     #[error("Google sign-in failed: {0}")]
     Google(String),
+    /// Google could not be reached in time (connection, timeout, a 5xx): retrying may work.
+    #[error("Google unreachable: {0}")]
+    GoogleUnavailable(String),
     /// Removing this would leave the account with no way to sign in.
     #[error("cannot remove the last way to sign in")]
     LastSignInMethod,
@@ -97,6 +100,7 @@ impl AuthError {
                 (503, TRANSIENT)
             }
             Self::Database(error) if is_transient(error) => (503, TRANSIENT),
+            Self::GoogleUnavailable(_) => (503, TRANSIENT),
             Self::Database(_) | Self::Session(_) | Self::Internal(_) => {
                 (500, "Something went wrong. Please try again.")
             }
@@ -106,7 +110,10 @@ impl AuthError {
     /// Logs the details at a level matching the cause.
     fn log(&self) {
         match self {
-            Self::Database(_) | Self::Session(_) | Self::Internal(_) => {
+            Self::Database(_)
+            | Self::Session(_)
+            | Self::Internal(_)
+            | Self::GoogleUnavailable(_) => {
                 tracing::error!(error = %self, "sign-in error");
             }
             Self::Unauthenticated => tracing::debug!(error = %self, "sign-in error"),

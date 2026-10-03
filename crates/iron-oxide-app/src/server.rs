@@ -214,8 +214,7 @@ impl ShutdownSignals {
 /// Full server router: the Dioxus application merged with the custom routes, with the shared
 /// state attached to every request (server functions included).
 ///
-/// Layers, outermost first: the state, the `/api/` error body, the `/api/` timeout, the CSRF
-/// check, the per-IP rate limit (before anything touches the session or the database), the
+/// Layers, outermost first: the state, the `/api/` error body, the CSRF check, the per-IP rate limit (before anything touches the session or the database), the
 /// session, the per-user rate limit, then the body cap (#74: the body is read, at most
 /// [`limits::RequestLimits::body`] of it, only for a request that got that far).
 pub fn router(state: AppState, auth: auth::AuthState) -> Router {
@@ -228,7 +227,6 @@ pub fn router(state: AppState, auth: auth::AuthState) -> Router {
         .layer(from_fn_with_state(limiter.clone(), rate_limit::per_user));
     // Sign-in (#5): sessions, the CSRF check and the Google callback around the app.
     auth::install(app, auth, state.db.clone(), limiter)
-        .layer(from_fn_with_state(request_limits, limits::api_timeout))
         // One error body for every `/api/` failure, CSRF and sign-in rejections included (#68).
         .layer(from_fn(api::errors_layer::normalize))
         // Merged after `auth::install` and the error layer, so outside its session and CSRF layers:

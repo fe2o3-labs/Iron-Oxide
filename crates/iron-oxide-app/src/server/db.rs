@@ -45,28 +45,26 @@ pub static MIGRATOR: Migrator = sqlx::migrate!();
 /// Maximum number of pooled connections.
 const MAX_CONNECTIONS: u32 = 5;
 /// How long a request waits for a free connection (or a new one) before failing.
-pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Connections are closed after this long, whatever their state (Neon: under 10 minutes).
 const MAX_LIFETIME: Duration = Duration::from_secs(5 * 60);
 /// Idle connections are closed after this long (Neon: under 5 minutes).
 const IDLE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-/// Server-side deadlines set on every pooled connection (#74), so that work cut short is rolled
-/// back by Postgres itself: Dioxus runs a server function in a detached task, which the `/api/`
-/// timeout cannot cancel. Each one aborts the statement or ends the session, and the open
-/// transaction is rolled back.
+/// Server-side deadlines set on every pooled connection (#74): what bounds a server function's
+/// database work (there is no HTTP timeout on `/api/` calls, see `server::limits`). Each one aborts
+/// the statement or ends the session, and the open transaction is rolled back: `503`.
 /// - `statement_timeout`: one statement.
 /// - `idle_in_transaction_session_timeout`: a transaction left open while the app does something
 ///   else (or is stuck).
 /// - `transaction_timeout` (Postgres 17+; we run 18): a whole transaction.
-///
-/// [`STATEMENT_DEADLINE`] plus the pool's [`ACQUIRE_TIMEOUT`] stays below the `/api/` backstop
-/// (`limits::API_TIMEOUT`).
 pub const STATEMENT_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The `SET`s applied to every new connection: see [`STATEMENT_DEADLINE`].
 const SESSION_DEADLINES: &str = "SET statement_timeout = '5s'; \
      SET idle_in_transaction_session_timeout = '5s'; \
      SET transaction_timeout = '5s'";
+// The `SET`s above spell out `STATEMENT_DEADLINE`: keep them in step.
+const _: () = assert!(STATEMENT_DEADLINE.as_secs() == 5);
 
 /// Turns the deadlines off again, for the migrations: they may wait for another instance's
 /// migration lock or rebuild an index for longer.
@@ -467,7 +465,7 @@ pub(crate) mod tests {
             .execute(&mut *tx)
             .await
             .unwrap();
-        // The app is stuck elsewhere (as a server function the `/api/` backstop gave up on).
+        // The app is stuck elsewhere while its transaction is open.
         tokio::time::sleep(STATEMENT_DEADLINE + Duration::from_secs(1)).await;
         let error = tx.commit().await.unwrap_err();
         assert!(

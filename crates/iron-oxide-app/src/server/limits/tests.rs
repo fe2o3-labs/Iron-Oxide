@@ -7,13 +7,11 @@ use std::time::Instant;
 
 use dioxus::prelude::*;
 use dioxus::server::axum::{
-    Router,
     body::to_bytes,
     http::{
         Request as HttpRequest, StatusCode,
         header::{CONTENT_LENGTH, CONTENT_TYPE},
     },
-    routing::get,
 };
 use http_body::Frame;
 use iron_oxide_domain::{
@@ -22,7 +20,6 @@ use iron_oxide_domain::{
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use tower::ServiceExt;
 use webauthn_rs_proto::ResidentKeyRequirement;
 
 use super::*;
@@ -42,12 +39,14 @@ async fn test_panics() -> Result<(), ServerFnError> {
     panic!("{PANIC_TEXT}")
 }
 
-/// Takes longer than the test's `/api/` timeout.
+/// Takes longer than the test's body-read timeout, after its body has arrived.
 #[post("/api/test/limits/slow")]
 async fn test_slow() -> Result<(), ServerFnError> {
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    tokio::time::sleep(SLOW).await;
     Ok(())
 }
+
+const SLOW: Duration = Duration::from_millis(600);
 
 /// A server function that needs a signed-in user, with one argument.
 const SAVE_SET: &str = "/api/sessions/save-set";
@@ -55,7 +54,6 @@ const SAVE_SET: &str = "/api/sessions/save-set";
 const SHORT: RequestLimits = RequestLimits {
     body: DEFAULT_BODY_LIMIT,
     body_read_timeout: Duration::from_millis(200),
-    api_timeout: Duration::from_millis(400),
 };
 
 async fn signed_out(limits: RequestLimits) -> Browser {
@@ -213,15 +211,16 @@ async fn a_panic_is_a_generic_500_without_its_text() {
     assert_error(status, &body, INTERNAL, FailureKind::Other).await;
 }
 
+/// No HTTP timeout on `/api/` calls: a slow function is answered once it has finished, never with
+/// a `503` while it may still write (`server::limits`).
 #[tokio::test]
-async fn a_slow_call_is_a_retryable_503() {
+async fn a_slow_call_is_answered_when_it_finishes() {
     let mut browser = signed_out(SHORT).await;
     let started = Instant::now();
     let request = post(&browser, "/api/test/limits/slow", 2, Sending::Announced);
-    let (status, body) = answer(&mut browser, request).await;
-    assert!(started.elapsed() < Duration::from_secs(4));
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert_error(status, &body, TRANSIENT, FailureKind::Transient).await;
+    let response = browser.send(request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(started.elapsed() >= SLOW);
 }
 
 #[tokio::test]
@@ -241,37 +240,6 @@ async fn a_slow_body_is_a_retryable_408() {
         ApiFailure::classify(&client_error(status, &serde_json::to_vec(&body).unwrap()).await)
             .is_retryable()
     );
-}
-
-#[tokio::test]
-async fn paths_outside_the_api_are_not_timed() {
-    async fn slow() -> &'static str {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        "ok"
-    }
-    let limits = RequestLimits {
-        api_timeout: Duration::from_millis(50),
-        ..RequestLimits::default()
-    };
-    let router = Router::new()
-        .route("/healthz", get(slow))
-        .route("/api/x", get(slow))
-        .layer(dioxus::server::axum::middleware::from_fn_with_state(
-            limits,
-            api_timeout,
-        ));
-    let status = |path: &'static str| {
-        let router = router.clone();
-        async move {
-            router
-                .oneshot(HttpRequest::get(path).body(Body::empty()).unwrap())
-                .await
-                .unwrap()
-                .status()
-        }
-    };
-    assert_eq!(status("/healthz").await, StatusCode::OK);
-    assert_eq!(status("/api/x").await, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]

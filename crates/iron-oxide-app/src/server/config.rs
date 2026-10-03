@@ -78,7 +78,7 @@ fn unsupported_param(key: &str) -> String {
 
 /// Default time in-flight requests get to finish after a shutdown signal. It stays below Fly's
 /// `kill_timeout` (30 s in `fly.toml`), leaving room to close the pool before SIGKILL.
-pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
+const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
 /// Upper bound for `SHUTDOWN_GRACE_SECS`.
 const MAX_SHUTDOWN_GRACE_SECS: u64 = 300;
 /// A session key must hold at least this many bytes (the size of a `cookie::Key` master key).
