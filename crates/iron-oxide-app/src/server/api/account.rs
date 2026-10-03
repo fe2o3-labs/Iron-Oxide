@@ -38,7 +38,7 @@ use crate::api::{
         IMPORT_BODY_LIMIT, ImportSummary, MAX_EXPORT_BYTES,
     },
     programs::{ProgramProblem, ProgramProblems},
-    settings::{SettingsUpdate, TrainingMax},
+    settings::{Settings, SettingsUpdate, TrainingMax},
 };
 use crate::server::{
     AppState,
@@ -465,7 +465,10 @@ impl Import {
         let settings = document
             .settings
             .map(|saved| {
-                let settings = settings::validate(SettingsUpdate::from(saved.settings))?;
+                let settings = settings::validate(
+                    SettingsUpdate::from(saved.settings),
+                    &Settings::defaults(),
+                )?;
                 let updated_at = time(saved.updated_at, || "settings.updated_at".to_owned())?;
                 Ok::<_, ApiError>((settings::to_stored(&settings)?, updated_at))
             })
