@@ -574,6 +574,40 @@ async fn oversized_uploads_are_refused_before_parsing(db: PgPool) {
     assert!(upload(&mut a, new_program(), &document("P")).await.saved);
 }
 
+/// The upload's own limit, larger than the server's default body cap (#74): a valid document of
+/// exactly 256 KiB is saved, one byte more is refused, and a chunked body past the upload's
+/// transport limit is refused too.
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn a_valid_document_of_256_kib_is_saved_and_one_byte_more_is_refused(db: PgPool) {
+    let api = api(db).await;
+    let mut a = api.user("A").await;
+    let padded = |size: usize| {
+        let mut document = document("P");
+        document.push_str(&" ".repeat(size - document.len()));
+        document
+    };
+    let at_limit = padded(MAX_DOCUMENT_BYTES);
+    let body = upload_body(new_program(), &at_limit);
+    assert!(body.to_string().len() > crate::server::limits::DEFAULT_BODY_LIMIT);
+    assert!(upload(&mut a, new_program(), &at_limit).await.saved);
+
+    let over = upload_body(new_program(), &padded(MAX_DOCUMENT_BYTES + 1));
+    let (status, body) = fails(&mut a, UPLOAD, over).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(
+        message(&body),
+        "The program file is too large (the limit is 256 KiB)."
+    );
+
+    let chunked = crate::server::limits::tests::chunked(UPLOAD_BODY_LIMIT + 1, false);
+    let request = a.post(UPLOAD).body(chunked).unwrap();
+    let (status, body) = a.send(request).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"], 413);
+    assert_eq!(programs_of(&mut a, true).await.len(), 1);
+}
+
 async fn status_of(user: &mut TestUser, body: Value) -> StatusCode {
     status(user, UPLOAD, body).await
 }
