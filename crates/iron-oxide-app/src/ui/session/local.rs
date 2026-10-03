@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 use super::flow::Step;
 use super::rest::Rest;
 use super::{Active, writes};
-use crate::api::sessions::{NextSessionPlan, SessionPlan, SessionView, SessionWithSets};
+use crate::api::sessions::{
+    NextSessionPlan, SessionPlan, SessionView, SessionWithSets, StartChoice,
+};
 use crate::api::settings::Settings;
 use crate::auth::types::UserId;
 use crate::offline::{LocalSession, NotSignedIn, Outbox, WriteKey, platform};
@@ -118,6 +120,16 @@ pub fn plan_from_next(next: &NextSessionPlan, id: SessionId, started_at: Timesta
     }
 }
 
+/// What the start of `next` records: its program version and day, as shown on the device.
+#[must_use]
+pub fn choice_of(next: &NextSessionPlan) -> StartChoice {
+    StartChoice {
+        program_id: next.program_id,
+        program_version_id: next.program_version_id,
+        day: next.day.clone(),
+    }
+}
+
 /// Starts the workout `next`: queues the start (a new id, the device's clock), saves the record,
 /// and returns the workout. Never waits for the server.
 ///
@@ -132,7 +144,7 @@ pub fn start(
     let user = outbox.user().ok_or(NotSignedIn)?;
     let id = SessionId::new_v7();
     let started_at = platform::now();
-    writes::start_session(outbox, id, started_at)?;
+    writes::start_session(outbox, id, started_at, choice_of(next))?;
     let active = Active {
         plan: plan_from_next(next, id, started_at),
         settings,
@@ -300,6 +312,14 @@ mod tests {
         assert_eq!(plan.session.status, SessionStatus::InProgress);
         assert_eq!(plan.session.started_at, Timestamp::from_epoch_millis(7));
         assert_eq!(plan.day_name, "Day A");
+    }
+
+    #[test]
+    fn the_start_names_the_day_shown_on_the_device() {
+        let choice = choice_of(&next());
+        assert_eq!(choice.program_id, next().program_id);
+        assert_eq!(choice.program_version_id, next().program_version_id);
+        assert_eq!(choice.day, next().day);
     }
 
     #[test]

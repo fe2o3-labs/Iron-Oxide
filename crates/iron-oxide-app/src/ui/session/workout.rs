@@ -59,6 +59,8 @@ pub fn Workout(
     let mut rest = use_signal(|| rest::resume(initial_rest, &active.peek().sets, platform::now()));
     // Set once the workout is finished or discarded: the record then belongs to the finish.
     let mut ended = use_signal(|| false);
+    // When Done last logged a set: a double tap logs one.
+    let mut last_done = use_signal(|| None::<Timestamp>);
     // Whether "not saved on this device" was already said.
     let mut storage_warned = use_signal(|| false);
     // The screen stays on for the whole workout.
@@ -94,7 +96,7 @@ pub fn Workout(
     let steps = flow::steps(plan, state.settings.bar_weight);
     let current = flow::current_step(&steps, plan, &state.sets, &state.skipped);
     let remaining = flow::remaining(&steps, plan, &state.sets, &state.skipped);
-    let unsaved = flow::unsaved_line(&state.sets, &queued);
+    let unsaved = flow::unsaved_line(plan.session.id, &state.sets, &queued);
 
     // Queues the finish (after every set, in order), marks the record, and moves on: the summary
     // waits for the finish to be delivered.
@@ -260,12 +262,23 @@ pub fn Workout(
         if *ended.peek() {
             return;
         }
+        let now = platform::now();
+        let current = {
+            let state = active.peek();
+            let steps = flow::steps(&state.plan, state.settings.bar_weight);
+            flow::current_step(&steps, &state.plan, &state.sets, &state.skipped)
+                .map(|index| steps[index])
+        };
+        if !flow::accepts_done(&step, current.as_ref(), *last_done.peek(), now) {
+            return;
+        }
+        last_done.set(Some(now));
         let set = flow::logged_set(
             SetId::new_v7(),
             &step,
             &exercise_of(&active.peek(), step.exercise),
             entry,
-            platform::now(),
+            now,
             started_at,
         );
         if writes::save_set(outbox, session_id, set.clone()).is_err() {

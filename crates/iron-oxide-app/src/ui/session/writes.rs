@@ -10,10 +10,11 @@ use dioxus::prelude::*;
 use iron_oxide_domain::time::Timestamp;
 use iron_oxide_domain::{LoggedSet, SessionId, SessionOutcome};
 
-use crate::api::sessions::{self, SessionSummary};
+use crate::api::sessions::{self, SessionSummary, StartChoice};
 use crate::offline::{NotSignedIn, Outbox, Write, WriteKey};
 
-/// Queues the start of a session of the active program, on the next day of its rotation.
+/// Queues the start of a session on the program version and day the device chose: the server
+/// records exactly those, so a start delivered after the previous finish keeps its day.
 ///
 /// # Errors
 /// [`NotSignedIn`] when no user is signed in on this device.
@@ -21,10 +22,12 @@ pub fn start_session(
     outbox: Outbox,
     session_id: SessionId,
     started_at: Timestamp,
+    choice: StartChoice,
 ) -> Result<WriteKey, NotSignedIn> {
     outbox.enqueue(Write::StartSession {
         session_id,
         started_at,
+        choice: Some(choice),
     })
 }
 

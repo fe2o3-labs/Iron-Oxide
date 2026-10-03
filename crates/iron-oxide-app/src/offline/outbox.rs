@@ -417,7 +417,10 @@ async fn call(write: Write) -> Result<(), ServerFnError> {
         Write::StartSession {
             session_id,
             started_at,
-        } => start_session(session_id, started_at).await.map(drop),
+            choice,
+        } => start_session(session_id, started_at, choice)
+            .await
+            .map(drop),
         Write::SaveSet { session_id, set } => save_set(session_id, set).await,
         Write::FinishSession {
             session_id,

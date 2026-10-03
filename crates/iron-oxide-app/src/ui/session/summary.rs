@@ -41,12 +41,16 @@ pub enum FinishState {
     Refused(String),
 }
 
-/// The state of the finish of `session`, from the outbox's queued writes.
+/// The state of the finish of `session`, from the outbox's queued writes. A refused start
+/// refuses the whole workout: its finish waits behind it.
 #[must_use]
 pub fn finish_state(
     session: iron_oxide_domain::SessionId,
     queued: &[(WriteKey, Option<String>)],
 ) -> FinishState {
+    if let Some(message) = flow::start_refused(session, queued) {
+        return FinishState::Refused(message);
+    }
     match queued
         .iter()
         .find(|(key, _)| *key == WriteKey::FinishSession(session))
@@ -415,6 +419,14 @@ mod tests {
         ];
         assert_eq!(finish_state(id, &queued), FinishState::Queued);
         assert_eq!(finish_state(other, &queued), FinishState::Delivered);
+        let start = vec![
+            (WriteKey::StartSession(id), Some("In progress.".to_owned())),
+            (WriteKey::FinishSession(id), None),
+        ];
+        assert_eq!(
+            finish_state(id, &start),
+            FinishState::Refused("In progress.".to_owned())
+        );
         let refused = vec![(WriteKey::FinishSession(id), Some("Ended.".to_owned()))];
         assert_eq!(
             finish_state(id, &refused),

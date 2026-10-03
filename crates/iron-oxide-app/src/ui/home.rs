@@ -8,9 +8,12 @@
 //! session ended on this device (even before its finish is delivered).
 
 use dioxus::prelude::*;
-use iron_oxide_domain::program::Day;
+use iron_oxide_domain::program::{Day, Program};
 use iron_oxide_domain::progression::{NextTargets, SetGoal};
-use iron_oxide_domain::{DayId, ProgramVersionId, SessionStatus, Unit, Weight, time::Timestamp};
+use iron_oxide_domain::{
+    DayId, ProgramId, ProgramVersionId, Session, SessionStatus, Unit, Weight, next_day,
+    time::Timestamp,
+};
 
 use super::components::{Button, Card, EmptyState, LoadingState};
 use super::errors::{BannerKind, Errors, use_errors};
@@ -34,6 +37,44 @@ enum HomeData {
     /// No active program: point to Programs.
     NoProgram,
     Ready(Box<Today>),
+    /// A workout ended on this device and its finish has not reached the server yet: no Start
+    /// until it has (the server would offer that same day again).
+    Finishing(Finishing),
+}
+
+/// The workout waiting for its finish to be delivered, and the day that follows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finishing {
+    /// The finished workout's day.
+    pub day_name: String,
+    /// The next day by the program's rotation, when the program is known (online).
+    pub next_day: Option<String>,
+}
+
+/// Home for a workout ended on this device whose finish is still queued (or refused). The next
+/// day comes from the domain's rotation applied to that workout, when `program` (the active one)
+/// is the workout's program.
+#[must_use]
+pub fn finishing(record: &LocalSession, program: Option<(ProgramId, &Program)>) -> Finishing {
+    let day_name = local::screen_of(record)
+        .map_or_else(|| record.day.to_string(), |screen| screen.plan.day_name);
+    let next_day = program
+        .filter(|(id, _)| *id == record.program_id)
+        .and_then(|(_, program)| {
+            let finish = record.finished?;
+            let ended = Session::from_parts(
+                record.session_id,
+                record.program_version_id,
+                record.day.clone(),
+                record.started_at,
+                finish.outcome.into(),
+                Some(finish.finished_at),
+            )
+            .ok()?;
+            let day = next_day(&program.rotation, &[ended]).ok()?;
+            program.day(day).map(|day| day.name.clone())
+        });
+    Finishing { day_name, next_day }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -140,17 +181,19 @@ async fn load(errors: Errors, outbox: Outbox) -> Result<HomeData, ServerFnError>
     let user = outbox.user();
     let record = user.and_then(local::load);
     let queued = outbox.queued();
-    let kept = match local::reconcile(record.clone(), None, &queued) {
-        Restore::Resume(record) => running_of(&record, "Workout"),
-        _ => None,
-    };
+    let kept = local::reconcile(record.clone(), None, &queued);
     match (load_server(errors, outbox, record, &queued).await, kept) {
-        // Offline (or the server failing): the session on the device can still be resumed.
-        (Err(_), Some(kept)) => Ok(HomeData::Ready(Box::new(Today {
-            shown: shown_running(&kept),
-            last: LastSession::Failed,
-            next: None,
-        }))),
+        // Offline (or the server failing): the session on the device can still be resumed...
+        (Err(error), Restore::Resume(kept)) => match running_of(&kept, "Workout") {
+            Some(kept) => Ok(HomeData::Ready(Box::new(Today {
+                shown: shown_running(&kept),
+                last: LastSession::Failed,
+                next: None,
+            }))),
+            None => Err(error),
+        },
+        // ...and a finished one still waits for its finish.
+        (Err(_), Restore::Ended(ended)) => Ok(HomeData::Finishing(finishing(&ended, None))),
         (loaded, _) => loaded,
     }
 }
@@ -168,8 +211,11 @@ async fn load_server(
     let server = get_in_progress_session().await?;
     let running = match local::reconcile(record, Some(server.as_ref()), queued) {
         Restore::Resume(record) => running_of(&record, &active.program.name),
-        // Ended on this device: no Resume, even before its finish reaches the server.
-        Restore::Ended(_) => None,
+        // Ended on this device: no Resume, and no Start until the finish reaches the server.
+        Restore::Ended(ended) => {
+            let program = Some((active.program.id, &active.document));
+            return Ok(HomeData::Finishing(finishing(&ended, program)));
+        }
         decision => {
             if decision == Restore::Drop
                 && let Some(user) = outbox.user()
@@ -423,6 +469,19 @@ pub fn Home() -> Element {
                 Link { class: "io-button io-button-primary", to: Route::Programs {}, "Choose a program" }
             }
         },
+        Some(Ok(HomeData::Finishing(finishing))) => {
+            let next = finishing
+                .next_day
+                .map(|day| format!(" {day} comes next."))
+                .unwrap_or_default();
+            rsx! {
+                EmptyState {
+                    title: "Finishing your last workout…",
+                    message: "{finishing.day_name} is saved on this device and goes to the server as soon as it can. You can start the next workout once it's there.{next}",
+                    Button { onclick: move |_| data.restart(), "Check again" }
+                }
+            }
+        }
         Some(Ok(HomeData::Ready(today))) => rsx! {
             TodayView { today: *today }
         },
@@ -790,5 +849,57 @@ mod tests {
         assert_eq!(shown_next.program_name, "Program Y");
         assert_eq!(shown_next.day_name, "Y day A");
         assert_eq!(shown_next.exercises, next.exercises);
+    }
+
+    /// Review of #113: while a finished workout waits for its finish, Home offers no Start (the
+    /// server would offer that same day again), and names the next day by the rotation.
+    #[test]
+    fn a_finished_workout_waiting_for_its_finish_offers_the_next_day_not_the_same() {
+        let program = iron_oxide_domain::program::builtin_programs()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .program()
+            .clone();
+        let program_id = ProgramId::new_v7();
+        let record = LocalSession {
+            session_id: SessionId::new_v7(),
+            started_at: Timestamp::from_epoch_millis(1_000),
+            program_id,
+            program_version_id: ProgramVersionId::new_v7(),
+            day: program.rotation[0].clone(),
+            sets: Vec::new(),
+            finished: Some(crate::offline::LocalFinish {
+                outcome: iron_oxide_domain::SessionOutcome::Completed,
+                finished_at: Timestamp::from_epoch_millis(2_000),
+            }),
+            screen: None,
+        };
+        let first = program.day(&program.rotation[0]).unwrap().name.clone();
+        let second = program.day(&program.rotation[1]).unwrap().name.clone();
+        let shown = finishing(&record, Some((program_id, &program)));
+        assert_eq!(shown.next_day.as_deref(), Some(second.as_str()));
+        assert_ne!(shown.next_day.as_deref(), Some(first.as_str()));
+        // Another active program, or offline: no guess.
+        assert_eq!(
+            finishing(&record, Some((ProgramId::new_v7(), &program))).next_day,
+            None
+        );
+        assert_eq!(finishing(&record, None).next_day, None);
+        // Abandoned does not move the rotation: the same day comes next.
+        let abandoned = LocalSession {
+            finished: Some(crate::offline::LocalFinish {
+                outcome: iron_oxide_domain::SessionOutcome::Abandoned,
+                finished_at: Timestamp::from_epoch_millis(2_000),
+            }),
+            ..record
+        };
+        assert_eq!(
+            finishing(&abandoned, Some((program_id, &program)))
+                .next_day
+                .as_deref(),
+            Some(first.as_str())
+        );
     }
 }
