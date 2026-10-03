@@ -71,6 +71,12 @@
 //!   revision (`queue::Queue::merge`: per-entry and retry-state revisions from a Lamport clock,
 //!   tombstones for delivered and discarded writes), so a stale copy, such as a tab that could
 //!   not save for a while, never undoes a wait, a refusal, an edit, a delivery or a discard.
+//!   A delivery covers every earlier version of its id. Discard tombstones are kept for good;
+//!   only the newest 256 delivered ones are, so a long-stale copy can at worst bring back a
+//!   delivered write. It is then sent once more, which is harmless: every write kind is
+//!   idempotent on its id (`start_session` returns the session it created, even ended;
+//!   `save_set` accepts the same set again, even after the session ended; `finish_session`
+//!   returns the same summary for the same outcome and time).
 //!
 //! # Storage
 //!

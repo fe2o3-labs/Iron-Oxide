@@ -180,8 +180,9 @@ impl OutboxStatus {
     }
 }
 
-/// A write that left the queue: delivered (`2xx`) or discarded by the user. Kept (up to
-/// [`MAX_TOMBSTONES`]) so that merging a stale copy that still holds it never brings it back.
+/// A write that left the queue: delivered (`2xx`) or discarded by the user, so that merging a
+/// stale copy that still holds it (any version up to this revision) never brings it back.
+/// Discards are kept for good, deliveries up to [`MAX_TOMBSTONES`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tombstone {
     pub write: Write,
@@ -191,8 +192,32 @@ pub struct Tombstone {
     pub delivered: bool,
 }
 
-/// How many tombstones a queue keeps (the newest).
+/// How many **delivered** tombstones a queue keeps (the newest). Discard tombstones are never
+/// pruned: discards are rare, confirmed user actions, and a pruned one would let a stale copy
+/// bring a discarded write back and send it. A pruned delivered tombstone can at worst bring a
+/// delivered write back, which is sent once more and answered as a replay, unchanged: every
+/// write kind is idempotent on its id (`start_session` returns the session it created, even
+/// ended; `save_set` accepts the same set again, even after the session ended; `finish_session`
+/// returns the same summary for the same outcome and time; see `docs/api.md`).
 pub const MAX_TOMBSTONES: usize = 256;
+
+/// Drops the oldest delivered tombstones past [`MAX_TOMBSTONES`]; keeps every discard.
+/// `tombstones` is ordered oldest first.
+fn prune(tombstones: &mut Vec<Tombstone>) {
+    let mut excess = tombstones
+        .iter()
+        .filter(|tomb| tomb.delivered)
+        .count()
+        .saturating_sub(MAX_TOMBSTONES);
+    tombstones.retain(|tomb| {
+        if tomb.delivered && excess > 0 {
+            excess -= 1;
+            false
+        } else {
+            true
+        }
+    });
+}
 
 /// The queue and its retry state, as persisted per user.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -262,8 +287,7 @@ impl Queue {
             rev,
             delivered,
         });
-        let excess = self.tombstones.len().saturating_sub(MAX_TOMBSTONES);
-        self.tombstones.drain(..excess);
+        prune(&mut self.tombstones);
     }
 
     /// Appends `write`. The same write already queued is not added twice, and a queued write
@@ -290,12 +314,17 @@ impl Queue {
             entry.rev = rev;
             return Enqueued::Replaced;
         }
+        let failed = self
+            .tombstones
+            .iter()
+            .any(|tomb| tomb.delivered && tomb.write.key() == key)
+            .then(|| EDITED_AFTER_SAVE_MESSAGE.to_owned());
         self.entries.push_back(Entry {
             write,
             enqueued_at: now,
             seq: rev,
             rev,
-            failed: None,
+            failed,
         });
         Enqueued::Added
     }
@@ -331,18 +360,19 @@ impl Queue {
     pub fn on_success(&mut self, write: &Write) {
         if let Some(index) = self.position(write) {
             self.entries.remove(index);
-        } else {
-            let rev = self.tick();
-            if let Some(edited) = self
-                .entries
-                .iter_mut()
-                .find(|entry| entry.write.key() == write.key())
-            {
-                edited.failed = Some(EDITED_AFTER_SAVE_MESSAGE.to_owned());
-                edited.rev = rev;
-            }
         }
         self.bury(write.clone(), true);
+        // An edit queued while the earlier values were in flight: newer than the tombstone, so
+        // it stays, refused.
+        let rev = self.tick();
+        if let Some(edited) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.write.key() == write.key())
+        {
+            edited.failed = Some(EDITED_AFTER_SAVE_MESSAGE.to_owned());
+            edited.rev = rev;
+        }
         self.failures = 0;
         self.retry_at = None;
         self.not_before = None;
@@ -490,8 +520,7 @@ impl Queue {
             }
         }
         merged.tombstones.sort_by_key(|tomb| tomb.rev);
-        let excess = merged.tombstones.len().saturating_sub(MAX_TOMBSTONES);
-        merged.tombstones.drain(..excess);
+        prune(&mut merged.tombstones);
 
         // Entries: one per key, the newest; `local` wins ties.
         let mut entries: Vec<Entry> = Vec::new();
@@ -511,9 +540,10 @@ impl Queue {
                 .iter()
                 .find(|tomb| tomb.write.key() == entry.write.key());
             match tomb {
-                // Delivered or discarded since this copy last changed it: gone.
-                Some(tomb) if tomb.write == entry.write && tomb.rev >= entry.rev => continue,
-                // Other values for a write the server already has: a certain `409`.
+                // Delivered or discarded after this version was made: it covers every earlier
+                // version of the id (an edit superseded before the delivery included). Gone.
+                Some(tomb) if tomb.rev >= entry.rev => continue,
+                // An edit made after the server got other values: a certain `409`.
                 Some(tomb)
                     if tomb.delivered && tomb.write != entry.write && entry.failed.is_none() =>
                 {

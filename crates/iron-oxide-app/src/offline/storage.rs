@@ -306,7 +306,7 @@ mod tests {
 
     use crate::offline::backoff::Backoff;
     use crate::offline::queue::tests::{at, finish, set, start};
-    use crate::offline::queue::{Enqueued, Failure, Wake, Write};
+    use crate::offline::queue::{Enqueued, Failure, OutboxStatus, Queue, Wake, Write};
     use iron_oxide_domain::{LoggedSet, SessionId};
 
     fn user() -> UserId {
@@ -620,17 +620,111 @@ mod tests {
             queue.enqueue(start(session), at(0));
             queue.enqueue(finish(session), at(0));
         });
-        // Tab B loads, then cannot save while it works.
-        tab_b.load(&storage);
-        tab_a.update(&storage, |queue| queue.on_success(&start(session)));
+        // Tab B holds both writes and cannot save; then A delivers the start.
         storage.set_full(true);
         tab_b.update(&storage, |queue| queue.nudge());
         storage.set_full(false);
+        tab_a.update(&storage, |queue| queue.on_success(&start(session)));
+        // B's stale copy is merged with A's record: the start stays delivered.
         let extra = set(session, 0);
         tab_b.update(&storage, |queue| queue.enqueue(extra.clone(), at(5)));
         assert_eq!(
             writes(&mut QueueStore::new(user()), &storage),
             vec![finish(session), extra]
+        );
+    }
+
+    #[test]
+    fn a_superseded_version_stays_gone_once_its_edit_is_delivered() {
+        let session = SessionId::new_v7();
+        let original = set(session, 0);
+        let (storage, mut tab) = stale_after(&[start(session), original.clone()]);
+        let Write::SaveSet { set: logged, .. } = &original else {
+            unreachable!()
+        };
+        let edit = Write::SaveSet {
+            session_id: session,
+            set: LoggedSet {
+                warm_up: true,
+                ..logged.clone()
+            },
+        };
+        tab.update(&storage, |queue| queue.on_success(&start(session)));
+        assert_eq!(
+            tab.update(&storage, |queue| queue.enqueue(edit.clone(), at(1))),
+            Enqueued::Replaced
+        );
+        tab.update(&storage, |queue| queue.on_success(&edit));
+        // The stale stored copy of the pre-edit set is covered by the edit's delivery.
+        assert_eq!(writes(&mut tab, &storage), Vec::<Write>::new());
+        assert_eq!(tab.load(&storage).status(), OutboxStatus::default());
+        storage.set_full(false);
+        tab.update(&storage, |queue| queue.nudge());
+        assert_eq!(
+            QueueStore::new(user()).load(&storage).status(),
+            OutboxStatus::default()
+        );
+    }
+
+    #[test]
+    fn an_edit_made_after_delivery_is_held_as_refused() {
+        let storage = MemoryStorage::default();
+        let session = SessionId::new_v7();
+        let original = set(session, 0);
+        let mut tab = QueueStore::new(user());
+        tab.update(&storage, |queue| queue.enqueue(original.clone(), at(0)));
+        tab.update(&storage, |queue| queue.on_success(&original));
+        let Write::SaveSet { set: logged, .. } = &original else {
+            unreachable!()
+        };
+        let edit = Write::SaveSet {
+            session_id: session,
+            set: LoggedSet {
+                warm_up: true,
+                ..logged.clone()
+            },
+        };
+        tab.update(&storage, |queue| queue.enqueue(edit.clone(), at(1)));
+        let status = QueueStore::new(user()).load(&storage).status();
+        assert_eq!(status.failed_count, 1);
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some(crate::offline::queue::EDITED_AFTER_SAVE_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn a_long_suspended_tab_never_brings_back_a_discarded_write() {
+        let storage = MemoryStorage::default();
+        let (a, other) = (SessionId::new_v7(), SessionId::new_v7());
+        let (mut tab_x, mut tab_y) = (QueueStore::new(user()), QueueStore::new(user()));
+        tab_y.update(&storage, |queue| {
+            queue.enqueue(start(a), at(0));
+            queue.enqueue(set(a, 0), at(0));
+        });
+        // Tab X loads the queue, then sleeps.
+        tab_x.load(&storage);
+        let refused = Failure::Rejected {
+            message: "Another session is in progress.".to_owned(),
+        };
+        tab_y.update(&storage, |queue| {
+            queue.on_failure(&start(a), refused, at(0), 0.5, &Backoff::DEFAULT);
+        });
+        assert_eq!(tab_y.update(&storage, Queue::discard_failed).len(), 2);
+        // Many more writes are delivered than delivered tombstones are kept.
+        for index in 0..=u16::try_from(crate::offline::queue::MAX_TOMBSTONES).unwrap() {
+            let write = set(other, index);
+            tab_y.update(&storage, |queue| {
+                queue.enqueue(write.clone(), at(1));
+                queue.on_success(&write);
+            });
+        }
+        // X wakes up and writes its stale copy back: the discarded writes stay gone.
+        tab_x.update(&storage, |queue| queue.nudge());
+        assert_eq!(writes(&mut tab_x, &storage), Vec::<Write>::new());
+        assert_eq!(
+            writes(&mut QueueStore::new(user()), &storage),
+            Vec::<Write>::new()
         );
     }
 }
