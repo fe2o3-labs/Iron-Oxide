@@ -67,6 +67,59 @@ mod tests {
             .collect()
     }
 
+    /// Every rule is closed before the next one starts: a rule cut in two (as a bad merge once
+    /// did) makes the browser drop every rule after it, silently.
+    #[test]
+    fn every_rule_is_closed_before_the_next_one() {
+        let css = css();
+        // Comments out, keeping the line count.
+        let mut text = String::new();
+        let mut rest = css.as_str();
+        while let Some(start) = rest.find("/*") {
+            text.push_str(&rest[..start]);
+            let end = rest[start..]
+                .find("*/")
+                .map_or(rest.len(), |end| start + end + 2);
+            text.extend(rest[start..end].chars().filter(|&c| c == '\n'));
+            rest = &rest[end..];
+        }
+        text.push_str(rest);
+
+        let mut open: Vec<(String, usize)> = Vec::new();
+        let mut selector = String::new();
+        for (line_index, line) in text.lines().enumerate() {
+            for c in line.chars() {
+                match c {
+                    '{' => {
+                        let name = selector.trim().to_owned();
+                        if let Some((parent, at)) = open.last() {
+                            assert!(
+                                parent.starts_with('@'),
+                                "`{name}` (line {}) opens inside `{parent}` (line {at}), \
+                                 which is not closed",
+                                line_index + 1
+                            );
+                        }
+                        open.push((name, line_index + 1));
+                        selector.clear();
+                    }
+                    '}' => {
+                        assert!(
+                            open.pop().is_some(),
+                            "stray `}}` at line {}",
+                            line_index + 1
+                        );
+                        selector.clear();
+                    }
+                    ';' => selector.clear(),
+                    _ => selector.push(c),
+                }
+            }
+            selector.push(' ');
+        }
+        assert!(open.is_empty(), "unclosed: {open:?}");
+    }
+
     #[test]
     fn the_two_light_blocks_are_identical() {
         let css = css();
