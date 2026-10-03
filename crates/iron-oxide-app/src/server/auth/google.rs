@@ -29,8 +29,8 @@ use dioxus::server::axum::{
     response::{IntoResponse, Response},
 };
 use openidconnect::{
-    AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
-    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
+    AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken, DiscoveryError,
+    IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RequestTokenError,
     core::{CoreAuthPrompt, CoreProviderMetadata, CoreResponseType},
     reqwest,
 };
@@ -51,8 +51,10 @@ use crate::auth::types::{
 
 /// Google's OpenID Connect issuer.
 pub const GOOGLE_ISSUER: &str = "https://accounts.google.com";
-/// Timeout for each request to Google.
+/// Timeout for each request to Google, from connecting to the end of the response.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for opening the connection to Google.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest `code` or `state` accepted from the callback.
 const MAX_PARAM_LEN: usize = 2048;
 
@@ -77,6 +79,7 @@ impl GoogleOidc {
         let http = reqwest::Client::builder()
             // No redirects: the discovery, JWKS and token endpoints answer directly.
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(CONNECT_TIMEOUT)
             .timeout(HTTP_TIMEOUT)
             .build()
             .map_err(|e| AuthError::Internal(format!("HTTP client: {e}")))?;
@@ -106,7 +109,16 @@ impl GoogleOidc {
     > {
         let metadata = CoreProviderMetadata::discover_async(self.issuer.clone(), &self.http)
             .await
-            .map_err(|e| AuthError::Google(format!("discovery: {e}")))?;
+            .map_err(|e| match e {
+                // Not reached in time, or Google failing: retrying may work (503).
+                DiscoveryError::Request(_) => {
+                    AuthError::GoogleUnavailable(format!("discovery: {e}"))
+                }
+                DiscoveryError::Response(status, _, _) if status.is_server_error() => {
+                    AuthError::GoogleUnavailable(format!("discovery: {e}"))
+                }
+                _ => AuthError::Google(format!("discovery: {e}")),
+            })?;
         Ok(openidconnect::core::CoreClient::from_provider_metadata(
             metadata,
             self.client_id.clone(),
@@ -213,7 +225,13 @@ async fn complete(
         .set_pkce_verifier(PkceCodeVerifier::new(stored.pkce_verifier))
         .request_async(&ctx.auth.google().http)
         .await
-        .map_err(|e| AuthError::Google(format!("code exchange: {e}")))?;
+        .map_err(|e| match e {
+            // Not reached in time: 503.
+            RequestTokenError::Request(_) => {
+                AuthError::GoogleUnavailable(format!("code exchange: {e}"))
+            }
+            _ => AuthError::Google(format!("code exchange: {e}")),
+        })?;
     let id_token = openidconnect::TokenResponse::id_token(&token)
         .ok_or_else(|| AuthError::Google("no ID token".to_owned()))?;
     let claims = id_token
@@ -550,6 +568,21 @@ fn callback_page(origin: &str, message: &GoogleCallbackMessage, after: AfterMess
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_unreachable_google_is_a_retryable_503() {
+        // Nothing listens on port 1: the connection is refused.
+        let google = GoogleOidc::new(
+            "http://127.0.0.1:1",
+            "id",
+            SecretString::from("secret"),
+            &url::Url::parse("http://localhost:8080/auth/google/callback").unwrap(),
+        )
+        .unwrap();
+        let error = google.client().await.unwrap_err();
+        assert!(matches!(error, AuthError::GoogleUnavailable(_)), "{error}");
+        assert_eq!(error.public().0, 503);
+    }
 
     #[test]
     fn state_comparison() {

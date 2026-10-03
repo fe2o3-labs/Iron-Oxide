@@ -2558,6 +2558,7 @@ dependencies = [
  "base64 0.23.1",
  "dioxus",
  "dotenvy",
+ "http-body",
  "iron-oxide-domain",
  "js-sys",
  "openidconnect",
