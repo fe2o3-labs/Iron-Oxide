@@ -6,9 +6,9 @@ use dioxus::logger::tracing;
 use dioxus::prelude::ServerFnError;
 use dioxus::server::axum::{
     Json,
-    body::{Body, to_bytes},
+    body::Body,
     extract::{FromRequestParts, Request},
-    http::{StatusCode, header::CONTENT_LENGTH},
+    http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -33,6 +33,8 @@ use crate::server::db::{
     programs::{self, ProgramVersion, Reserve},
 };
 use crate::server::entitlements;
+use crate::server::limits::{self, BodyError};
+use crate::server::state::AppState;
 
 /// The built-in programs, by name, with their current document.
 pub async fn list_builtins(pool: &PgPool) -> Result<Vec<BuiltinProgramView>, ApiError> {
@@ -209,8 +211,9 @@ fn too_large() -> ApiError {
 
 /// Middleware of `upload_program`: checks the session first, so a signed-out client gets its
 /// `401` without the server reading (up to [`UPLOAD_BODY_LIMIT`] of) its body. Then reads the whole
-/// body before the server function does, and refuses it with `413` past the limit, announced
-/// (`Content-Length`) or actually sent.
+/// body before the server function does ([`limits::read_body`]): `413` past the limit, announced
+/// (`Content-Length`) or actually sent, and `408` for a body that does not arrive within the read
+/// timeout. This route is exempt from the server's default body cap (`limits::OWN_BODY_LIMIT`).
 ///
 /// Dioxus reads a server function's body itself and panics when that fails (axum's 2 MiB default
 /// limit, a broken connection), so the body it gets here is already complete and within the limit.
@@ -221,31 +224,32 @@ pub async fn limit_upload_body(request: Request, next: Next) -> Response {
     if let Err(rejection) = AuthUser::from_request_parts(&mut parts, &()).await {
         return rejection;
     }
-    let announced = parts
-        .headers
-        .get(CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok());
-    if announced.is_some_and(|length| length > UPLOAD_BODY_LIMIT as u64) {
-        return refuse("announced body too large");
-    }
-    match to_bytes(body, UPLOAD_BODY_LIMIT).await {
+    let limits = parts
+        .extensions
+        .get::<AppState>()
+        .map(|state| state.config.request_limits)
+        .unwrap_or_default();
+    let read = limits::read_body(
+        &parts.headers,
+        body,
+        UPLOAD_BODY_LIMIT,
+        limits.body_read_timeout,
+    );
+    match read.await {
         Ok(bytes) => {
             next.run(Request::from_parts(parts, Body::from(bytes)))
                 .await
         }
-        // Over the limit, or unreadable (the client went away: nobody reads the answer).
-        Err(error) => {
-            tracing::info!(%error, "program upload body not read");
-            refuse("body too large or unreadable")
-        }
+        Err(BodyError::TooLarge(_)) => refuse(),
+        // A slow body (`408`) or a broken connection.
+        Err(error) => limits::refuse_body(&error, true, limits::TOO_LARGE),
     }
 }
 
 /// A `413`, in the shape Dioxus gives the errors a server function returns (so the client decodes
 /// it the same way): `{"message", "code", "data": <the ServerFnError>}`.
-fn refuse(reason: &'static str) -> Response {
-    tracing::info!(reason, "program upload refused");
+fn refuse() -> Response {
+    tracing::info!("program upload refused: body too large");
     let error = ServerFnError::from(too_large());
     let body = json!({ "message": error.to_string(), "code": 413, "data": error });
     (StatusCode::PAYLOAD_TOO_LARGE, Json(body)).into_response()
