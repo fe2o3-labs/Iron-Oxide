@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use super::*;
-use crate::api::programs::UploadOutcome;
+use crate::api::{account::DELETE_REAUTH_WINDOW_SECS, programs::UploadOutcome};
 use crate::server::{
     api::{
         error::UNAUTHORIZED,
@@ -236,7 +236,7 @@ async fn age_sign_in(db: &PgPool, user: UserId, seconds: i64) {
     sqlx::query(
         "UPDATE sessions
          SET data = jsonb_set(data, '{auth.signed_in_at}',
-                              to_jsonb(extract(epoch FROM now())::bigint - $2))
+                              to_jsonb(floor(extract(epoch FROM now()))::bigint - $2))
          WHERE user_id = $1",
     )
     .bind(user.as_uuid())
@@ -247,16 +247,6 @@ async fn age_sign_in(db: &PgPool, user: UserId, seconds: i64) {
 }
 
 // --- Unit tests --------------------------------------------------------------------------------
-
-#[test]
-fn a_deletion_needs_a_sign_in_from_the_last_ten_minutes() {
-    let now = 1_000_000;
-    assert!(signed_in_recently(Some(now), now));
-    assert!(signed_in_recently(Some(now - 600), now));
-    assert!(!signed_in_recently(Some(now - 601), now));
-    assert!(!signed_in_recently(Some(now + 1), now), "in the future");
-    assert!(!signed_in_recently(None, now));
-}
 
 #[test]
 fn files_that_are_not_a_current_export_are_refused_before_parsing() {
@@ -308,8 +298,8 @@ fn program_problems_get_paths_from_the_export_root() {
             .collect(),
         omitted: 3,
     };
-    let ApiError::InvalidProgram(problems) =
-        invalid_program("programs[0].versions[1].document", problems)
+    let ApiError::InvalidProgramIn(message, problems) =
+        invalid_program("programs[0].versions[1].document", "P", 2, problems)
     else {
         panic!("not an invalid program");
     };
@@ -329,6 +319,11 @@ fn program_problems_get_paths_from_the_export_root() {
             .all(|e| e.line.is_none() && e.column.is_none())
     );
     assert_eq!(problems.omitted, 3);
+    assert_eq!(
+        message,
+        "Program \"P\", version 2 (programs[0].versions[1].document), is not valid under this \
+         version of Iron Oxide's rules: the document: m."
+    );
 }
 
 // --- Export ------------------------------------------------------------------------------------
@@ -583,6 +578,7 @@ async fn what_the_account_already_has_wins(db: PgPool) {
     assert_eq!(
         summary,
         ImportSummary {
+            versions: 1,
             sessions: 1,
             sets: 1,
             ..ImportSummary::default()
@@ -593,7 +589,15 @@ async fn what_the_account_already_has_wins(db: PgPool) {
     expected.insert(2, extra);
     assert_eq!(after.sessions.len(), 3);
     assert_eq!(after.sessions, expected);
-    assert_eq!(after.programs, original.programs);
+    // The program keeps its name and versions; the export's other version 1 is added as
+    // version 3 (versions are matched by content, never by number alone).
+    assert_eq!(after.programs[1..], original.programs[1..]);
+    let main = &after.programs[0];
+    assert_eq!(main.name, original.programs[0].name);
+    assert_eq!(main.versions[..2], original.programs[0].versions[..]);
+    assert_eq!(main.versions.len(), 3);
+    assert_eq!(main.versions[2].version, 3);
+    assert_eq!(main.versions[2].document, program_json("Changed", 3));
     assert_eq!(after.settings, original.settings);
     assert_eq!(after.training_maxes, original.training_maxes);
 }
@@ -933,7 +937,12 @@ async fn deleting_the_account_needs_a_recent_sign_in(db: PgPool) {
     let (mut a, mut passkey, credential) = api.user_with_passkey("A").await;
     seed(&mut a).await;
     let counts = row_counts(&db, a.id).await;
-    age_sign_in(&db, a.id, DELETE_REAUTH_WINDOW_SECS + 1).await;
+    age_sign_in(
+        &db,
+        a.id,
+        i64::try_from(DELETE_REAUTH_WINDOW_SECS).unwrap() + 1,
+    )
+    .await;
 
     let error = a.call_err(DELETE, json!({})).await;
     assert_eq!(
@@ -982,4 +991,153 @@ async fn every_endpoint_needs_a_signed_in_same_origin_request(db: PgPool) {
     }
     assert_eq!(row_counts(&db, a.id).await, counts, "nothing changed");
     assert!(a.call::<Value>(ME, json!({})).await.is_ok());
+}
+
+// --- Review fixes ------------------------------------------------------------------------------
+
+/// The review's scenario: a stale session (a stolen cookie) tries to add its own passkey, to sign
+/// in afresh with it and delete the account. Adding the passkey needs the same recent sign-in.
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn a_stale_session_cannot_add_a_passkey_to_delete_the_account(db: PgPool) {
+    let api = TestApi::new(db.clone()).await;
+    let mut victim = api.user("A").await;
+    seed(&mut victim).await;
+    age_sign_in(&db, victim.id, 24 * 60 * 60).await;
+    let counts = row_counts(&db, victim.id).await;
+    let mut thief = victim.clone();
+    assert_eq!(
+        thief.call_err(DELETE, json!({})).await.status,
+        StatusCode::FORBIDDEN
+    );
+
+    // The thief's own passkey cannot be added: the ceremony is refused before it starts.
+    let error = thief
+        .call_err("/api/auth/passkey/add/begin", json!({}))
+        .await;
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    // Nor Google linked.
+    let error = thief
+        .call_err(
+            "/api/auth/google/begin",
+            json!({ "intent": "Link", "popup": true }),
+        )
+        .await;
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        row_counts(&db, victim.id).await,
+        counts,
+        "nothing added or deleted"
+    );
+    let passkeys: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys WHERE user_id = $1")
+        .bind(victim.id.as_uuid())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(passkeys, 1);
+}
+
+/// The review's case: the export's version 1 of a program differs from the account's version 1.
+/// Its session must land on a version that has its day, so that its plan loads.
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn a_version_with_the_same_number_but_other_content_is_added_as_a_new_version(db: PgPool) {
+    let api = TestApi::new(db.clone()).await;
+    let mut a = api.user("A").await;
+    let creation = CreationId::new_v7();
+    upload(
+        &mut a,
+        json!({ "kind": "new_program", "creation_id": creation }),
+        &program_json("Main", 5),
+    )
+    .await;
+    let mut document = export(&mut a).await;
+    let mut other = program_json("Main", 5);
+    other["days"][0]["id"] = json!("b");
+    other["rotation"] = json!(["b"]);
+    document.programs[0].versions[0].document = other.clone();
+    let session = SessionId::new_v7();
+    document.sessions.push(ExportSession {
+        id: session,
+        program: creation,
+        version: 1,
+        day: iron_oxide_domain::DayId::new("b").unwrap(),
+        status: SessionStatus::Completed,
+        started_at: t(0),
+        finished_at: Some(t(10)),
+        sets: vec![set(0, t(1))],
+    });
+
+    let summary = import(&mut a, &document).await.unwrap();
+    assert_eq!(
+        (summary.versions, summary.sessions, summary.sets),
+        (1, 1, 1)
+    );
+    let plan: Value = a
+        .call("/api/sessions/plan", json!({ "session_id": session }))
+        .await
+        .unwrap();
+    assert_eq!(plan["day_name"], json!("Day A"), "{plan}");
+    let after = export(&mut a).await;
+    let versions: Vec<u32> = after.programs[0]
+        .versions
+        .iter()
+        .map(|v| v.version)
+        .collect();
+    assert_eq!(
+        versions,
+        [1, 2],
+        "the account's version 1 is kept, the export's is version 2"
+    );
+    assert_eq!(after.programs[0].versions[1].document, other);
+    assert_eq!(after.sessions[0].version, 2);
+
+    // Idempotent: the second time, the export's version is found by its content.
+    assert_eq!(
+        import(&mut a, &document).await.unwrap(),
+        ImportSummary::default()
+    );
+    assert_eq!(training(&export(&mut a).await), training(&after));
+}
+
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn a_third_concurrent_import_is_a_retryable_503(db: PgPool) {
+    let api = TestApi::new(db.clone()).await;
+    let (mut a, mut c) = (api.user("A").await, api.user("C").await);
+    seed(&mut a).await;
+    let document = export(&mut a).await;
+    let body = json!({ "document": serde_json::to_string(&document).unwrap() }).to_string();
+    let counts = row_counts(&db, c.id).await;
+
+    // Two imports running: every slot is taken.
+    let held = api
+        .import_slots()
+        .try_acquire_many_owned(u32::try_from(MAX_CONCURRENT_IMPORTS).unwrap())
+        .unwrap();
+    let response = c
+        .send_response(c.post(IMPORT).body(Body::from(body.clone())).unwrap())
+        .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.headers()[header::RETRY_AFTER],
+        body_limit::BUSY_RETRY_AFTER_SECS.to_string().as_str()
+    );
+    assert_eq!(row_counts(&db, c.id).await, counts, "nothing written");
+    let error = c.call_err(IMPORT, json!({ "document": "{}" })).await;
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    let failure =
+        crate::api::error::ApiFailure::classify(&dioxus::prelude::ServerFnError::ServerError {
+            message: error.message.clone(),
+            code: 503,
+            details: None,
+        });
+    assert!(failure.kind.is_retryable(), "{failure:?}");
+
+    // One finishes: the retry goes through.
+    drop(held);
+    assert_ne!(
+        import(&mut c, &document).await.unwrap(),
+        ImportSummary::default()
+    );
 }

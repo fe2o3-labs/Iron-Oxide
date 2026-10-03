@@ -359,22 +359,58 @@ pub async fn insert_program(
     .await?)
 }
 
-/// The version numbers of one of the user's programs, with their ids.
-pub async fn version_ids(
+/// The version numbers one of the user's programs already uses.
+pub async fn version_numbers(
     tx: &mut PgConnection,
     user: UserId,
     program: Uuid,
-) -> Result<Vec<(i32, Uuid)>, RepoError> {
-    Ok(sqlx::query!(
-        "SELECT version, id FROM program_versions WHERE user_id = $1 AND program_id = $2",
+) -> Result<Vec<i32>, RepoError> {
+    Ok(sqlx::query_scalar!(
+        "SELECT version FROM program_versions WHERE user_id = $1 AND program_id = $2",
         user.as_uuid(),
         program
     )
     .fetch_all(tx)
+    .await?)
+}
+
+/// Locks one of the user's programs (`FOR UPDATE`) until the end of the transaction, so a
+/// concurrent upload of a version (`programs::add_version`, which locks the same row) waits
+/// instead of taking a number this import is about to use.
+pub async fn lock_program(
+    tx: &mut PgConnection,
+    user: UserId,
+    program: Uuid,
+) -> Result<(), RepoError> {
+    sqlx::query_scalar!(
+        "SELECT id FROM programs WHERE id = $2 AND user_id = $1 FOR UPDATE",
+        user.as_uuid(),
+        program
+    )
+    .fetch_optional(tx)
     .await?
-    .into_iter()
-    .map(|row| (row.version, row.id))
-    .collect())
+    .ok_or(RepoError::NotFound)?;
+    Ok(())
+}
+
+/// The lowest-numbered version of one of the user's programs whose document equals `document`
+/// (compared as `jsonb`: formatting and key order do not matter).
+pub async fn version_with_document(
+    tx: &mut PgConnection,
+    user: UserId,
+    program: Uuid,
+    document: &JsonValue,
+) -> Result<Option<Uuid>, RepoError> {
+    Ok(sqlx::query_scalar!(
+        "SELECT id FROM program_versions
+         WHERE user_id = $1 AND program_id = $2 AND document = $3::jsonb
+         ORDER BY version LIMIT 1",
+        user.as_uuid(),
+        program,
+        document
+    )
+    .fetch_optional(tx)
+    .await?)
 }
 
 /// Inserts version `version` of the user's program `program` (which must not have it yet).

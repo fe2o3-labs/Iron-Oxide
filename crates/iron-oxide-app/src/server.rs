@@ -270,10 +270,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn state(db: PgPool) -> AppState {
-        AppState {
-            config: Arc::new(auth::test_support::config()),
-            db,
-        }
+        AppState::new(Arc::new(auth::test_support::config()), db)
     }
 
     async fn get(router: Router, path: &str) -> (StatusCode, String) {

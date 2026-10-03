@@ -201,7 +201,7 @@ fn too_large() -> ApiError {
 /// [`UPLOAD_BODY_LIMIT`] with `413` before anything reads it (see
 /// [`body_limit::signed_in_and_capped`]).
 pub async fn limit_upload_body(request: Request, next: Next) -> Response {
-    body_limit::signed_in_and_capped(request, next, UPLOAD_BODY_LIMIT, too_large).await
+    body_limit::signed_in_and_capped(request, next, UPLOAD_BODY_LIMIT, too_large, None).await
 }
 
 fn view(program: programs::Program) -> Result<ProgramView, ApiError> {

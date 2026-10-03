@@ -1,17 +1,12 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT version, id FROM program_versions WHERE user_id = $1 AND program_id = $2",
+  "query": "SELECT version FROM program_versions WHERE user_id = $1 AND program_id = $2",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
         "name": "version",
         "type_info": "Int4"
-      },
-      {
-        "ordinal": 1,
-        "name": "id",
-        "type_info": "Uuid"
       }
     ],
     "parameters": {
@@ -21,9 +16,8 @@
       ]
     },
     "nullable": [
-      false,
       false
     ]
   },
-  "hash": "60fbdbdbc1d7f68b73d7f5cc099122ece9c9d17977628da72a529bf491b1b6c4"
+  "hash": "845f66679a0b5ff08b921c6758e984b3d1a80b3df43c84eb605de97127eeef96"
 }

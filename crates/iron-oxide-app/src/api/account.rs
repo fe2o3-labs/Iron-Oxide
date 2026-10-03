@@ -59,9 +59,9 @@ pub const MAX_EXPORT_BYTES: usize = 8 * 1024 * 1024;
 /// of [`MAX_EXPORT_BYTES`] can take up to twice as many bytes in the body.
 pub const IMPORT_BODY_LIMIT: usize = 2 * MAX_EXPORT_BYTES + 64 * 1024;
 
-/// How recent the sign-in must be for [`delete_account`]: 10 minutes. Signing in again (with a
-/// passkey or Google) restarts it.
-pub const DELETE_REAUTH_WINDOW_SECS: i64 = 10 * 60;
+/// How recent the sign-in must be for [`delete_account`] (and for adding a passkey or linking
+/// Google): 10 minutes. Signing in again (with a passkey or Google) restarts it.
+pub const DELETE_REAUTH_WINDOW_SECS: u64 = 10 * 60;
 
 /// Everything a user owns, as exported. See `docs/export-format.md` for every field.
 ///

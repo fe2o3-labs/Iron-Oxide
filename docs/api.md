@@ -54,6 +54,7 @@ logged, never returned.
 | `NotFound` | 404 | `Not found.` | No such row **among the caller's own**. Another user's id gives exactly the same answer as an id that does not exist. |
 | `Conflict(msg)` | 409 | `msg` | An id reused with different content, a session that has already ended |
 | `Invalid(msg)` | 422 | `msg` | Invalid input: a domain value, a program document, a database `CHECK` (`Invalid value.`) |
+| `InvalidProgramIn(message, problems)` | 422 | `message` | A program document inside a larger upload (an account import): the message names it and its first problem, and the `details` carry all of them as `ProgramProblems` |
 | `InvalidProgram(problems)` | 422 | `This program is not valid.` | An uploaded program document that does not parse or breaks a rule. `problems` (`ProgramProblems`) is sent as the error details, see [Programs](#programs-srcapiprogramsrs-19). |
 | `TooLarge(msg)` | 413 | `msg` | A request body or document past its size limit |
 | `Transient(detail)` | 503 | `The server is busy. Please try again.` | The same request can simply be retried: it may have been saved before a dropped connection, but every write is idempotent. Covers a concurrent write, a pool timeout, a dropped connection, a serialization failure or a deadlock. |
@@ -328,7 +329,7 @@ format, the import rules and the deletion are in [`docs/export-format.md`](expor
 | Function | Route | Arguments | Returns | Errors |
 |---|---|---|---|---|
 | `export_account_data` | `/api/account/export` | | `ExportDocument` | 413 past `MAX_EXPORT_BYTES` (8 MiB) |
-| `import_account_data` | `/api/account/import` | `document` (the export's JSON text) | `ImportSummary` (what was added) | 413 body or document too large; 422 not an export, unsupported `format_version`, invalid content (`InvalidProgram` problems for a program version); 403 over the plan's program limit |
+| `import_account_data` | `/api/account/import` | `document` (the export's JSON text) | `ImportSummary` (what was added) | 413 body or document too large; 422 not an export, unsupported `format_version`, invalid content (`InvalidProgramIn` for a program version); 403 over the plan's program limit; 503 with `Retry-After` when 2 imports already run |
 | `delete_account` | `/api/account/delete` | | `()`, and the cookie is cleared | 403 without a sign-in in the last 10 minutes |
 
 - **Import is idempotent.** Rows are matched by their keys and what the account already has wins:

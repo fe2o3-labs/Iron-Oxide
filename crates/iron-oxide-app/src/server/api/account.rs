@@ -24,16 +24,15 @@ use sqlx::{
 use super::{ApiError, body_limit, offset_date_time, settings, timestamp};
 use crate::api::{
     account::{
-        DELETE_REAUTH_WINDOW_SECS, EXPORT_FORMAT, EXPORT_FORMAT_VERSION, ExportAccount,
-        ExportDocument, ExportLinkedAccount, ExportPasskey, ExportProgram, ExportSession,
-        ExportSettings, ExportSignIn, ExportVersion, IMPORT_BODY_LIMIT, ImportSummary,
-        MAX_EXPORT_BYTES,
+        EXPORT_FORMAT, EXPORT_FORMAT_VERSION, ExportAccount, ExportDocument, ExportLinkedAccount,
+        ExportPasskey, ExportProgram, ExportSession, ExportSettings, ExportSignIn, ExportVersion,
+        IMPORT_BODY_LIMIT, ImportSummary, MAX_EXPORT_BYTES,
     },
     programs::{ProgramProblem, ProgramProblems},
     settings::{SettingsUpdate, TrainingMax},
 };
 use crate::server::{
-    auth::{AuthContext, AuthUser, session},
+    auth::{AuthContext, AuthError, AuthUser},
     billing,
     db::{self, account as repo, ids::UserId, settings::UserSettings},
     entitlements,
@@ -271,10 +270,21 @@ fn parse_status(name: &str) -> Result<SessionStatus, String> {
 
 // --- Import ------------------------------------------------------------------------------------
 
-/// Middleware of `import_account_data`: checks the session first, then refuses a body over
-/// [`IMPORT_BODY_LIMIT`] with `413` before anything reads it.
+/// How many imports one server process runs at once. Each holds its body (up to
+/// [`IMPORT_BODY_LIMIT`]), the decoded document and its parsed form: about 80 MB at the largest,
+/// on a 512 MB machine. A third concurrent import gets a retryable `503` with `Retry-After`
+/// before its body is read.
+pub const MAX_CONCURRENT_IMPORTS: usize = 2;
+
+/// Middleware of `import_account_data`: checks the session first, then takes one of the
+/// process's [`MAX_CONCURRENT_IMPORTS`] slots (`503` with `Retry-After` when none is free), then
+/// refuses a body over [`IMPORT_BODY_LIMIT`] with `413` before anything reads it.
 pub async fn limit_import_body(request: Request, next: Next) -> Response {
-    body_limit::signed_in_and_capped(request, next, IMPORT_BODY_LIMIT, too_large).await
+    let slots = request
+        .extensions()
+        .get::<crate::server::AppState>()
+        .map(|state| state.import_slots.clone());
+    body_limit::signed_in_and_capped(request, next, IMPORT_BODY_LIMIT, too_large, slots).await
 }
 
 fn too_large() -> ApiError {
@@ -455,7 +465,8 @@ impl Import {
                     })?;
                 let program_document =
                     Program::from_json(&version.document.to_string()).map_err(|error| {
-                        invalid_program(&format!("{}.document", at()), error.into())
+                        let at = format!("{}.document", at());
+                        invalid_program(&at, &program.name, version.version, error.into())
                     })?;
                 if parsed
                     .insert((creation, version.version), program_document)
@@ -649,20 +660,31 @@ impl Import {
                 }
             };
             program_ids.insert(program.creation_id, id);
-            let mut have: HashMap<i32, Uuid> = repo::version_ids(tx, owner, id)
+            // Versions are matched by content, never by number alone: the export's version N
+            // and the account's version N may differ (two copies of a program each edited on
+            // their own). An identical document is the same version; any other is added, under
+            // its own number if free, else the next free one. The export's sessions then point
+            // at the version with their document, so their day always exists in it.
+            repo::lock_program(tx, owner, id).await?;
+            let mut numbers: HashSet<i32> = repo::version_numbers(tx, owner, id)
                 .await?
                 .into_iter()
                 .collect();
             for (number, document, created_at) in &program.versions {
-                if !have.contains_key(number) {
-                    let version =
-                        repo::insert_version(tx, owner, id, *number, document, *created_at).await?;
-                    have.insert(*number, version);
-                    summary.versions += 1;
-                }
-            }
-            for (number, version) in have {
-                version_ids.insert((program.creation_id, number), version);
+                let version = match repo::version_with_document(tx, owner, id, document).await? {
+                    Some(version) => version,
+                    None => {
+                        let free = if numbers.contains(number) {
+                            numbers.iter().max().map_or(1, |max| max.saturating_add(1))
+                        } else {
+                            *number
+                        };
+                        numbers.insert(free);
+                        summary.versions += 1;
+                        repo::insert_version(tx, owner, id, free, document, *created_at).await?
+                    }
+                };
+                version_ids.insert((program.creation_id, *number), version);
             }
         }
 
@@ -713,47 +735,61 @@ fn nanograms(weight: Weight) -> i64 {
     i64::try_from(weight.as_nanograms()).unwrap_or(i64::MAX)
 }
 
-/// A `422` listing a program document's problems, with paths from the export's root.
-fn invalid_program(at: &str, problems: ProgramProblems) -> ApiError {
-    ApiError::InvalidProgram(ProgramProblems {
-        omitted: problems.omitted,
-        errors: problems
-            .errors
-            .into_iter()
-            .map(|problem| ProgramProblem {
-                path: match problem.path.as_str() {
-                    "" => at.to_owned(),
-                    path if path.starts_with('[') => format!("{at}{path}"),
-                    path => format!("{at}.{path}"),
-                },
-                message: problem.message,
-                // Positions in the re-serialized document would not match the file.
-                line: None,
-                column: None,
-            })
-            .collect(),
-    })
+/// A `422` listing a program document's problems, with paths from the export's root. The message
+/// names the program, the version and the first broken rule, so that a support case can be
+/// diagnosed from it alone: a stored version must always pass today's rules (a rule that is
+/// tightened ships with a migration that fixes the stored documents, decision of 2026-10-03 on
+/// #41), so this means a hand-edited file or a missing migration.
+fn invalid_program(at: &str, name: &str, version: u32, problems: ProgramProblems) -> ApiError {
+    let first = problems.errors.first().map_or_else(String::new, |problem| {
+        let path = if problem.path.is_empty() {
+            "the document".to_owned()
+        } else {
+            problem.path.clone()
+        };
+        format!(": {path}: {}", problem.message)
+    });
+    let name: String = name.chars().take(MAX_MESSAGE_CHARS).collect();
+    let message = format!(
+        "Program \"{name}\", version {version} ({at}), is not valid under this version of Iron \
+         Oxide's rules{first}."
+    );
+    ApiError::InvalidProgramIn(
+        Cow::Owned(message),
+        ProgramProblems {
+            omitted: problems.omitted,
+            errors: problems
+                .errors
+                .into_iter()
+                .map(|problem| ProgramProblem {
+                    path: match problem.path.as_str() {
+                        "" => at.to_owned(),
+                        path if path.starts_with('[') => format!("{at}{path}"),
+                        path => format!("{at}.{path}"),
+                    },
+                    message: problem.message,
+                    // Positions in the re-serialized document would not match the file.
+                    line: None,
+                    column: None,
+                })
+                .collect(),
+        },
+    )
 }
 
 // --- Deletion ----------------------------------------------------------------------------------
-
-/// Whether a sign-in at `signed_in_at` (Unix seconds) is recent enough at `now` to delete the
-/// account. A sign-in time in the future (clock skew, tampering) is not.
-fn signed_in_recently(signed_in_at: Option<i64>, now: i64) -> bool {
-    signed_in_at.is_some_and(|at| at <= now && now - at <= DELETE_REAUTH_WINDOW_SECS)
-}
 
 /// Deletes `user`'s account after checking that they signed in recently: cancels billing (a
 /// documented stub until Stripe is implemented), deletes the user and everything they own in one
 /// transaction (every sign-in session included), then clears this session's cookie.
 pub async fn delete(ctx: &AuthContext, user: AuthUser) -> Result<(), ApiError> {
-    let signed_in_at = ctx
-        .session
-        .get::<i64>(session::keys::SIGNED_IN_AT)
-        .await
-        .map_err(ApiError::internal)?;
-    if !signed_in_recently(signed_in_at, session::now_unix()) {
-        return Err(ApiError::Forbidden(Cow::Borrowed(REAUTHENTICATE)));
+    // The step-up shared with adding a sign-in method (see `require_recent_sign_in`).
+    match ctx.require_recent_sign_in().await {
+        Ok(()) => {}
+        Err(AuthError::ReauthenticationRequired) => {
+            return Err(ApiError::Forbidden(Cow::Borrowed(REAUTHENTICATE)));
+        }
+        Err(error) => return Err(error.into()),
     }
     let owner = user.owner();
     // Before anything is deleted: a failure keeps the account, so the user is never left billed

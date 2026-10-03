@@ -107,6 +107,11 @@ impl TestApi {
         (self.user("A").await, self.user("B").await)
     }
 
+    /// The app's account-import slots (#22).
+    pub fn import_slots(&self) -> std::sync::Arc<tokio::sync::Semaphore> {
+        self.app.import_slots.clone()
+    }
+
     /// A browser with no session.
     pub fn signed_out(&self) -> Browser {
         self.app.browser()
@@ -157,6 +162,14 @@ impl TestUser {
         self.browser
             .request("POST", path)
             .header(header::CONTENT_TYPE, "application/json")
+    }
+
+    /// Sends `request` and returns the whole response.
+    pub async fn send_response(
+        &mut self,
+        request: Request<Body>,
+    ) -> dioxus::server::axum::response::Response {
+        self.browser.send(request).await
     }
 
     /// Sends `request` and returns the status and the body, as JSON when it is JSON (as a JSON

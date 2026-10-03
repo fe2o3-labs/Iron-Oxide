@@ -91,7 +91,7 @@ The values use the API's types (`docs/api.md`):
 | `training_maxes` | One per exercise | Weight more than zero, one per exercise; added for exercises without one |
 | `programs` | The user's programs, archived ones too, oldest first, each with **all** its versions | See below |
 | `programs[].creation_id` | The program's key (the client idempotency key it was created with, unique per user) | Matches an existing program |
-| `programs[].versions[].document` | The `program.json` as stored | Must pass the domain's `Program::from_json` (`422` with the problems, their paths starting at `programs[i].versions[j].document`) |
+| `programs[].versions[].document` | The `program.json` as stored | Must pass the domain's `Program::from_json`. Otherwise `422`: the message names the program, the version and the first broken rule, and the details list every problem, with paths starting at `programs[i].versions[j].document` |
 | `active_program` | The `creation_id` of the active program, or `null` | Must be an unarchived program of the export; set only if the account has no active program |
 | `sessions` | Every workout session, oldest first | See below |
 | `sessions[].program`, `.version` | The session's program (`creation_id`) and version number | Must be a version in the export, and `day` one of its days |
@@ -116,6 +116,10 @@ and where it goes. A new table fails the test until it is added there and here.
    since the file travels as a JSON string). The session is checked before the body is read, so a
    signed-out request gets `401` without uploading anything. The document itself is capped at
    `MAX_EXPORT_BYTES` (8 MiB). Both give `413`.
+   - **At most 2 imports at once per server process** (`MAX_CONCURRENT_IMPORTS`): each holds its
+     body, the decoded text and the parsed document, about 80 MB at the largest, on a 512 MB
+     machine. A third gets `503` with `Retry-After: 5`, after the session check and before its body
+     is read. It is retryable, like every `503`.
 2. **Version, then content.** All of the document is validated before anything is written:
    - the domain types: slugs, weights, reps;
    - the domain validators: program documents, settings;
@@ -127,8 +131,15 @@ and where it goes. A new table fails the test until it is added there and here.
    Any failure is `422` and nothing is written. Sets are **not** checked against their session's
    time span: stored sets may fall outside it (see `docs/api.md`), and every export must import
    back.
+
+   **Stored versions always pass today's rules.** A change that tightens a program rule ships a
+   migration that fixes the stored documents (decision of 2026-10-03 on #41), so every export
+   imports back. A version refused on import therefore means a hand-edited file or a missing
+   migration, and the `422` message says which version and which rule, for support.
 3. **One transaction.** It starts by locking the user's row, like every quota write
-   (`docs/billing.md`), so concurrent imports of one user run one after the other.
+   (`docs/billing.md`), so concurrent imports of one user run one after the other. Each existing
+   program's row is locked too (`FOR UPDATE`, as `add_version` does) before its versions are read,
+   so an upload of a version at the same moment waits instead of taking a number the import uses.
 4. **Quota: refused, never trimmed.**
    - New unarchived programs count toward the plan's `CustomPrograms` limit. Programs the account
      already has, and archived ones, take no slot.
@@ -144,7 +155,7 @@ and where it goes. A new table fails the test until it is added there and here.
    | Settings | the user | kept |
    | Training max | exercise id | kept |
    | Program | `creation_id` | kept (name, archived flag), and gets the export's versions it does not have |
-   | Program version | program and version number | kept: the export's sessions of that version then refer to the account's version |
+   | Program version | content (`jsonb` equality), **never the number alone** | an identical document is the same version. A different document is added as a new version: under its own number if the program does not use it, else the next free one. The export's sessions of that version point at it, so their day always exists in their version. |
    | Active program | the user | kept |
    | Session | session id | kept, with its own sets (the export's sets of that session are not added) |
    | Session in progress | at most one per user | if the account already has another one in progress, the export's one is skipped with its sets |
@@ -182,6 +193,14 @@ documents each one.
 - **A fresh sign-in is the confirmation.** The session must have signed in within the last 10
   minutes (`DELETE_REAUTH_WINDOW_SECS`), otherwise `403 To delete your account, sign in again
   first.` The UI then asks for a passkey or Google sign-in and retries.
+  - The time is the session's sign-in (`auth.signed_in_at`). Only a sign-in writes it: a passkey
+    or Google sign-in (a credential the account had before this session started) or the sign-up.
+  - **Adding a sign-in method needs the same step-up** (`AuthContext::require_recent_sign_in`):
+    starting and finishing a passkey registration, starting a Google link and completing it in the
+    callback. Otherwise a stale session (a stolen cookie, a forgotten tab) could add its own
+    passkey or Google account, sign in afresh with it and delete the account.
+  - Adding a method never signs in again, so a credential added in a session never makes that
+    session fresh.
   - A stolen session cookie, or a page left open, cannot delete the account.
   - The CSRF check refuses cross-site requests.
 - **Billing first.** `server::billing::cancel_before_account_deletion` runs before anything is
