@@ -1,15 +1,20 @@
 //! Preferences of this device only (#34): the weight step of the steppers and vibration.
 //!
 //! The server's settings (`crate::api::settings`) have no field for them, so they live in the
-//! browser's `localStorage` and do not follow the user to another device. A missing, unreadable or
-//! outdated entry gives the defaults; nothing here can fail.
+//! browser's `localStorage`, under a key per user, and do not follow the user to another device.
+//! Signing out removes them. A missing, unreadable or outdated entry gives the defaults; nothing
+//! here can fail.
 
 use dioxus::prelude::*;
 use iron_oxide_domain::{Unit, Weight};
 use serde::{Deserialize, Serialize};
 
-/// The `localStorage` key. Bump the version suffix if the shape changes incompatibly.
-const STORAGE_KEY: &str = "iron-oxide.device-prefs.v1";
+use super::user_settings::UserSettings;
+use crate::auth::types::UserId;
+
+/// The start of the `localStorage` keys, one per user (`….<user id>`). Bump the version if the
+/// shape changes incompatibly.
+const STORAGE_KEY_PREFIX: &str = "iron-oxide.device-prefs.v1";
 
 /// The weight steps offered, per unit, lightest first.
 #[must_use]
@@ -96,28 +101,79 @@ impl DevicePrefs {
     }
 }
 
-/// Provides this device's preferences. Called once, by the app root. They are read from storage
-/// on the client after the first render, so the server-rendered page and hydration match.
-pub fn use_device_prefs_provider() -> Signal<DevicePrefs> {
-    let mut prefs = use_context_provider(|| Signal::new(DevicePrefs::default()));
-    use_effect(move || {
-        if cfg!(feature = "web") {
-            prefs.set(DevicePrefs::parse(storage::read(STORAGE_KEY).as_deref()));
-        }
-    });
-    prefs
-}
-
-/// This device's preferences, to read or to change with [`save_device_prefs`].
+/// The storage key of `user`'s preferences on this device.
 #[must_use]
-pub fn use_device_prefs() -> Signal<DevicePrefs> {
-    use_context::<Signal<DevicePrefs>>()
+pub fn storage_key(user: UserId) -> String {
+    format!("{STORAGE_KEY_PREFIX}.{user}")
 }
 
-/// Changes this device's preferences and stores them.
-pub fn save_device_prefs(mut prefs: Signal<DevicePrefs>, new: DevicePrefs) {
-    prefs.set(new);
-    storage::write(STORAGE_KEY, &new.to_stored());
+/// This device's preferences for the signed-in user. `Copy`.
+#[derive(Clone, Copy, PartialEq)]
+pub struct DevicePrefsHandle {
+    prefs: Signal<DevicePrefs>,
+    user: Signal<Option<UserId>>,
+}
+
+impl DevicePrefsHandle {
+    /// The preferences (the defaults while signed out).
+    #[must_use]
+    pub fn get(&self) -> DevicePrefs {
+        *self.prefs.read()
+    }
+
+    /// The preferences without subscribing (for event handlers).
+    #[must_use]
+    pub fn peek(&self) -> DevicePrefs {
+        *self.prefs.peek()
+    }
+
+    /// Changes the preferences and stores them for the signed-in user.
+    pub fn save(self, new: DevicePrefs) {
+        let mut prefs = self.prefs;
+        prefs.set(new);
+        if let Some(user) = *self.user.peek() {
+            storage::write(&storage_key(user), &new.to_stored());
+        }
+    }
+}
+
+/// Provides this device's preferences, per user: loaded when the user's settings are (that is when
+/// the app knows who is signed in), back to the defaults and removed from this device on sign-out.
+/// Called once, by the app root, after the settings.
+pub fn use_device_prefs_provider(settings: UserSettings) -> DevicePrefsHandle {
+    let handle = DevicePrefsHandle {
+        prefs: use_signal(DevicePrefs::default),
+        user: use_signal(|| None),
+    };
+    use_context_provider(|| handle);
+    // Client only, so the server-rendered page and hydration match.
+    use_effect(move || {
+        if !cfg!(feature = "web") {
+            return;
+        }
+        let user = settings.user();
+        let previous = *handle.user.peek();
+        if user == previous {
+            return;
+        }
+        let (mut prefs, mut current) = (handle.prefs, handle.user);
+        if let (None, Some(previous)) = (user, previous) {
+            // Signed out: nothing of theirs stays on this device.
+            storage::remove(&storage_key(previous));
+        }
+        current.set(user);
+        prefs.set(match user {
+            Some(user) => DevicePrefs::parse(storage::read(&storage_key(user)).as_deref()),
+            None => DevicePrefs::default(),
+        });
+    });
+    handle
+}
+
+/// This device's preferences for the signed-in user.
+#[must_use]
+pub fn use_device_prefs() -> DevicePrefsHandle {
+    use_context::<DevicePrefsHandle>()
 }
 
 /// `localStorage`, best effort: private modes and full quotas only lose the preference.
@@ -137,6 +193,12 @@ mod storage {
             let _ = storage.set_item(key, value);
         }
     }
+
+    pub fn remove(key: &str) {
+        if let Some(storage) = local_storage() {
+            let _ = storage.remove_item(key);
+        }
+    }
 }
 
 /// No storage outside the browser.
@@ -147,6 +209,8 @@ mod storage {
     }
 
     pub const fn write(_key: &str, _value: &str) {}
+
+    pub const fn remove(_key: &str) {}
 }
 
 #[cfg(test)]
@@ -196,6 +260,15 @@ mod tests {
             DevicePrefs::default()
         );
         assert!(!DevicePrefs::parse(Some(r#"{"vibration": false}"#)).vibration);
+    }
+
+    #[test]
+    fn each_user_has_their_own_key() {
+        let a = UserId::from_uuid(uuid::Uuid::from_u128(1));
+        let b = UserId::from_uuid(uuid::Uuid::from_u128(2));
+        assert_ne!(storage_key(a), storage_key(b));
+        assert!(storage_key(a).starts_with("iron-oxide.device-prefs.v1."));
+        assert!(storage_key(a).ends_with(&a.to_string()));
     }
 
     #[test]
