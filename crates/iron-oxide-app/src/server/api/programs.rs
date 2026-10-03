@@ -2,25 +2,15 @@
 
 use std::borrow::Cow;
 
-use dioxus::logger::tracing;
-use dioxus::prelude::ServerFnError;
-use dioxus::server::axum::{
-    Json,
-    body::{Body, to_bytes},
-    extract::{FromRequestParts, Request},
-    http::{StatusCode, header::CONTENT_LENGTH},
-    middleware::Next,
-    response::{IntoResponse, Response},
-};
+use dioxus::server::axum::{extract::Request, middleware::Next, response::Response};
 use iron_oxide_domain::{
     CreationId, ProgramId,
     entitlements::Quota,
     program::{BuiltinProgramId, Program, limits::MAX_DOCUMENT_BYTES},
 };
-use serde_json::json;
 use sqlx::{PgConnection, PgPool, types::JsonValue};
 
-use super::{ApiError, timestamp};
+use super::{ApiError, body_limit, timestamp};
 use crate::api::programs::{
     BuiltinProgramView, ProgramDetail, ProgramView, UPLOAD_BODY_LIMIT, UploadOutcome, UploadTarget,
     VersionView,
@@ -207,48 +197,11 @@ fn too_large() -> ApiError {
     )))
 }
 
-/// Middleware of `upload_program`: checks the session first, so a signed-out client gets its
-/// `401` without the server reading (up to [`UPLOAD_BODY_LIMIT`] of) its body. Then reads the whole
-/// body before the server function does, and refuses it with `413` past the limit, announced
-/// (`Content-Length`) or actually sent.
-///
-/// Dioxus reads a server function's body itself and panics when that fails (axum's 2 MiB default
-/// limit, a broken connection), so the body it gets here is already complete and within the limit.
-/// The server function's own `AuthUser` looks the session up again; that is the price of refusing
-/// early.
+/// Middleware of `upload_program`: checks the session first, then refuses a body over
+/// [`UPLOAD_BODY_LIMIT`] with `413` before anything reads it (see
+/// [`body_limit::signed_in_and_capped`]).
 pub async fn limit_upload_body(request: Request, next: Next) -> Response {
-    let (mut parts, body) = request.into_parts();
-    if let Err(rejection) = AuthUser::from_request_parts(&mut parts, &()).await {
-        return rejection;
-    }
-    let announced = parts
-        .headers
-        .get(CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok());
-    if announced.is_some_and(|length| length > UPLOAD_BODY_LIMIT as u64) {
-        return refuse("announced body too large");
-    }
-    match to_bytes(body, UPLOAD_BODY_LIMIT).await {
-        Ok(bytes) => {
-            next.run(Request::from_parts(parts, Body::from(bytes)))
-                .await
-        }
-        // Over the limit, or unreadable (the client went away: nobody reads the answer).
-        Err(error) => {
-            tracing::info!(%error, "program upload body not read");
-            refuse("body too large or unreadable")
-        }
-    }
-}
-
-/// A `413`, in the shape Dioxus gives the errors a server function returns (so the client decodes
-/// it the same way): `{"message", "code", "data": <the ServerFnError>}`.
-fn refuse(reason: &'static str) -> Response {
-    tracing::info!(reason, "program upload refused");
-    let error = ServerFnError::from(too_large());
-    let body = json!({ "message": error.to_string(), "code": 413, "data": error });
-    (StatusCode::PAYLOAD_TOO_LARGE, Json(body)).into_response()
+    body_limit::signed_in_and_capped(request, next, UPLOAD_BODY_LIMIT, too_large).await
 }
 
 fn view(program: programs::Program) -> Result<ProgramView, ApiError> {

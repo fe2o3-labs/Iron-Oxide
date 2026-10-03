@@ -320,6 +320,29 @@ Epley formula.
   few seconds, which only matters if a set was logged in between. The weight must be more than
   zero.
 
+## Account data (`src/api/account.rs`, #22)
+
+The user's GDPR rights: export everything they own, import such an export, delete the account. The
+format, the import rules and the deletion are in [`docs/export-format.md`](export-format.md).
+
+| Function | Route | Arguments | Returns | Errors |
+|---|---|---|---|---|
+| `export_account_data` | `/api/account/export` | | `ExportDocument` | 413 past `MAX_EXPORT_BYTES` (8 MiB) |
+| `import_account_data` | `/api/account/import` | `document` (the export's JSON text) | `ImportSummary` (what was added) | 413 body or document too large; 422 not an export, unsupported `format_version`, invalid content (`InvalidProgram` problems for a program version); 403 over the plan's program limit |
+| `delete_account` | `/api/account/delete` | | `()`, and the cookie is cleared | 403 without a sign-in in the last 10 minutes |
+
+- **Import is idempotent.** Rows are matched by their keys and what the account already has wins:
+  the same export imported twice adds nothing the second time.
+- **Import body.** As for uploads, a middleware checks the session, then caps the body
+  (`IMPORT_BODY_LIMIT`), before anything reads it. The route also raises axum's 2 MiB
+  `DefaultBodyLimit`, so a large export imports instead of panicking in Dioxus' extractor. The
+  shared middleware is `server::api::body_limit::signed_in_and_capped`.
+- **Isolation.** Every read and write is scoped to the session's user. An export never contains
+  another user's rows. Importing someone else's export gives the importer their own copies (new
+  program ids) and never touches the owner's rows. The tests are the `another_users_*` in
+  `server::api::account::tests`.
+- **Rate limits.** The three routes share the `account_data` group (`docs/rate-limiting.md`).
+
 ## Programs (`src/api/programs.rs`, #19)
 
 Every function is a `POST` that needs a signed-in user and only reads or changes that user's

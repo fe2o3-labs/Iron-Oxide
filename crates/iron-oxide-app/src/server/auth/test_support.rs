@@ -181,7 +181,8 @@ impl Browser {
             .unwrap();
         let response = self.send(request).await;
         let status = response.status();
-        let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        // Room for a large account export (#22).
+        let bytes = to_bytes(response.into_body(), 1 << 26).await.unwrap();
         (status, bytes.to_vec())
     }
 

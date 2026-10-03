@@ -15,6 +15,7 @@ use sqlx::{
 
 use super::config::DatabaseUrl;
 
+pub mod account;
 // The repository: typed queries over the training tables. Every function that reads or writes a
 // user's data takes the caller's `UserId` and scopes every query by it (docs/database.md).
 #[allow(dead_code, reason = "called by the server functions of #18-#22")]
