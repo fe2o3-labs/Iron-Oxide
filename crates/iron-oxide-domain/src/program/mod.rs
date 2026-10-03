@@ -67,10 +67,15 @@ pub const PROGRAM_SCHEMA_URL: &str =
 /// old owner's name may appear.
 pub const LEGACY_PROGRAM_SCHEMA_URL: &str = "https://raw.githubusercontent.com/guizmaii-opensource/Iron-Oxide/main/schemas/program.schema.json";
 
+/// Where the AI prompt points assistants to the schema: the copy the website publishes
+/// (iron-oxyde.com), so the prompt names no code host. The prompt tells the assistant to leave
+/// `$schema` out, which [`Program::from_json`] accepts.
+pub const AI_PROMPT_SCHEMA_URL: &str = "https://iron-oxyde.com/program.schema.json";
+
 /// The prompt a user gives their own AI assistant (ChatGPT, Claude, Gemini…) so it interviews
 /// them and writes a program in this format (#108). Plain text, versioned in
 /// `programs/ai-prompt.md`; the app and the landing page both use it. It names
-/// [`PROGRAM_SCHEMA_URL`] and holds a short example that passes [`Program::from_json`] (tested).
+/// [`AI_PROMPT_SCHEMA_URL`] and holds a short example that passes [`Program::from_json`] (tested).
 pub const AI_PROMPT: &str = include_str!("../../../../programs/ai-prompt.md");
 
 /// The program JSON Schema, as committed in `schemas/program.schema.json`.

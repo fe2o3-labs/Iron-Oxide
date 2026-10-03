@@ -13,8 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use iron_oxide_domain::program::{
-    AI_PROMPT, PROGRAM_SCHEMA_JSON, PROGRAM_SCHEMA_URL, Program, ProgramError, ValidationErrorKind,
-    builtin_programs, extract_json, limits,
+    AI_PROMPT, AI_PROMPT_SCHEMA_URL, PROGRAM_SCHEMA_JSON, Program, ProgramError,
+    ValidationErrorKind, builtin_programs, extract_json, limits,
 };
 use serde_json::Value;
 
@@ -119,7 +119,9 @@ fn ai_written_examples_are_valid_and_extracted_from_the_raw_answers() {
 /// `{` alone on its line to the next `}` alone on its line.
 #[test]
 fn the_ai_prompt_names_the_schema_and_its_example_is_valid() {
-    assert!(AI_PROMPT.contains(PROGRAM_SCHEMA_URL));
+    assert!(AI_PROMPT.contains(AI_PROMPT_SCHEMA_URL));
+    // No code-host URL: the prompt is shown to users and on the website.
+    assert!(!AI_PROMPT.to_lowercase().contains("github"), "{AI_PROMPT}");
     let lines: Vec<&str> = AI_PROMPT.lines().collect();
     let start = lines.iter().position(|line| *line == "{").unwrap();
     let end = start + lines[start..].iter().position(|line| *line == "}").unwrap();
@@ -130,6 +132,9 @@ fn the_ai_prompt_names_the_schema_and_its_example_is_valid() {
         Vec::<String>::new()
     );
     assert_eq!(program.rotation.len(), program.days.len());
+    // The prompt asks for documents without `$schema`, and they are valid.
+    assert!(!example.contains("$schema"));
+    assert_eq!(program.schema, None);
 }
 
 fn check_snapshot(path: &Path, actual: &str) {

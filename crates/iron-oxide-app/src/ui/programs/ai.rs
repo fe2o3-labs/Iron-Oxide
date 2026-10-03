@@ -592,7 +592,7 @@ fn SavedCard(state: Programs, saved: Saved, target: Option<ProgramId>, active: b
 
 #[cfg(test)]
 mod tests {
-    use iron_oxide_domain::program::PROGRAM_SCHEMA_URL;
+    use iron_oxide_domain::program::AI_PROMPT_SCHEMA_URL;
 
     use super::*;
     use crate::api::programs::ProgramProblem;
@@ -701,7 +701,7 @@ mod tests {
     fn the_prompt_names_the_schema_and_can_carry_the_current_program() {
         let fresh = prompt_for(None);
         assert_eq!(fresh, AI_PROMPT);
-        assert!(fresh.contains(PROGRAM_SCHEMA_URL));
+        assert!(fresh.contains(AI_PROMPT_SCHEMA_URL));
         let change = prompt_for(Some(VALID));
         assert!(change.starts_with(AI_PROMPT.trim_end()));
         assert!(change.contains("MY CURRENT PROGRAM"));

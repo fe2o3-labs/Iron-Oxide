@@ -23,11 +23,10 @@ Choose starting loads on the light side: I can add weight faster than I can reco
 THE FORMAT
 
 The JSON Schema is published at:
-https://raw.githubusercontent.com/fe2o3-labs/Iron-Oxide/main/schemas/program.schema.json
+https://iron-oxyde.com/program.schema.json
 If you cannot open it, the rules below are enough. The app checks every one of them and refuses the whole program if one is broken.
 
-Top level, exactly these fields:
-- "$schema": the URL above (optional).
+Top level, exactly these fields (leave out "$schema"):
 - "schema_version": 1
 - "name": the program's name.
 - "description": optional text, up to 2000 characters.
@@ -65,7 +64,6 @@ No other fields anywhere: unknown fields are refused. Don't add "demo_url" links
 A SHORT EXAMPLE (a real program should fit my answers and have more exercises):
 
 {
-  "$schema": "https://raw.githubusercontent.com/fe2o3-labs/Iron-Oxide/main/schemas/program.schema.json",
   "schema_version": 1,
   "name": "Two-day starter",
   "description": "Two full-body sessions a week, at least one rest day between them.",
