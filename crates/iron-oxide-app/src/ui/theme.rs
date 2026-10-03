@@ -77,7 +77,9 @@ mod tests {
         let mut rest = css.as_str();
         while let Some(start) = rest.find("/*") {
             text.push_str(&rest[..start]);
-            let end = rest[start..].find("*/").map_or(rest.len(), |end| start + end + 2);
+            let end = rest[start..]
+                .find("*/")
+                .map_or(rest.len(), |end| start + end + 2);
             text.extend(rest[start..end].chars().filter(|&c| c == '\n'));
             rest = &rest[end..];
         }
@@ -102,7 +104,11 @@ mod tests {
                         selector.clear();
                     }
                     '}' => {
-                        assert!(open.pop().is_some(), "stray `}}` at line {}", line_index + 1);
+                        assert!(
+                            open.pop().is_some(),
+                            "stray `}}` at line {}",
+                            line_index + 1
+                        );
                         selector.clear();
                     }
                     ';' => selector.clear(),
