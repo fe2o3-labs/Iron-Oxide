@@ -21,6 +21,7 @@ use crate::auth::browser::{
 use crate::auth::types::{
     GoogleCallbackMessage, GoogleIntent, MAX_NAME_CHARS, Me, PasskeyId, PasskeyInfo, normalize_name,
 };
+use crate::offline::use_outbox;
 
 /// How often the app re-checks `me()` while waiting for Google. The popup's `done` message is the
 /// fast path; this catches a popup that finished in the app's cookie jar without the message
@@ -252,6 +253,14 @@ pub fn Account() -> Element {
     use_effect(move || {
         if cfg!(feature = "web") {
             spawn(auth.load());
+        }
+    });
+
+    // The outbox (#30) sends the signed-in user's writes.
+    let outbox = use_outbox();
+    use_effect(move || {
+        if let AccountState::SignedIn(me) = &*auth.state.read() {
+            outbox.signed_in(me.user_id);
         }
     });
 
@@ -600,6 +609,8 @@ fn SignedIn(auth: Auth, me: Me) -> Element {
         });
     };
 
+    let outbox = use_outbox();
+    let user_id = me.user_id;
     let do_sign_out = move |_| {
         if !auth.start(Busy::SignOut) {
             return;
@@ -608,12 +619,14 @@ fn SignedIn(auth: Auth, me: Me) -> Element {
             let mut auth = auth;
             match sign_out().await {
                 Ok(()) => {
+                    outbox.signed_out(user_id);
                     auth.state.set(AccountState::SignedOut);
                     auth.notice
                         .set(Some(Notice::Info("You are signed out.".to_owned())));
                     auth.busy.set(None);
                 }
                 Err(error) if is_signed_out_error(&error) => {
+                    outbox.signed_out(user_id);
                     auth.state.set(AccountState::SignedOut);
                     auth.busy.set(None);
                 }

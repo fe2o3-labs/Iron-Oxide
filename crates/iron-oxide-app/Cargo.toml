@@ -31,6 +31,7 @@ web-sys = { workspace = true, optional = true, features = [
   "MessageEvent",
   "Navigator",
   "PublicKeyCredential",
+  "Storage",
   "Window",
 ] }
 

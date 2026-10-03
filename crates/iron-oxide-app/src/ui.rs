@@ -1,6 +1,7 @@
 //! User interface components.
 
 mod account;
+pub mod unsaved;
 
 use dioxus::CapturedError;
 use dioxus::fullstack::RequestError;
@@ -19,6 +20,7 @@ const AUTH_CSS: Asset = asset!("/assets/auth.css");
 #[component]
 pub fn App() -> Element {
     let mut time = use_action(server_time);
+    crate::offline::use_outbox_provider();
 
     rsx! {
         document::Title { "Iron Oxide" }
@@ -26,6 +28,7 @@ pub fn App() -> Element {
         document::Meta { name: "viewport", content: "width=device-width, initial-scale=1" }
         document::Stylesheet { href: TOKENS_CSS }
         document::Stylesheet { href: AUTH_CSS }
+        unsaved::Unsaved {}
         main { class: "io-app",
             header { class: "io-header",
                 h1 { "Iron Oxide" }
