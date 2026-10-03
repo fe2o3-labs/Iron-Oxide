@@ -355,12 +355,12 @@ pub fn clock_text(left: Duration) -> String {
 /// yet, skipped exercises left out), or `None` for no rest timer:
 /// - none after the last set of the day, nor after a warm-up (warm-ups lead straight into the
 ///   next set);
-/// - in a superset, when `next` is another member's working set, the member's own rest is the
-///   transition (often 0: none);
-/// - otherwise, in a superset (the round is over, or the other members were skipped), the
-///   superset's rest: its last member's, or the member's own when that one is 0;
-/// - outside a superset, the exercise's rest;
-/// - a rest of 0 there takes the user's default rest.
+/// - in a superset, a round ends after its last member not skipped. Inside a round (`next` is a
+///   later member's working set) there is no rest, unless the program gives the member an
+///   explicit rest above 0. Between rounds, and after the superset, the superset's rest: its last
+///   member's when above 0, else the user's default. Skipped members never move the round
+///   boundaries: they are only left out of `next`;
+/// - outside a superset, the exercise's rest, or the user's default when the program says 0.
 #[must_use]
 pub fn rest_after(
     plan: &SessionPlan,
@@ -375,24 +375,18 @@ pub fn rest_after(
         return None;
     }
     let exercise = &plan.exercises[step.exercise].exercise;
-    let rest = match &exercise.superset {
-        Some(label) => {
-            let same_group = next.exercise != step.exercise
-                && !next.warm_up
-                && plan.exercises[next.exercise].exercise.superset.as_ref() == Some(label)
-                && group_of(plan, step.exercise).contains(&next.exercise);
-            if same_group {
-                return (!exercise.rest.is_zero()).then_some(exercise.rest);
-            }
-            let last = group_of(plan, step.exercise).end - 1;
-            let group_rest = plan.exercises[last].exercise.rest;
-            if group_rest.is_zero() {
-                exercise.rest
-            } else {
-                group_rest
-            }
+    let rest = if exercise.superset.is_some() {
+        let group = group_of(plan, step.exercise);
+        // A later member of the same group: the round goes on. The same or an earlier member: a
+        // new round. Anything else: the superset is over.
+        let within_round =
+            !next.warm_up && next.exercise > step.exercise && group.contains(&next.exercise);
+        if within_round {
+            return (!exercise.rest.is_zero()).then_some(exercise.rest);
         }
-        None => exercise.rest,
+        plan.exercises[group.end - 1].exercise.rest
+    } else {
+        exercise.rest
     };
     Some(if rest.is_zero() { default_rest } else { rest }).filter(|rest| !rest.is_zero())
 }
@@ -1221,6 +1215,84 @@ mod tests {
         let press: BTreeSet<ExerciseId> = [ExerciseId::new("press").unwrap()].into();
         let chin = vec![logged("chin-up", false, 0, 0.0, 3_000)];
         let next = current_step(&steps, &plan, &chin, &press);
+        assert_eq!(
+            rest_after(&plan, &steps, 2, next, Seconds::new(120)),
+            Some(Seconds::new(90))
+        );
+    }
+
+    /// Re-check of #99: a last member with rest 0 still rests between rounds (the default).
+    #[test]
+    fn last_member_rest_zero_takes_default() {
+        let mut plan = superset_day();
+        plan.exercises[1].exercise.rest = Seconds::new(0); // chin-up, the last member
+        let steps = steps(&plan, kg(20.0));
+        // [press wu, press 1, chin 1, press 2, chin 2, curl 1]: after chin 1, before press 2.
+        assert_eq!(
+            rest_after(&plan, &steps, 2, Some(3), Seconds::new(120)),
+            Some(Seconds::new(120))
+        );
+        // And after the superset, before curl.
+        assert_eq!(
+            rest_after(&plan, &steps, 4, Some(5), Seconds::new(120)),
+            Some(Seconds::new(120))
+        );
+        // Inside the round, still none.
+        assert_eq!(
+            rest_after(&plan, &steps, 1, Some(2), Seconds::new(120)),
+            None
+        );
+    }
+
+    fn three_member_day() -> SessionPlan {
+        let mut press = planned("press", 0, 2, Some("a"));
+        press.exercise.rest = Seconds::new(0);
+        let mut row = planned("row", 0, 2, Some("a"));
+        row.exercise.rest = Seconds::new(0);
+        let mut chin = planned("chin-up", 0, 2, Some("a"));
+        chin.exercise.rest = Seconds::new(90);
+        plan(vec![press, row, chin])
+    }
+
+    /// Re-check of #99: with the last member skipped, the round ends after the one before it.
+    #[test]
+    fn three_members_last_skipped() {
+        let plan = three_member_day();
+        let steps = steps(&plan, kg(20.0));
+        let skipped: BTreeSet<ExerciseId> = [ExerciseId::new("chin-up").unwrap()].into();
+        let sets = vec![
+            logged("press", false, 0, 100.0, 2_000),
+            logged("row", false, 0, 100.0, 3_000),
+        ];
+        let next = current_step(&steps, &plan, &sets, &skipped); // press 2
+        assert_eq!(next, Some(3));
+        assert_eq!(
+            rest_after(&plan, &steps, 1, next, Seconds::new(120)),
+            Some(Seconds::new(90))
+        );
+        // press 1 → row 1 stays a transition.
+        let first = vec![logged("press", false, 0, 100.0, 2_000)];
+        let next = current_step(&steps, &plan, &first, &skipped);
+        assert_eq!(rest_after(&plan, &steps, 0, next, Seconds::new(120)), None);
+    }
+
+    /// A skipped middle member does not move the round: press → chin-up inside, rest after chin-up.
+    #[test]
+    fn three_members_middle_skipped() {
+        let plan = three_member_day();
+        let steps = steps(&plan, kg(20.0));
+        // [press 1, row 1, chin 1, press 2, row 2, chin 2]
+        let skipped: BTreeSet<ExerciseId> = [ExerciseId::new("row").unwrap()].into();
+        let press = vec![logged("press", false, 0, 100.0, 2_000)];
+        let next = current_step(&steps, &plan, &press, &skipped);
+        assert_eq!(next, Some(2));
+        assert_eq!(rest_after(&plan, &steps, 0, next, Seconds::new(120)), None);
+        let chin = vec![
+            logged("press", false, 0, 100.0, 2_000),
+            logged("chin-up", false, 0, 0.0, 3_000),
+        ];
+        let next = current_step(&steps, &plan, &chin, &skipped);
+        assert_eq!(next, Some(3));
         assert_eq!(
             rest_after(&plan, &steps, 2, next, Seconds::new(120)),
             Some(Seconds::new(90))
