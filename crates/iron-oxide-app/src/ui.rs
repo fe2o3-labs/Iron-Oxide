@@ -5,6 +5,7 @@
 //! - `components`: the reusable components.
 //! - `errors`: the banner every server error is reported to.
 //! - `weight`: weights in the user's unit.
+//! - `session`: the workout session screens (#28).
 
 mod account;
 #[cfg_attr(
@@ -27,6 +28,7 @@ mod components;
 mod errors;
 #[cfg(debug_assertions)]
 mod gallery;
+mod session;
 mod shell;
 pub(crate) mod theme;
 #[cfg_attr(
