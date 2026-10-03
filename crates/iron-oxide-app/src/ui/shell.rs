@@ -11,6 +11,7 @@ use super::account::Account;
 use super::components::icons::{HistoryIcon, HomeIcon, ProgramsIcon, SettingsIcon};
 use super::components::{Card, EmptyState, LoadingState};
 use super::errors::use_errors;
+use super::plates::PlateTool;
 use crate::auth::api::{is_unauthorized, me};
 
 /// The app's pages. Home, History, Programs and Settings are filled by their own tickets.
@@ -26,6 +27,8 @@ pub enum Route {
         Programs {},
         #[route("/settings")]
         Settings {},
+        #[route("/tools/plates")]
+        PlateTool {},
         #[route("/:..segments")]
         NotFound { segments: Vec<String> },
     #[end_layout]
@@ -277,6 +280,7 @@ mod tests {
         assert_eq!(Route::History {}.to_string(), "/history");
         assert_eq!(Route::Programs {}.to_string(), "/programs");
         assert_eq!(Route::Settings {}.to_string(), "/settings");
+        assert_eq!(Route::PlateTool {}.to_string(), "/tools/plates");
         assert_eq!(Route::Gallery {}.to_string(), "/dev/components");
         assert_eq!("/history".parse::<Route>().unwrap(), Route::History {});
         assert_eq!(

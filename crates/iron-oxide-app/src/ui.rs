@@ -5,6 +5,7 @@
 //! - `components`: the reusable components.
 //! - `errors`: the banner every server error is reported to.
 //! - `weight`: weights in the user's unit.
+//! - `plates`: the plate calculator (inline, as a sheet, and the `/tools/plates` page).
 
 mod account;
 #[cfg_attr(
@@ -27,6 +28,7 @@ mod components;
 mod errors;
 #[cfg(debug_assertions)]
 mod gallery;
+mod plates;
 mod shell;
 pub(crate) mod theme;
 #[cfg_attr(
