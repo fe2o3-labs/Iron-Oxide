@@ -9,6 +9,7 @@
 //! - `settings`: the Settings page.
 //! - `prefs`: preferences kept on this device only.
 //! - `programs`: the Programs page.
+//! - `history`: the history screens (#33).
 
 mod account;
 #[cfg_attr(
@@ -31,11 +32,13 @@ mod components;
 mod errors;
 #[cfg(debug_assertions)]
 mod gallery;
+mod history;
 mod prefs;
 mod programs;
 mod settings;
 mod shell;
 pub(crate) mod theme;
+pub mod unsaved;
 mod user_settings;
 #[cfg_attr(
     not(debug_assertions),
@@ -62,6 +65,7 @@ pub fn App() -> Element {
     let settings = user_settings::use_settings_provider(unit);
     prefs::use_device_prefs_provider(settings);
     programs::use_program_intents_provider();
+    crate::offline::use_outbox_provider();
 
     rsx! {
         document::Title { "Iron Oxide" }
@@ -82,5 +86,6 @@ pub fn App() -> Element {
         document::Stylesheet { href: theme::APP_CSS }
         Router::<Route> {}
         BannerHost {}
+        unsaved::Unsaved {}
     }
 }
