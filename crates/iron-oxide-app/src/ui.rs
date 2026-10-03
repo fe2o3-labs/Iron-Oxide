@@ -6,6 +6,7 @@
 //! - `errors`: the banner every server error is reported to.
 //! - `weight`: weights in the user's unit.
 //! - `history`: the history screens (#33).
+//! - `session`: the workout session screens (#28).
 
 mod account;
 #[cfg_attr(
@@ -29,6 +30,7 @@ mod errors;
 #[cfg(debug_assertions)]
 mod gallery;
 mod history;
+mod session;
 mod shell;
 pub(crate) mod theme;
 pub mod unsaved;

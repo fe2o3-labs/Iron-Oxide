@@ -16,7 +16,8 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 webauthn-rs-proto = { workspace = true }
 
-# Browser-only: optional, enabled by the `web` feature (WebAuthn and the Google sign-in popup).
+# Browser-only: optional, enabled by the `web` feature (WebAuthn, the Google sign-in popup, the
+# session screens' clock and localStorage).
 js-sys = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
