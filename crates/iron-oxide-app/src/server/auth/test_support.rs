@@ -73,6 +73,8 @@ fn ensure_public_dir() {
 pub struct TestApp {
     pub router: Router,
     pub google: MockGoogle,
+    /// The app's account-import slots (#22), for tests that hold them.
+    pub account_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl TestApp {
@@ -92,11 +94,9 @@ impl TestApp {
         let mut config = config();
         change(&mut config);
         let auth = AuthState::with_google_issuer(&config, &google.issuer).unwrap();
-        let state = AppState {
-            config: Arc::new(config),
-            db,
-        };
+        let state = AppState::new(Arc::new(config), db);
         Self {
+            account_slots: state.account_slots.clone(),
             router: router(state, auth),
             google,
         }
@@ -186,7 +186,8 @@ impl Browser {
             .unwrap();
         let response = self.send(request).await;
         let status = response.status();
-        let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        // Room for a large account export (#22).
+        let bytes = to_bytes(response.into_body(), 1 << 26).await.unwrap();
         (status, bytes.to_vec())
     }
 

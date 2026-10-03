@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO programs (user_id, creation_id, name, source_builtin_id, archived, created_at)\n         VALUES ($1, $2, $3, $4, $5, $6)\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Bool",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "51215fc49d8f6de0e7f64dbb0d97a94a1ba06ad98cf6c5a6273d8a7b04664619"
+}

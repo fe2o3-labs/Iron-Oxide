@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT set_config('statement_timeout', $1, false) AS statement,\n                set_config('idle_in_transaction_session_timeout', $1, false) AS idle,\n                set_config('transaction_timeout', $1, false) AS transaction,\n                set_config('application_name', $2, false) AS name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "statement",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "idle",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "transaction",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "d183a2c38cad1e4128da53564a60c972ecda7b0761adaa92008ed09c8bd82f88"
+}

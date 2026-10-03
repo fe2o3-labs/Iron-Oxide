@@ -20,6 +20,7 @@ group's limit does not affect another's.
 | `google_callback` | `GET`/`HEAD /auth/google/callback` | 30 at once, then 1 every 2 s | none |
 | `session` | `auth/me`, `auth/sign-out` | 300 at once, then 5 a second | none |
 | `account` | `passkey/remove`, `google/unlink` | 60 at once, then 1 a second | 10 at once, then 1 a minute |
+| `account_data` | `/api/account/export`, `/api/account/import`, `/api/account/delete` | 30 at once, then 1 every 2 s | 10 at once, then 1 every 2 minutes |
 | `write` | every other `POST`, `PUT`, `PATCH` or `DELETE`, on any path | 600 at once, then 10 a second | 120 at once, then 2 a second |
 
 Route paths are under `/api/auth/` unless shown in full. Requests with a safe method (`GET`, `HEAD`,
@@ -87,6 +88,9 @@ runs
   people doing that together.
 - **Account changes** (adding a passkey, linking or unlinking Google) are rare: 10 in a row per user
   is more than a real session needs.
+- **Account data** (#22): an export reads, and an import writes, everything a user owns (an import
+  body can be 16 MiB), and deleting the account is done once. 10 in a row per user covers an export
+  and a few import attempts; after that, one every 2 minutes.
 
 ### Per cookie?
 

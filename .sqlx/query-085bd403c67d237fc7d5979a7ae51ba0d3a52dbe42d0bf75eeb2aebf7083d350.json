@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO active_program (user_id, program_id)\n         SELECT $1, p.id FROM programs p WHERE p.id = $2 AND p.user_id = $1 AND NOT p.archived\n         ON CONFLICT (user_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "085bd403c67d237fc7d5979a7ae51ba0d3a52dbe42d0bf75eeb2aebf7083d350"
+}

@@ -61,6 +61,7 @@ fn generous() -> Limits {
         google_callback: wide,
         session: wide,
         account: wide,
+        account_data: wide,
         write: wide,
         capacity: 1_000,
     }
@@ -552,6 +553,38 @@ async fn per_user_limits_are_independent_behind_one_ip(db: PgPool) {
         let status = post_raw(&mut carol, REMOVE, unknown.clone()).await.status();
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn account_data_calls_share_their_own_per_user_limit(db: PgPool) {
+    const EXPORT: &str = "/api/account/export";
+    let mut limits = generous();
+    limits.account_data.per_user = Some(quota(2, HOUR));
+    let app = TestApp::with_rate_limit(db, config(ClientIpSource::Peer, limits)).await;
+    let mut alice = app.browser();
+    sign_up(&mut alice, "alice").await;
+    for _ in 0..2 {
+        assert_eq!(
+            post_raw(&mut alice, EXPORT, json!({})).await.status(),
+            StatusCode::OK
+        );
+    }
+    let limited = post_raw(&mut alice, EXPORT, json!({})).await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(retry_after(limited.headers()) > 0);
+    // Import and deletion share the bucket: refused before the body is read or anything deleted.
+    for path in ["/api/account/import", "/api/account/delete"] {
+        let status = post_raw(&mut alice, path, json!({ "document": "{}" }))
+            .await
+            .status();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{path}");
+    }
+    assert_eq!(
+        post_raw(&mut alice, ME, json!({})).await.status(),
+        StatusCode::OK,
+        "other groups are not affected, and the account still exists"
+    );
 }
 
 #[sqlx::test]
