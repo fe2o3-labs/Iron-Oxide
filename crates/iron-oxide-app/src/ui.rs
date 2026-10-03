@@ -31,6 +31,7 @@ mod gallery;
 mod history;
 mod shell;
 pub(crate) mod theme;
+pub mod unsaved;
 #[cfg_attr(
     not(debug_assertions),
     allow(
@@ -53,6 +54,7 @@ pub fn App() -> Element {
     shell::use_session_provider();
     errors::use_errors_provider();
     weight::use_unit_provider();
+    crate::offline::use_outbox_provider();
 
     rsx! {
         document::Title { "Iron Oxide" }
@@ -73,5 +75,6 @@ pub fn App() -> Element {
         document::Stylesheet { href: theme::APP_CSS }
         Router::<Route> {}
         BannerHost {}
+        unsaved::Unsaved {}
     }
 }

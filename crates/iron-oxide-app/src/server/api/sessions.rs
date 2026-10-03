@@ -964,6 +964,45 @@ mod tests {
 
     // --- Behaviour ------------------------------------------------------------------------------
 
+    /// The outbox's expected-user header (#30): a write queued for another account is refused
+    /// with `409` and changes nothing; a matching header or none at all is unaffected.
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn expected_user_header_refuses_writes_for_another_account(db: PgPool) {
+        use crate::auth::types::{ACCOUNT_CHANGED_MESSAGE, EXPECTED_USER_HEADER};
+        use dioxus::server::axum::body::Body;
+
+        let api = TestApi::new(db).await;
+        let (mut a, b) = api.users_a_and_b().await;
+        active_program(&api, &a).await;
+        let session_id = SessionId::new_v7();
+        let body = json!({ "session_id": session_id, "started_at": t(0) }).to_string();
+        let request = |user: &TestUser, expected: Option<Uuid>| {
+            let builder = user.post(START);
+            let builder = match expected {
+                Some(user) => builder.header(EXPECTED_USER_HEADER, user.to_string()),
+                None => builder,
+            };
+            builder.body(Body::from(body.clone())).unwrap()
+        };
+
+        // Queued for B, sent with A's cookie: refused, nothing created.
+        let (status, error) = a.send(request(&a, Some(b.id.as_uuid()))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert_eq!(error["message"], ACCOUNT_CHANGED_MESSAGE);
+        let missing = a
+            .call_err(GET, json!({ "session_id": session_id.as_uuid() }))
+            .await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+
+        // A's own id, or no header: unaffected.
+        let (status, view) = a.send(request(&a, Some(a.id.as_uuid()))).await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        let (status, replay) = a.send(request(&a, None)).await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(view, replay);
+    }
+
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
     #[ignore = "needs Postgres"]
     async fn get_session_returns_the_users_own_session(db: PgPool) {
