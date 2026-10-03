@@ -118,8 +118,10 @@ status.
 **Arguments that do not decode** are `422 Invalid request.` They include a malformed id, a wrong
 type or a missing field. Dioxus answers them with a `500` whose text is a serde error.
 
-**Every 5xx except 503** gets the generic message and no details, whatever the function put in
-it (`ServerFnError::new(detail)`, an `anyhow` error). The original text is logged.
+**Every 5xx** gets a fixed message and no details, whatever the function put in it
+(`ServerFnError::new(detail)`, an `anyhow` error, a `{"message", "data"}` body from another
+layer): `503` gets `The server is busy. Please try again.`, every other 5xx the generic message.
+The original text is logged.
 
 **429 (rate limiting, #72).** The body is
 

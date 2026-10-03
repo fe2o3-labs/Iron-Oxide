@@ -59,6 +59,9 @@ tests in `src/ui/theme.rs` read the stylesheet and fail below these thresholds.
 Rules:
 
 - Never use `--io-accent` as text: on the light ground it is 2.6:1. Use `--io-accent-text`.
+- A selected chip is not told by its fill alone: the accent against the light chip is 2.4:1. It
+  also gets a 2 px inset ring in `--io-text`, at least 3:1 against the chip, the ground and the
+  surface in both themes.
 - The accent progress segments against the light track are below 3:1; progress is always also
   given as text ("SET 2 / 5") and through `aria-valuenow`.
 

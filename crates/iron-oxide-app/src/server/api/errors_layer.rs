@@ -17,9 +17,10 @@
 //! details: d }`: our message and details are the `ServerError`'s own fields.
 //!
 //! - Arguments that do not decode become `422 Invalid request.`
-//! - Every 5xx except 503 gets the generic message and no details: nothing a function puts in a
-//!   500 (`ServerFnError::new(detail)`, an `anyhow` error) reaches the client. The original is
-//!   logged.
+//! - Every 5xx gets a fixed message and no details: nothing a function puts in a 500
+//!   (`ServerFnError::new(detail)`, an `anyhow` error) or a 503 reaches the client. A 503 gets the
+//!   retry message ([`TRANSIENT`]), every other 5xx the generic one ([`INTERNAL`]). The original
+//!   is logged.
 //! - A 5xx whose body is not one of these shapes (not JSON: a panic's text, which Dioxus includes
 //!   in debug builds; or JSON of another shape) gets the generic message too, keeping its status
 //!   (a 503 gets the retry message). Other non-JSON 4xx bodies (axum's own 405 or 415) are kept.
@@ -124,11 +125,12 @@ fn rewrite(status: StatusCode, body: &Value) -> Option<(StatusCode, String, Opti
             }
             (status, text.to_owned(), body.get("details").cloned())
         };
-    if status.is_server_error() && status != StatusCode::SERVICE_UNAVAILABLE {
-        if message != INTERNAL {
-            tracing::error!(%status, error = message, "server function failed");
+    if status.is_server_error() {
+        let public = generic(status);
+        if message != public || details.is_some() {
+            tracing::error!(%status, error = message, ?details, "server function failed");
         }
-        return Some((status, INTERNAL.to_owned(), None));
+        return Some((status, public.to_owned(), None));
     }
     Some((status, message, details))
 }
@@ -275,7 +277,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn no_5xx_text_or_details_reach_the_wire_except_503() {
+    async fn no_5xx_text_or_details_reach_the_wire() {
         let secret = "relation workout_sets at 10.0.0.3";
         for (status, body) in [
             (
@@ -299,12 +301,27 @@ pub(crate) mod tests {
             assert_eq!(message, INTERNAL);
             assert_eq!(details, None);
         }
-        let (_, message, _) = rewrite(
+        // A 503 always gets the fixed retry message, whatever its body says (#104).
+        for body in [
+            returned(503, "Please try again.", None),
+            returned(503, secret, Some(json!(secret))),
+            json!({ "message": secret, "code": 503, "data": { "where": secret } }),
+            json!({ "error": secret, "details": secret }),
+        ] {
+            let (status, message, details) =
+                rewrite(StatusCode::SERVICE_UNAVAILABLE, &body).unwrap();
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(message, TRANSIENT, "{body}");
+            assert_eq!(details, None, "{body}");
+        }
+        let (status, failure) = through_the_client(
             StatusCode::SERVICE_UNAVAILABLE,
-            &returned(503, "The server is busy.", None),
+            json!({ "message": secret, "code": 503, "data": { "where": secret } }),
         )
-        .unwrap();
-        assert_eq!(message, "The server is busy.");
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(failure.message, TRANSIENT);
+        assert!(failure.is_retryable());
     }
 
     /// `normalize` around a route answering `status` with `body`.
