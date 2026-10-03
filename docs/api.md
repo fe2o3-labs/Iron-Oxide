@@ -155,10 +155,11 @@ happens:
 |---|---|---|
 | Request body, default (`DEFAULT_BODY_LIMIT`) | 64 KiB | `413 This request is too large.` |
 | Request body, `/api/programs/upload` (`UPLOAD_BODY_LIMIT`) | 528 KiB (2 × 256 KiB + 16 KiB), see [Programs](#programs-srcapiprogramsrs-19) | `413 The program file is too large (the limit is 256 KiB).` |
+| Request body, `/api/account/import` (`IMPORT_BODY_LIMIT`), see [`docs/export-format.md`](export-format.md) | 16 MiB + 64 KiB (document 8 MiB) | `413 The export file is too large (the limit is 8 MiB).` |
 | Request body, `POST /webhooks/stripe` (outside Dioxus, `DefaultBodyLimit`) | 256 KiB | axum's `413` |
-| Body read (`BODY_READ_TIMEOUT`), from the end of the headers | 10 s | `408 The request took too long to arrive. Please try again.` |
+| Body read (`BODY_READ_TIMEOUT`), from the end of the headers | 10 s; 60 s for `/api/account/import` | `408 The request took too long to arrive. Please try again.` |
 | Waiting for a pooled connection (`db::ACQUIRE_TIMEOUT`) | 10 s | `503 The server is busy. Please try again.` |
-| One statement, an idle transaction, a whole transaction (`db::STATEMENT_DEADLINE`, set by Postgres on every pooled connection) | 5 s each | the statement or session is aborted and the transaction rolled back: `503` (`57014`, `25P03`, `25P04` are transient) |
+| One statement, an idle transaction, a whole transaction (`db::STATEMENT_DEADLINE`, set by Postgres on every pooled connection) | 5 s each; 60 s for an account import or deletion (`db::account::long_connection`) | the statement or session is aborted and the transaction rolled back: `503` (`57014`, `25P03`, `25P04` are transient) |
 | Each call to Google (OIDC discovery, token exchange; `google::HTTP_TIMEOUT`, `CONNECT_TIMEOUT`) | 10 s in total, 5 s to connect | `503` (`AuthError::GoogleUnavailable`); WebAuthn makes no outbound calls |
 
 - **Why a cap of our own.** Dioxus 0.7.10 reads a server function's body with `unwrap`, so a body
@@ -390,10 +391,12 @@ format, the import rules and the deletion are in [`docs/export-format.md`](expor
 
 - **Import is idempotent.** Rows are matched by their keys and what the account already has wins:
   the same export imported twice adds nothing the second time.
-- **Import body.** As for uploads, a middleware checks the session, then caps the body
-  (`IMPORT_BODY_LIMIT`), before anything reads it. The route also raises axum's 2 MiB
-  `DefaultBodyLimit`, so a large export imports instead of panicking in Dioxus' extractor. The
-  shared middleware is `server::api::body_limit::signed_in_and_capped`.
+- **Import body.** A middleware checks the session, takes one of the 2 import slots, then reads
+  the body with `limits::read_body` (`IMPORT_BODY_LIMIT`, 60 s read timeout) before anything else
+  does. The route is in `limits::OWN_BODY_LIMIT` and also raises axum's 2 MiB `DefaultBodyLimit`,
+  so a large export imports instead of panicking in Dioxus' extractor.
+- **Database deadlines.** An import and an account deletion run on a connection of their own with
+  60 s deadlines instead of the pool's 5 s (`docs/export-format.md`).
 - **Isolation.** Every read and write is scoped to the session's user. An export never contains
   another user's rows. Importing someone else's export gives the importer their own copies (new
   program ids) and never touches the owner's rows. The tests are the `another_users_*` in

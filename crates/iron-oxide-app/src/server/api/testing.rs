@@ -58,6 +58,14 @@ impl TestApi {
         }
     }
 
+    /// The app with the test configuration, changed by `change`.
+    pub async fn with_config(db: PgPool, change: impl FnOnce(&mut crate::server::Config)) -> Self {
+        Self {
+            app: TestApp::with_config(db.clone(), change).await,
+            db,
+        }
+    }
+
     /// A new user, signed up with a passkey and signed in, in their own browser.
     pub async fn user(&self, name: &str) -> TestUser {
         let mut browser = self.app.browser();

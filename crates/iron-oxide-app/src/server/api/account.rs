@@ -7,7 +7,13 @@ use std::{
 };
 
 use dioxus::logger::tracing;
-use dioxus::server::axum::{extract::Request, middleware::Next, response::Response};
+use dioxus::server::axum::{
+    body::Body,
+    extract::{FromRequestParts, Request},
+    http::{HeaderValue, StatusCode, header::RETRY_AFTER},
+    middleware::Next,
+    response::Response,
+};
 use iron_oxide_domain::{
     CreationId, ExerciseId, LoggedSet, Reps, Seconds, SessionId, SessionStatus, SetId,
     UserId as DomainUserId, Weight,
@@ -17,11 +23,15 @@ use iron_oxide_domain::{
 };
 use serde::Deserialize;
 use sqlx::{
-    PgConnection, PgPool,
+    Connection, PgConnection, PgPool,
     types::{Uuid, time::OffsetDateTime},
 };
 
-use super::{ApiError, body_limit, offset_date_time, settings, timestamp};
+use super::{
+    ApiError,
+    error::{INTERNAL, TRANSIENT},
+    errors_layer, offset_date_time, settings, timestamp,
+};
 use crate::api::{
     account::{
         EXPORT_FORMAT, EXPORT_FORMAT_VERSION, ExportAccount, ExportDocument, ExportLinkedAccount,
@@ -32,10 +42,11 @@ use crate::api::{
     settings::{SettingsUpdate, TrainingMax},
 };
 use crate::server::{
+    AppState,
     auth::{AuthContext, AuthError, AuthUser},
     billing,
     db::{self, account as repo, ids::UserId, settings::UserSettings},
-    entitlements,
+    entitlements, limits,
 };
 
 /// The `403` of a deletion without a recent sign-in.
@@ -276,15 +287,43 @@ fn parse_status(name: &str) -> Result<SessionStatus, String> {
 /// before its body is read.
 pub const MAX_CONCURRENT_IMPORTS: usize = 2;
 
-/// Middleware of `import_account_data`: checks the session first, then takes one of the
-/// process's [`MAX_CONCURRENT_IMPORTS`] slots (`503` with `Retry-After` when none is free), then
-/// refuses a body over [`IMPORT_BODY_LIMIT`] with `413` before anything reads it.
+/// How long a client waits before retrying an import refused because every slot was taken.
+pub const BUSY_RETRY_AFTER_SECS: u64 = 5;
+
+/// Middleware of `import_account_data`, in order:
+/// 1. the session: a signed-out client gets its `401` without the body being read;
+/// 2. one of the process's [`MAX_CONCURRENT_IMPORTS`] slots, held until the response is ready
+///    (the body read and the server function included): none free is a retryable `503` with
+///    `Retry-After`;
+/// 3. the body, with [`limits::read_body`]: `413` past [`IMPORT_BODY_LIMIT`] (announced or
+///    actually sent), `408` when it does not arrive within the import's read timeout, which then
+///    frees the slot. The route is in `limits::OWN_BODY_LIMIT`, so the default cap leaves it alone.
 pub async fn limit_import_body(request: Request, next: Next) -> Response {
-    let slots = request
-        .extensions()
-        .get::<crate::server::AppState>()
-        .map(|state| state.import_slots.clone());
-    body_limit::signed_in_and_capped(request, next, IMPORT_BODY_LIMIT, too_large, slots).await
+    let (mut parts, body) = request.into_parts();
+    if let Err(rejection) = AuthUser::from_request_parts(&mut parts, &()).await {
+        return rejection;
+    }
+    let Some(state) = parts.extensions.get::<AppState>().cloned() else {
+        tracing::error!("AppState missing on the import route: check server::router");
+        return errors_layer::error_response(StatusCode::INTERNAL_SERVER_ERROR, INTERNAL, None);
+    };
+    let Ok(_slot) = state.import_slots.clone().try_acquire_owned() else {
+        tracing::warn!("import refused: every import slot is taken");
+        let mut response =
+            errors_layer::error_response(StatusCode::SERVICE_UNAVAILABLE, TRANSIENT, None);
+        response
+            .headers_mut()
+            .insert(RETRY_AFTER, HeaderValue::from(BUSY_RETRY_AFTER_SECS));
+        return response;
+    };
+    let timeout = state.config.request_limits.import_body_read_timeout;
+    match limits::read_body(&parts.headers, body, IMPORT_BODY_LIMIT, timeout).await {
+        Ok(bytes) => {
+            next.run(Request::from_parts(parts, Body::from(bytes)))
+                .await
+        }
+        Err(error) => limits::refuse_body(&error, true, too_large().public().1),
+    }
 }
 
 fn too_large() -> ApiError {
@@ -306,9 +345,17 @@ pub async fn import(
         return Err(too_large());
     }
     let import = Import::parse(document)?;
-    let mut tx = pool.begin().await.map_err(db::error::RepoError::from)?;
-    let summary = import.write(&mut tx, user).await?;
-    tx.commit().await.map_err(db::error::RepoError::from)?;
+    // A whole account in one transaction: longer database deadlines than the pool's.
+    let mut conn = repo::long_connection(pool).await?;
+    let result = async {
+        let mut tx = conn.begin().await.map_err(db::error::RepoError::from)?;
+        let summary = import.write(&mut tx, user).await?;
+        tx.commit().await.map_err(db::error::RepoError::from)?;
+        Ok::<_, ApiError>(summary)
+    }
+    .await;
+    repo::close(conn).await;
+    let summary = result?;
     tracing::info!(?summary, "account data imported");
     Ok(summary)
 }
@@ -660,31 +707,61 @@ impl Import {
                 }
             };
             program_ids.insert(program.creation_id, id);
-            // Versions are matched by content, never by number alone: the export's version N
-            // and the account's version N may differ (two copies of a program each edited on
-            // their own). An identical document is the same version; any other is added, under
-            // its own number if free, else the next free one. The export's sessions then point
-            // at the version with their document, so their day always exists in it.
-            repo::lock_program(tx, owner, id).await?;
-            let mut numbers: HashSet<i32> = repo::version_numbers(tx, owner, id)
-                .await?
-                .into_iter()
-                .collect();
-            for (number, document, created_at) in &program.versions {
-                let version = match repo::version_with_document(tx, owner, id, document).await? {
-                    Some(version) => version,
+            if existing.contains_key(&program.creation_id) {
+                // The account's program keeps its versions, its current version and its place
+                // as the active program. Versions are matched by content, never by number
+                // alone; the export's versions it does not have go to the program's archived
+                // companion (see `companion_creation_id`), and their sessions with them.
+                repo::lock_program(tx, owner, id).await?;
+                let mut foreign = Vec::new();
+                for version in &program.versions {
+                    match repo::version_with_document(tx, owner, id, &version.1).await? {
+                        Some(found) => {
+                            version_ids.insert((program.creation_id, version.0), found);
+                        }
+                        None => foreign.push(version),
+                    }
+                }
+                if foreign.is_empty() {
+                    continue;
+                }
+                let creation = companion_creation_id(program.creation_id);
+                let companion = match repo::program_by_creation(tx, owner, creation).await? {
+                    Some((companion, _)) => companion,
                     None => {
-                        let free = if numbers.contains(number) {
-                            numbers.iter().max().map_or(1, |max| max.saturating_add(1))
-                        } else {
-                            *number
+                        summary.programs += 1;
+                        let name = companion_name(&program.name);
+                        let new = repo::NewProgram {
+                            creation_id: creation,
+                            name: &name,
+                            source_builtin_id: program.source_builtin_id.as_deref(),
+                            // Archived: takes no quota slot and is never the active program.
+                            archived: true,
+                            // Now: listed after the program it accompanies.
+                            created_at: OffsetDateTime::now_utc(),
                         };
-                        numbers.insert(free);
-                        summary.versions += 1;
-                        repo::insert_version(tx, owner, id, free, document, *created_at).await?
+                        repo::insert_program(tx, owner, &new).await?
                     }
                 };
-                version_ids.insert((program.creation_id, *number), version);
+                for (number, version) in
+                    add_versions(tx, owner, companion, foreign, &mut summary).await?
+                {
+                    version_ids.insert((program.creation_id, number), version);
+                }
+            } else {
+                // A program this import created takes all the export's versions, so its current
+                // version is the export's.
+                for (number, version) in add_versions(
+                    tx,
+                    owner,
+                    id,
+                    program.versions.iter().collect(),
+                    &mut summary,
+                )
+                .await?
+                {
+                    version_ids.insert((program.creation_id, number), version);
+                }
             }
         }
 
@@ -724,6 +801,60 @@ impl Import {
         summary.sets = count(repo::insert_sets(tx, owner, &sets).await?);
         Ok(summary)
     }
+}
+
+/// Adds `versions` (the export's number, document and time) to the user's program `program`,
+/// each unless the program already has the same document. A version keeps its number if the
+/// program does not use it, else gets the next free one. Returns the export's number of each
+/// version with the id of the program's version holding its document.
+async fn add_versions(
+    tx: &mut PgConnection,
+    owner: UserId,
+    program: Uuid,
+    versions: Vec<&(i32, serde_json::Value, OffsetDateTime)>,
+    summary: &mut ImportSummary,
+) -> Result<Vec<(i32, Uuid)>, ApiError> {
+    // Locked first, as `add_version` does: a concurrent upload waits for the import.
+    repo::lock_program(tx, owner, program).await?;
+    let mut numbers: HashSet<i32> = repo::version_numbers(tx, owner, program)
+        .await?
+        .into_iter()
+        .collect();
+    let mut ids = Vec::with_capacity(versions.len());
+    for (number, document, created_at) in versions {
+        let id = match repo::version_with_document(tx, owner, program, document).await? {
+            Some(id) => id,
+            None => {
+                let free = if numbers.contains(number) {
+                    numbers.iter().max().map_or(1, |max| max.saturating_add(1))
+                } else {
+                    *number
+                };
+                numbers.insert(free);
+                summary.versions += 1;
+                repo::insert_version(tx, owner, program, free, document, *created_at).await?
+            }
+        };
+        ids.push((*number, id));
+    }
+    Ok(ids)
+}
+
+/// The namespace of [`companion_creation_id`] (a fixed, random UUID).
+const COMPANION_NAMESPACE: Uuid = Uuid::from_u128(0x7c1e_6a43_2f0b_4d5e_9a61_3b8c_d04f_e215);
+
+/// The `creation_id` of the archived companion of the program `creation_id`: where an import puts
+/// the export's versions of that program that the account's program does not have. Derived
+/// (UUIDv5), so importing the same export again finds the same companion.
+fn companion_creation_id(creation_id: Uuid) -> Uuid {
+    Uuid::new_v5(&COMPANION_NAMESPACE, creation_id.as_bytes())
+}
+
+/// `"<name> (imported)"`, within the 100 characters of a program name.
+fn companion_name(name: &str) -> String {
+    const SUFFIX: &str = " (imported)";
+    let kept: String = name.chars().take(100 - SUFFIX.chars().count()).collect();
+    format!("{kept}{SUFFIX}")
 }
 
 fn count(rows: u64) -> u32 {
@@ -795,9 +926,17 @@ pub async fn delete(ctx: &AuthContext, user: AuthUser) -> Result<(), ApiError> {
     // Before anything is deleted: a failure keeps the account, so the user is never left billed
     // for an account that no longer exists.
     billing::cancel_before_account_deletion(ctx.db(), owner).await?;
-    let mut tx = ctx.db().begin().await.map_err(db::error::RepoError::from)?;
-    let deleted = repo::delete_user(&mut tx, owner).await?;
-    tx.commit().await.map_err(db::error::RepoError::from)?;
+    // A large account's cascade may take longer than the pool's deadlines.
+    let mut conn = repo::long_connection(ctx.db()).await?;
+    let result = async {
+        let mut tx = conn.begin().await.map_err(db::error::RepoError::from)?;
+        let deleted = repo::delete_user(&mut tx, owner).await?;
+        tx.commit().await.map_err(db::error::RepoError::from)?;
+        Ok::<_, ApiError>(deleted)
+    }
+    .await;
+    repo::close(conn).await;
+    let deleted = result?;
     if !deleted {
         // Deleted by a concurrent request: same outcome.
         tracing::info!("account already deleted");

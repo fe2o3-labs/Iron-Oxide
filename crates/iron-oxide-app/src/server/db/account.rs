@@ -7,7 +7,7 @@
 //! (`ON CONFLICT DO NOTHING`, or a lookup first), which is what makes them idempotent.
 
 use sqlx::{
-    PgConnection,
+    Connection, PgConnection, PgPool,
     types::{JsonValue, Uuid, time::OffsetDateTime},
 };
 
@@ -16,6 +16,41 @@ use super::{
     ids::UserId,
     settings::UserSettings,
 };
+
+/// The database deadlines of an import or an account deletion (#22), instead of the pool's 5 s
+/// (`db::STATEMENT_DEADLINE`): a whole account is written or deleted in one transaction. The
+/// largest import measured (40,000 sets) took up to 10.8 s on a debug build; 60 s leaves room for
+/// a slow machine and a large account's cascade.
+pub const ACCOUNT_DEADLINE: &str = "60s";
+
+/// A connection of its own for an import or an account deletion, with the three deadlines
+/// (`statement_timeout`, `idle_in_transaction_session_timeout`, `transaction_timeout`) at
+/// [`ACCOUNT_DEADLINE`] instead of the pool's 5 s.
+///
+/// `SET LOCAL` inside the transaction is not enough: `transaction_timeout` is armed when the
+/// transaction starts, so raising it later does not extend it. The deadlines are therefore set on
+/// the session before `BEGIN`, on a connection taken out of the pool (`detach`): it is closed when
+/// dropped, never returned to the pool with the longer deadlines, whatever happens. Close it with
+/// [`close`] after the transaction.
+pub async fn long_connection(pool: &PgPool) -> Result<PgConnection, RepoError> {
+    let mut conn = pool.acquire().await?.detach();
+    sqlx::query!(
+        "SELECT set_config('statement_timeout', $1, false) AS statement,
+                set_config('idle_in_transaction_session_timeout', $1, false) AS idle,
+                set_config('transaction_timeout', $1, false) AS transaction",
+        ACCOUNT_DEADLINE
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    Ok(conn)
+}
+
+/// Closes a [`long_connection`] (an error closing it only means it is already gone).
+pub async fn close(conn: PgConnection) {
+    if let Err(error) = conn.close().await {
+        dioxus::logger::tracing::debug!(%error, "closing an account connection failed");
+    }
+}
 
 // --- Reading (export) --------------------------------------------------------------------------
 
@@ -564,4 +599,58 @@ pub async fn delete_user(tx: &mut PgConnection, user: UserId) -> Result<bool, Re
         .await?
         .rows_affected();
     Ok(deleted == 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::postgres::PgPoolOptions;
+
+    const SETTINGS: [&str; 3] = [
+        "statement_timeout",
+        "idle_in_transaction_session_timeout",
+        "transaction_timeout",
+    ];
+
+    use super::*;
+    use crate::server::db::tests::app_pool;
+
+    async fn show(conn: &mut PgConnection, setting: &str) -> String {
+        sqlx::query_scalar(&format!("SHOW {setting}"))
+            .fetch_one(conn)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "needs Postgres"]
+    async fn account_transactions_outlast_the_pools_deadlines_and_only_them(
+        _: PgPoolOptions,
+        options: sqlx::postgres::PgConnectOptions,
+    ) {
+        let pool = app_pool(options).await;
+        let mut conn = long_connection(&pool).await.unwrap();
+        for setting in SETTINGS {
+            assert_eq!(show(&mut conn, setting).await, "1min", "{setting}");
+        }
+        // Longer than the pool's 5 s, for one statement and for the whole transaction.
+        let mut tx = conn.begin().await.unwrap();
+        sqlx::query("SELECT pg_sleep(5.5)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        close(conn).await;
+        // The pool's connections keep their 5 s.
+        let mut pooled = pool.acquire().await.unwrap();
+        for setting in SETTINGS {
+            assert_eq!(show(&mut pooled, setting).await, "5s", "{setting}");
+        }
+        // And a plain pooled transaction is still cut at 5 s.
+        let mut tx = pooled.begin().await.unwrap();
+        let error = sqlx::query("SELECT pg_sleep(5.5)")
+            .execute(&mut *tx)
+            .await
+            .unwrap_err();
+        assert!(error.as_database_error().is_some(), "{error}");
+    }
 }

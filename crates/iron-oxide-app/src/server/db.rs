@@ -376,7 +376,7 @@ pub(crate) mod tests {
     }
 
     /// A pool with the app's settings (deadlines included) on the test's database.
-    async fn app_pool(options: sqlx::postgres::PgConnectOptions) -> PgPool {
+    pub(crate) async fn app_pool(options: sqlx::postgres::PgConnectOptions) -> PgPool {
         let pool = pool_options().connect_with(options).await.unwrap();
         sqlx::query("CREATE TABLE IF NOT EXISTS deadline_probe (id int)")
             .execute(&pool)

@@ -59,6 +59,16 @@ pub const MAX_EXPORT_BYTES: usize = 8 * 1024 * 1024;
 /// of [`MAX_EXPORT_BYTES`] can take up to twice as many bytes in the body.
 pub const IMPORT_BODY_LIMIT: usize = 2 * MAX_EXPORT_BYTES + 64 * 1024;
 
+/// The route of [`import_account_data`]: it reads its own body (see `server::limits`).
+pub const IMPORT_PATH: &str = "/api/account/import";
+
+/// How long an import body may take to arrive (the default for other requests is 10 s).
+///
+/// Sized from the largest import: a real export of [`MAX_EXPORT_BYTES`] travels as about 9.4 MB
+/// (its quotes escaped), which takes 60 s at 1.25 Mbit/s, a slow mobile uplink. A slower body
+/// gets `408` and frees its import slot.
+pub const IMPORT_BODY_READ_TIMEOUT_SECS: u64 = 60;
+
 /// How recent the sign-in must be for [`delete_account`] (and for adding a passkey or linking
 /// Google): 10 minutes. Signing in again (with a passkey or Google) restarts it.
 pub const DELETE_REAUTH_WINDOW_SECS: u64 = 10 * 60;

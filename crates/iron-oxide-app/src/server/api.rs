@@ -6,7 +6,6 @@
 //! and the user and call them.
 
 pub mod account;
-pub mod body_limit;
 pub mod error;
 pub mod errors_layer;
 pub mod history;

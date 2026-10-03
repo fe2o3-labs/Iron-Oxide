@@ -116,6 +116,11 @@ and where it goes. A new table fails the test until it is added there and here.
    since the file travels as a JSON string). The session is checked before the body is read, so a
    signed-out request gets `401` without uploading anything. The document itself is capped at
    `MAX_EXPORT_BYTES` (8 MiB). Both give `413`.
+   - The route reads its own body (`limits::OWN_BODY_LIMIT`, `limits::read_body`), so the 64 KiB
+     default cap does not apply, and it has its own read timeout: **60 s**
+     (`IMPORT_BODY_READ_TIMEOUT_SECS`, against 10 s for other requests). A real export of 8 MiB
+     travels as about 9.4 MB, which takes 60 s at 1.25 Mbit/s. A slower body gets `408` and frees
+     its import slot.
    - **At most 2 imports at once per server process** (`MAX_CONCURRENT_IMPORTS`): each holds its
      body, the decoded text and the parsed document, about 80 MB at the largest, on a 512 MB
      machine. A third gets `503` with `Retry-After: 5`, after the session check and before its body
@@ -136,7 +141,15 @@ and where it goes. A new table fails the test until it is added there and here.
    migration that fixes the stored documents (decision of 2026-10-03 on #41), so every export
    imports back. A version refused on import therefore means a hand-edited file or a missing
    migration, and the `422` message says which version and which rule, for support.
-3. **One transaction.** It starts by locking the user's row, like every quota write
+3. **One transaction, with longer database deadlines.** The pool's connections abort a statement,
+   an idle transaction or a whole transaction after 5 s (`db::STATEMENT_DEADLINE`). An import and
+   an account deletion get **60 s** instead (`db::account::ACCOUNT_DEADLINE`): the largest import
+   measured, 40,000 sets, took up to 10.8 s on a debug build. `transaction_timeout` is armed when a
+   transaction starts, so `SET LOCAL` inside it cannot raise it. The three deadlines are set on a
+   connection taken out of the pool before `BEGIN` (`db::account::long_connection`), and that
+   connection is closed afterwards, never returned to the pool with them.
+
+   The transaction starts by locking the user's row, like every quota write
    (`docs/billing.md`), so concurrent imports of one user run one after the other. Each existing
    program's row is locked too (`FOR UPDATE`, as `add_version` does) before its versions are read,
    so an upload of a version at the same moment waits instead of taking a number the import uses.
@@ -154,14 +167,30 @@ and where it goes. A new table fails the test until it is added there and here.
    |---|---|---|
    | Settings | the user | kept |
    | Training max | exercise id | kept |
-   | Program | `creation_id` | kept (name, archived flag), and gets the export's versions it does not have |
-   | Program version | content (`jsonb` equality), **never the number alone** | an identical document is the same version. A different document is added as a new version: under its own number if the program does not use it, else the next free one. The export's sessions of that version point at it, so their day always exists in their version. |
+   | Program | `creation_id` | kept as it is: name, archived flag, versions, **current version**, active program |
+   | Program version | content (`jsonb` equality), **never the number alone** | an identical document is the account's version. The export's other versions of that program go to its **archived companion** (below). |
    | Active program | the user | kept |
    | Session | session id | kept, with its own sets (the export's sets of that session are not added) |
    | Session in progress | at most one per user | if the account already has another one in progress, the export's one is skipped with its sets |
    | Set | set id | kept |
 
    Programs and versions get new ids. Every other id is kept.
+
+   **The archived companion.** A program's current version is its highest-numbered one, so a
+   version added to an existing program would become what the user trains with. Instead, the
+   export's versions that the account's program does not have go to a companion program:
+   - named `"<name> (imported)"` after the export's program (shortened to fit 100 characters);
+   - **archived**, so it takes no quota slot and is never the active program;
+   - with a `creation_id` derived from the original's (UUIDv5 in a fixed namespace,
+     `companion_creation_id`), so importing the same export again finds the same companion;
+   - holding each version once (matched by content), under its own number if free, else the next
+     free one.
+
+   The export's sessions of those versions point at the companion's, so their day always exists
+   in their version and their plan loads. **Tradeoff:** those sessions belong to the companion,
+   not the original program, so they do not count toward its rotation (the next day) or its
+   progression; the history and the personal records, which span every program, include them.
+   Only a program the import creates takes the export's versions, and so its current version.
 6. **Idempotent.** Importing the same export a second time finds every row already there and adds
    nothing (`ImportSummary` all zero).
 

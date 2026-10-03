@@ -13,7 +13,7 @@ dioxus = { workspace = true, features = ["fullstack", "router"] }
 iron-oxide-domain = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["v5"] }
 webauthn-rs-proto = { workspace = true }
 
 # Browser-only: optional, enabled by the `web` feature (WebAuthn and the Google sign-in popup).

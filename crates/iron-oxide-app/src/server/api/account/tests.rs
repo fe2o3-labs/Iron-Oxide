@@ -578,6 +578,7 @@ async fn what_the_account_already_has_wins(db: PgPool) {
     assert_eq!(
         summary,
         ImportSummary {
+            programs: 1,
             versions: 1,
             sessions: 1,
             sets: 1,
@@ -589,15 +590,18 @@ async fn what_the_account_already_has_wins(db: PgPool) {
     expected.insert(2, extra);
     assert_eq!(after.sessions.len(), 3);
     assert_eq!(after.sessions, expected);
-    // The program keeps its name and versions; the export's other version 1 is added as
-    // version 3 (versions are matched by content, never by number alone).
-    assert_eq!(after.programs[1..], original.programs[1..]);
-    let main = &after.programs[0];
-    assert_eq!(main.name, original.programs[0].name);
-    assert_eq!(main.versions[..2], original.programs[0].versions[..]);
-    assert_eq!(main.versions.len(), 3);
-    assert_eq!(main.versions[2].version, 3);
-    assert_eq!(main.versions[2].document, program_json("Changed", 3));
+    // The program keeps its name and versions; the export's other version 1 goes to the
+    // program's archived companion (versions are matched by content, never by number alone).
+    assert_eq!(after.programs[..2], original.programs[..]);
+    let companion = &after.programs[2];
+    assert_eq!(
+        companion.name, "Renamed (imported)",
+        "named after the export's program"
+    );
+    assert!(companion.archived);
+    assert_eq!(companion.versions.len(), 1);
+    assert_eq!(companion.versions[0].version, 1);
+    assert_eq!(companion.versions[0].document, program_json("Changed", 3));
     assert_eq!(after.settings, original.settings);
     assert_eq!(after.training_maxes, original.training_maxes);
 }
@@ -1038,24 +1042,37 @@ async fn a_stale_session_cannot_add_a_passkey_to_delete_the_account(db: PgPool) 
 }
 
 /// The review's case: the export's version 1 of a program differs from the account's version 1.
-/// Its session must land on a version that has its day, so that its plan loads.
+/// Its session must land on a version that has its day, so that its plan loads, and the
+/// account's program must keep its current version and stay the active program.
 #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
 #[ignore = "needs Postgres"]
-async fn a_version_with_the_same_number_but_other_content_is_added_as_a_new_version(db: PgPool) {
+async fn other_versions_of_an_existing_program_go_to_an_archived_companion(db: PgPool) {
     let api = TestApi::new(db.clone()).await;
     let mut a = api.user("A").await;
     let creation = CreationId::new_v7();
-    upload(
+    let main = upload(
         &mut a,
         json!({ "kind": "new_program", "creation_id": creation }),
         &program_json("Main", 5),
     )
     .await;
+    a.call::<Value>(
+        "/api/programs/active/set",
+        json!({ "program_id": main.program.id }),
+    )
+    .await
+    .unwrap();
     let mut document = export(&mut a).await;
+    let mine = document.programs[0].clone();
+    // The export's version 1 differs (day `b`), and it has a version 2 the account lacks too.
     let mut other = program_json("Main", 5);
     other["days"][0]["id"] = json!("b");
     other["rotation"] = json!(["b"]);
     document.programs[0].versions[0].document = other.clone();
+    let mut newer = document.programs[0].versions[0].clone();
+    newer.version = 2;
+    newer.document = program_json("Main", 9);
+    document.programs[0].versions.push(newer.clone());
     let session = SessionId::new_v7();
     document.sessions.push(ExportSession {
         id: session,
@@ -1070,34 +1087,103 @@ async fn a_version_with_the_same_number_but_other_content_is_added_as_a_new_vers
 
     let summary = import(&mut a, &document).await.unwrap();
     assert_eq!(
-        (summary.versions, summary.sessions, summary.sets),
-        (1, 1, 1)
+        (
+            summary.programs,
+            summary.versions,
+            summary.sessions,
+            summary.sets
+        ),
+        (1, 2, 1, 1)
     );
+    // The session's plan loads, on its own day.
     let plan: Value = a
         .call("/api/sessions/plan", json!({ "session_id": session }))
         .await
         .unwrap();
     assert_eq!(plan["day_name"], json!("Day A"), "{plan}");
+    // The account's program is untouched: same versions, same current version, still active.
     let after = export(&mut a).await;
-    let versions: Vec<u32> = after.programs[0]
+    assert_eq!(after.programs[0], mine);
+    let active: Value = a.call("/api/programs/active", json!({})).await.unwrap();
+    assert_eq!(active["program"]["id"], json!(main.program.id));
+    assert_eq!(active["version"]["version"], json!(1));
+    assert_eq!(active["document"]["days"][0]["id"], json!("a"));
+    assert_eq!(
+        active["document"]["days"][0]["exercises"][0]["work"]["reps"]["reps"],
+        json!(5)
+    );
+    // The export's versions are in the archived companion, under their own numbers.
+    let companion = &after.programs[1];
+    assert_eq!(companion.name, "Main (imported)");
+    assert!(companion.archived);
+    let versions: Vec<(u32, &Value)> = companion
         .versions
         .iter()
-        .map(|v| v.version)
+        .map(|v| (v.version, &v.document))
         .collect();
-    assert_eq!(
-        versions,
-        [1, 2],
-        "the account's version 1 is kept, the export's is version 2"
-    );
-    assert_eq!(after.programs[0].versions[1].document, other);
-    assert_eq!(after.sessions[0].version, 2);
+    assert_eq!(versions, [(1, &other), (2, &newer.document)]);
+    assert_eq!(after.sessions[0].program, companion.creation_id);
+    assert_eq!(after.sessions[0].version, 1);
 
-    // Idempotent: the second time, the export's version is found by its content.
+    // Idempotent: the second time, the same companion and versions are found.
     assert_eq!(
         import(&mut a, &document).await.unwrap(),
         ImportSummary::default()
     );
     assert_eq!(training(&export(&mut a).await), training(&after));
+}
+
+#[test]
+fn companions_have_a_stable_id_and_a_name_that_fits() {
+    let id = Uuid::from_u128(42);
+    assert_eq!(companion_creation_id(id), companion_creation_id(id));
+    assert_ne!(companion_creation_id(id), id);
+    assert_ne!(
+        companion_creation_id(id),
+        companion_creation_id(Uuid::from_u128(43))
+    );
+    assert_eq!(companion_name("Main"), "Main (imported)");
+    let long = companion_name(&"é".repeat(100));
+    assert_eq!(long.chars().count(), 100);
+    assert!(long.ends_with(" (imported)"));
+}
+
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn a_trickled_import_times_out_and_frees_its_slot(db: PgPool) {
+    let api = TestApi::with_config(db.clone(), |config| {
+        config.request_limits.import_body_read_timeout = std::time::Duration::from_millis(300);
+    })
+    .await;
+    let (mut a, mut c) = (api.user("A").await, api.user("C").await);
+    seed(&mut a).await;
+    let document = export(&mut a).await;
+    // A body that sends a little, then nothing more.
+    let request = c
+        .post(IMPORT)
+        .body(crate::server::limits::tests::chunked(16 * 1024, true))
+        .unwrap();
+    let (status, body) = c.send(request).await;
+    assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{body}");
+    let slots = api.import_slots();
+    assert_eq!(
+        slots.available_permits(),
+        MAX_CONCURRENT_IMPORTS,
+        "the slot is freed"
+    );
+    // Twice as many trickled imports as slots, one after the other: none is left holding one.
+    for _ in 0..2 * MAX_CONCURRENT_IMPORTS {
+        let request = c
+            .post(IMPORT)
+            .body(crate::server::limits::tests::chunked(8 * 1024, true))
+            .unwrap();
+        assert_eq!(c.send(request).await.0, StatusCode::REQUEST_TIMEOUT);
+    }
+    assert_eq!(slots.available_permits(), MAX_CONCURRENT_IMPORTS);
+    assert_ne!(
+        import(&mut c, &document).await.unwrap(),
+        ImportSummary::default()
+    );
 }
 
 #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
@@ -1121,7 +1207,7 @@ async fn a_third_concurrent_import_is_a_retryable_503(db: PgPool) {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         response.headers()[header::RETRY_AFTER],
-        body_limit::BUSY_RETRY_AFTER_SECS.to_string().as_str()
+        BUSY_RETRY_AFTER_SECS.to_string().as_str()
     );
     assert_eq!(row_counts(&db, c.id).await, counts, "nothing written");
     let error = c.call_err(IMPORT, json!({ "document": "{}" })).await;
