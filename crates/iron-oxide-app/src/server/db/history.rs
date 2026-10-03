@@ -449,6 +449,45 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     #[ignore = "needs Postgres"]
+    async fn exercise_sets_leave_out_weighted_holds(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (_, version) = testing::program(&pool, user).await;
+        let session = start(&pool, user, version, at(0)).await;
+        // A weighted plank: a weight and a duration. Not a lift for the charts or the volume.
+        let hold = LoggedSet {
+            exercise_id: "plank".to_owned(),
+            reps: 1,
+            weight_ng: Some(20_000_000_000_000),
+            duration_s: Some(60),
+            completed_at: at(10),
+            ..new_set(session)
+        };
+        let lifted = LoggedSet {
+            exercise_id: "plank".to_owned(),
+            reps: 8,
+            weight_ng: Some(10_000_000_000_000),
+            completed_at: at(20),
+            ..new_set(session)
+        };
+        for set in [hold, lifted] {
+            log(&pool, user, set).await;
+        }
+        finish(&pool, user, session, at(100)).await;
+        let found = exercise_sets(&pool, user, "plank").await.unwrap();
+        assert_eq!(
+            found,
+            vec![ExerciseSet {
+                session_id: session,
+                session_started_at: at(0),
+                reps: 8,
+                weight_ng: 10_000_000_000_000,
+                warmup: false,
+            }]
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
     async fn exercise_sets_come_from_ended_sessions_and_have_a_weight(pool: PgPool) {
         let user = testing::user(&pool).await;
         let (_, version) = testing::program(&pool, user).await;

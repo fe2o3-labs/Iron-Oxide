@@ -129,7 +129,7 @@ fn Charts(exercise: ExerciseId) -> Element {
         Some(Ok(loaded)) if loaded.points.is_empty() => rsx! {
             EmptyState {
                 title: "No data yet",
-                message: "Log a weighted working set of this exercise and finish the workout to start its charts.",
+                message: "Charts start once a workout with a working set of this exercise, with a weight and reps (not a timed hold), is finished.",
             }
         },
         Some(Ok(loaded)) => rsx! { Loaded { series: loaded.clone() } },
