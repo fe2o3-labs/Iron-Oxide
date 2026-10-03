@@ -5,6 +5,7 @@
 //! and return [`ApiError`]. The `#[post]` functions in `crate::api::<area>` only extract the state
 //! and the user and call them.
 
+pub mod account;
 pub mod error;
 pub mod errors_layer;
 pub mod history;

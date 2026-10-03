@@ -18,7 +18,9 @@
 //!
 //! Routes with a larger limit read their body themselves with [`read_body`] and are listed in
 //! [`OWN_BODY_LIMIT`]: the program upload (`UPLOAD_BODY_LIMIT`, checked after the session so a
-//! signed-out client gets its `401` without the body being read). The Stripe webhook is mounted
+//! signed-out client gets its `401` without the body being read) and the account import
+//! (`IMPORT_BODY_LIMIT`, likewise after the session and an import slot, with its own read
+//! timeout, [`RequestLimits::import_body_read_timeout`]). The Stripe webhook is mounted
 //! outside this layer with its own `DefaultBodyLimit`.
 
 use std::time::Duration;
@@ -46,7 +48,10 @@ pub const BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The paths that read their body themselves, with their own (larger) limit, through
 /// [`read_body`]. [`cap_body`] leaves their body alone.
-pub const OWN_BODY_LIMIT: [&str; 1] = [crate::api::programs::UPLOAD_PATH];
+pub const OWN_BODY_LIMIT: [&str; 2] = [
+    crate::api::programs::UPLOAD_PATH,
+    crate::api::account::IMPORT_PATH,
+];
 
 /// The message of a `413` from the default limit.
 pub const TOO_LARGE: &str = "This request is too large.";
@@ -60,6 +65,8 @@ pub struct RequestLimits {
     pub body: usize,
     /// How long a body may take to arrive.
     pub body_read_timeout: Duration,
+    /// How long an account import's body may take to arrive (#22): longer, for its size.
+    pub import_body_read_timeout: Duration,
 }
 
 impl Default for RequestLimits {
@@ -67,6 +74,9 @@ impl Default for RequestLimits {
         Self {
             body: DEFAULT_BODY_LIMIT,
             body_read_timeout: BODY_READ_TIMEOUT,
+            import_body_read_timeout: Duration::from_secs(
+                crate::api::account::IMPORT_BODY_READ_TIMEOUT_SECS,
+            ),
         }
     }
 }

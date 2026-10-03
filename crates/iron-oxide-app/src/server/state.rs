@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use iron_oxide_domain::program::builtin_programs;
 use sqlx::PgPool;
+use tokio::sync::Semaphore;
 
 use super::{
     config::Config,
@@ -37,6 +38,9 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// The Postgres connection pool.
     pub db: PgPool,
+    /// The account imports and deletions this process runs at once (#22), see
+    /// `server::api::account::MAX_ACCOUNT_OPERATIONS`.
+    pub account_slots: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -49,6 +53,16 @@ impl AppState {
         db::programs::seed_builtins(&db, &db::programs::builtin_seeds(&builtins))
             .await
             .map_err(DbError::Seed)?;
-        Ok(Self { config, db })
+        Ok(Self::new(config, db))
+    }
+
+    /// The state over an existing pool.
+    #[must_use]
+    pub fn new(config: Arc<Config>, db: PgPool) -> Self {
+        Self {
+            config,
+            db,
+            account_slots: Arc::new(Semaphore::new(super::api::account::MAX_ACCOUNT_OPERATIONS)),
+        }
     }
 }
