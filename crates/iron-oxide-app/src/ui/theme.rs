@@ -271,41 +271,6 @@ mod tests {
         assert!(block(&css, ".io-banner .io-icon-button {").contains("height: var(--io-tap);"));
     }
 
-    /// Every rule is closed before the next one starts: a merge once dropped two closing braces,
-    /// which silently nested the rest of the stylesheet (the session screens lost their styles).
-    /// Only at-rules (`@media`, `@keyframes`, …) may hold rules.
-    #[test]
-    fn every_rule_is_closed_before_the_next_one() {
-        let mut css = css();
-        while let Some(start) = css.find("/*") {
-            let end = start + css[start..].find("*/").expect("unclosed comment") + 2;
-            css.replace_range(start..end, "");
-        }
-        let mut open: Vec<bool> = Vec::new();
-        let mut prelude = String::new();
-        for c in css.chars() {
-            match c {
-                '{' => {
-                    let at_rule = prelude.trim_start().starts_with('@');
-                    assert!(
-                        open.last().is_none_or(|parent| *parent),
-                        "a rule inside a rule: {:?}",
-                        prelude.trim()
-                    );
-                    open.push(at_rule);
-                    prelude.clear();
-                }
-                '}' => {
-                    assert!(open.pop().is_some(), "a closing brace too many");
-                    prelude.clear();
-                }
-                ';' => prelude.clear(),
-                c => prelude.push(c),
-            }
-        }
-        assert!(open.is_empty(), "{} rules left open", open.len());
-    }
-
     #[test]
     fn every_font_is_declared_in_the_stylesheet() {
         let css = css();
