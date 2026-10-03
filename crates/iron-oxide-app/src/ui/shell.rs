@@ -22,7 +22,8 @@ use crate::api::error::{ApiFailure, FailureKind};
 use crate::auth::api::{is_unauthorized, me};
 use crate::auth::browser;
 
-/// The app's pages. Home, History, Programs and Settings are filled by their own tickets.
+/// The app's pages. Home, History, Programs and Settings are filled by their own tickets; Workout
+/// is the session in progress (#28), full screen: no bottom navigation.
 #[derive(Routable, Clone, PartialEq, Debug)]
 #[rustfmt::skip]
 pub enum Route {
@@ -42,7 +43,7 @@ pub enum Route {
         #[route("/settings")]
         Settings {},
         #[route("/session")]
-        Session {},
+        Workout {},
         #[route("/:..segments")]
         NotFound { segments: Vec<String> },
     #[end_layout]
@@ -108,6 +109,9 @@ pub fn set_session(mut session: Signal<SessionStatus>, status: SessionStatus) {
 fn Shell() -> Element {
     let session = use_session();
     let errors = use_errors();
+    let route = use_route::<Route>();
+    // The workout keeps the whole screen for the set: no bottom navigation.
+    let focused = matches!(route, Route::Workout {});
 
     // Client only: on the server the shell stays "Checking", so hydration matches.
     use_effect(move || {
@@ -134,11 +138,13 @@ fn Shell() -> Element {
             }
         },
         SessionStatus::SignedIn | SessionStatus::Unverified => rsx! {
-            div { class: "io-shell",
+            div { class: if focused { "io-shell io-shell-bare" } else { "io-shell" },
                 TopBar {}
                 main { class: "io-page", Outlet::<Route> {} }
             }
-            BottomNav {}
+            if !focused {
+                BottomNav {}
+            }
         },
     }
 }
@@ -274,19 +280,6 @@ fn PageHeader(#[props(into)] title: String, #[props(into)] subtitle: Option<Stri
     }
 }
 
-/// The session in progress. The session screen (#28) replaces this placeholder.
-#[component]
-fn Session() -> Element {
-    rsx! {
-        PageHeader { title: "Session" }
-        EmptyState {
-            title: "Session started",
-            message: "Logging sets is coming soon.",
-            Link { class: "io-button io-button-secondary", to: Route::Home {}, "Go home" }
-        }
-    }
-}
-
 #[component]
 fn Programs() -> Element {
     rsx! {
@@ -307,6 +300,11 @@ fn Settings() -> Element {
             p { class: "io-muted", "Weights are shown in kilograms." }
         }
     }
+}
+
+#[component]
+fn Workout() -> Element {
+    rsx! { super::session::SessionPage {} }
 }
 
 #[component]
@@ -348,7 +346,7 @@ mod tests {
         assert_eq!(Route::History {}.to_string(), "/history");
         assert_eq!(Route::Programs {}.to_string(), "/programs");
         assert_eq!(Route::Settings {}.to_string(), "/settings");
-        assert_eq!(Route::Session {}.to_string(), "/session");
+        assert_eq!(Route::Workout {}.to_string(), "/session");
         assert_eq!(Route::Gallery {}.to_string(), "/dev/components");
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(7));
         let path = format!("/history/session/{session}");

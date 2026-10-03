@@ -1137,6 +1137,161 @@ a.io-chip {
   color: var(--io-accent-text);
 }
 
+/* --- Workout session (#28) -------------------------------------------------------------------- */
+
+.io-session {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
+.io-session-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: var(--io-tap-small);
+}
+
+.io-session-heading {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.io-session-tag {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--io-accent-text);
+}
+
+.io-session-title {
+  font-family: var(--io-font-display);
+  font-weight: 900;
+  font-size: clamp(44px, 16vw, 64px);
+  line-height: 0.9;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.io-session-target {
+  font-size: 15px;
+  color: var(--io-muted);
+}
+
+.io-session-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.io-session-note {
+  font-size: 14px;
+  color: var(--io-muted);
+}
+
+.io-session-demo {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--io-tap);
+  padding: 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.io-session-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.io-session-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.io-session-next {
+  font-size: 13px;
+  text-align: center;
+  color: var(--io-muted);
+}
+
+.io-session-more {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.io-session-more .io-button {
+  padding: 0 8px;
+  font-size: 15px;
+}
+
+.io-session-plan .io-row:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.io-session-plan .io-row:last-child {
+  padding-bottom: 0;
+}
+
+/* A hold or interval timer, in place of the reps stepper. */
+.io-timer {
+  align-items: center;
+  text-align: center;
+}
+
+.io-timer-number {
+  font-family: var(--io-font-display);
+  font-weight: 900;
+  font-size: 96px;
+  line-height: 0.9;
+  font-variant-numeric: tabular-nums;
+}
+
+.io-timer[data-over="true"] .io-timer-number {
+  color: var(--io-accent-text);
+}
+
+/* A bottom sheet over the session: confirmations, the plate calculator. */
+.io-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgb(0 0 0 / 55%);
+}
+
+.io-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 40rem;
+  padding: 24px max(var(--io-gutter), env(safe-area-inset-right))
+    calc(env(safe-area-inset-bottom) + 24px) max(var(--io-gutter), env(safe-area-inset-left));
+  background: var(--io-surface);
+  border-top: 1px solid var(--io-line);
+  border-radius: var(--io-radius-card) var(--io-radius-card) 0 0;
+}
+
+.io-sheet h2 {
+  font-family: var(--io-font-display);
+  font-size: 34px;
+  font-weight: 900;
+  line-height: 1;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
 /* --- Home ------------------------------------------------------------------------------------- */
 
 /* The next day's name, as big as an exercise title on the session screen. */

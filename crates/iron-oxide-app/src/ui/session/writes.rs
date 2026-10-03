@@ -1,23 +1,19 @@
-//! Every write of a workout session goes through this file, one function per write.
+//! Every write of a workout session goes through this file: one function per write, with the
+//! exact arguments of its server function (and of the offline outbox's `Write::StartSession`,
+//! `Write::SaveSet` and `Write::FinishSession`, #30). Today each one calls the server; switching
+//! them to the outbox is a change to this file only.
 //!
-//! Today each one calls its server function directly. The offline outbox (#30) will replace their
-//! bodies, so that switching to it changes this file only. Callers generate the ids with
-//! `new_v7()` and pass the client's clock ([`now`]), so a retried write is idempotent (see
-//! `docs/api.md`).
-//!
-//! The home screen (#27) adds [`start_session`]; the session screen (#28) adds the others (save a
-//! set, finish).
+//! The ids are client-generated UUIDv7 (`SessionId::new_v7()`, `SetId::new_v7()`) and the
+//! timestamps come from the client, so the same call sent again is idempotent: callers keep the
+//! arguments of a failed write and resend them unchanged.
 
 use dioxus::prelude::*;
-use iron_oxide_domain::{SessionId, time::Timestamp};
+use iron_oxide_domain::time::Timestamp;
+use iron_oxide_domain::{LoggedSet, SessionId, SessionOutcome};
 
-use crate::api::sessions::{self, SessionView};
+use crate::api::sessions::{self, SessionSummary, SessionView};
 
-/// Starts a session of the active program on the next day of its rotation. `session_id` is new
-/// for each attempt (`SessionId::new_v7()`); retrying the same attempt reuses it.
-///
-/// # Errors
-/// The server function's: `409` when another session is in progress or no program is active.
+/// Starts a session of the active program on the next day of its rotation.
 pub async fn start_session(
     session_id: SessionId,
     started_at: Timestamp,
@@ -25,23 +21,19 @@ pub async fn start_session(
     sessions::start_session(session_id, started_at).await
 }
 
-/// The client's clock, for the timestamps the writes carry.
-#[must_use]
-pub fn now() -> Timestamp {
-    #[cfg(feature = "web")]
-    {
-        // Milliseconds since the epoch, a whole number well within i64.
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "Date.now() is a whole number of ms, far below i64::MAX"
-        )]
-        Timestamp::from_epoch_millis(js_sys::Date::now() as i64)
-    }
-    #[cfg(not(feature = "web"))]
-    {
-        let millis = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_millis());
-        Timestamp::from_epoch_millis(i64::try_from(millis).unwrap_or(i64::MAX))
-    }
+/// Saves one logged set.
+pub async fn save_set(
+    session_id: SessionId,
+    set: LoggedSet<Timestamp>,
+) -> Result<(), ServerFnError> {
+    sessions::save_set(session_id, set).await
+}
+
+/// Ends the session and returns its summary. Sending it again returns the same summary.
+pub async fn finish_session(
+    session_id: SessionId,
+    outcome: SessionOutcome,
+    finished_at: Timestamp,
+) -> Result<SessionSummary, ServerFnError> {
+    sessions::finish_session(session_id, outcome, finished_at).await
 }

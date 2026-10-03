@@ -13,7 +13,7 @@ use iron_oxide_domain::{
 
 use super::components::{Button, Card, EmptyState, LoadingState};
 use super::errors::{Errors, use_errors};
-use super::session::writes;
+use super::session::{platform, writes};
 use super::shell::Route;
 use super::weight::{use_unit, weight_number, weight_text};
 use crate::api::error::{ApiFailure, FailureKind};
@@ -395,26 +395,26 @@ fn TodayView(today: Today, on_stale: EventHandler<()>) -> Element {
     } else {
         "Next up"
     };
-    let last = last_session_text(&today.last, writes::now(), local_offset_minutes);
+    let last = last_session_text(&today.last, platform::now(), local_offset_minutes);
 
     let start = move |_| {
         if *busy.peek() {
             return;
         }
         if in_progress {
-            navigator.push(Route::Session {});
+            navigator.push(Route::Workout {});
             return;
         }
         busy.set(true);
         let (session_id, started_at) = attempt
             .peek()
-            .unwrap_or_else(|| (SessionId::new_v7(), writes::now()));
+            .unwrap_or_else(|| (SessionId::new_v7(), platform::now()));
         attempt.set(Some((session_id, started_at)));
         spawn(async move {
             match writes::start_session(session_id, started_at).await {
                 Ok(_) => {
                     attempt.set(None);
-                    navigator.push(Route::Session {});
+                    navigator.push(Route::Workout {});
                 }
                 Err(error) => {
                     errors.report(&error);
