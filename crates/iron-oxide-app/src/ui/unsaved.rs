@@ -3,10 +3,14 @@
 
 use dioxus::prelude::*;
 
+use crate::auth::browser;
 use crate::offline::{OutboxStatus, use_outbox};
 
 /// Its styles: Forge tokens (#26) with literal fallbacks, until the theme stylesheet takes them.
 const UNSAVED_CSS: Asset = asset!("/assets/unsaved.css");
+
+/// Asked before giving up the writes the server rejected: they are lost for good.
+const DISCARD_CONFIRM: &str = "Discard the changes the server refused? They will not be saved.";
 
 /// What the pill says.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +74,7 @@ pub fn Unsaved() -> Element {
                 }
             }
             button {
-                class: "io-unsaved__retry",
+                class: "io-unsaved__button",
                 r#type: "button",
                 onclick: move |_| {
                     if label.failed {
@@ -80,6 +84,18 @@ pub fn Unsaved() -> Element {
                     }
                 },
                 "Retry"
+            }
+            if label.failed {
+                button {
+                    class: "io-unsaved__button",
+                    r#type: "button",
+                    onclick: move |_| {
+                        if browser::confirm(DISCARD_CONFIRM) {
+                            outbox.discard_failed();
+                        }
+                    },
+                    "Discard"
+                }
             }
         }
     }
