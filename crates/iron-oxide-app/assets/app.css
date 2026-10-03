@@ -1312,6 +1312,117 @@ a.io-chip {
   text-align: center;
 }
 
+/* --- Rest timer (#29) ------------------------------------------------------------------------- */
+
+.io-rest {
+  gap: 24px;
+}
+
+.io-rest-logged {
+  font-family: var(--io-font-mono);
+  font-size: 13px;
+  color: var(--io-muted);
+  white-space: nowrap;
+}
+
+.io-rest-clock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+}
+
+.io-rest-number {
+  font-family: var(--io-font-display);
+  font-weight: 900;
+  font-size: clamp(120px, 43vw, 168px);
+  line-height: 0.85;
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
+}
+
+.io-rest[data-over="true"] .io-rest-number {
+  color: var(--io-accent-text);
+}
+
+.io-rest-bar {
+  width: 100%;
+  height: 12px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--io-track-soft);
+}
+
+.io-rest-fill {
+  height: 100%;
+  background: var(--io-accent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .io-rest-fill {
+    transition: width 250ms linear;
+  }
+}
+
+.io-rest-alert {
+  min-height: 1.45em;
+  font-weight: 600;
+  color: var(--io-accent-text);
+  text-align: center;
+}
+
+.io-rest-adjust {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.io-rest-step {
+  height: 64px;
+  border: 1px solid var(--io-track);
+  border-radius: 18px;
+  background: var(--io-surface);
+  color: var(--io-text);
+  font-family: var(--io-font-display);
+  font-size: 26px;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.io-rest-step:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.io-rest-next {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.io-rest-next-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.io-rest-next-value {
+  font-family: var(--io-font-display);
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+
+.io-rest-next .io-button {
+  flex: none;
+}
+
 /* --- Component gallery (debug builds) --------------------------------------------------------- */
 
 .io-gallery-theme {
