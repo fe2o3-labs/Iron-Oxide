@@ -19,6 +19,8 @@ pub enum BannerKind {
     Error,
     /// A note (`role="status"`).
     Info,
+    /// Something degraded that does not block the user, such as being offline (`role="status"`).
+    Warning,
 }
 
 /// The message at the top of the page.
@@ -40,12 +42,19 @@ pub struct Surfaced {
 }
 
 /// Decides what the user sees for `failure`. The message is the classified one (the server's own
-/// for 4xx and 503, a generic one otherwise); a `429` says how long to wait when the server said.
+/// for 4xx and 503, a generic one otherwise). Our rate limiter's `429` message already says how
+/// long to wait; only a `429` whose message does not gets the wait from its details added.
 #[must_use]
 pub fn surface(failure: &ApiFailure) -> Surfaced {
+    let says_when = failure
+        .message
+        .to_ascii_lowercase()
+        .contains("try again in");
     let message = match failure.retry_after_secs() {
-        Some(secs) => format!("{} Try again in {}.", failure.message, wait_text(secs)),
-        None => failure.message.clone(),
+        Some(secs) if !says_when => {
+            format!("{} Try again in {}.", failure.message, wait_text(secs))
+        }
+        _ => failure.message.clone(),
     };
     Surfaced {
         message,
@@ -86,12 +95,14 @@ impl Errors {
     pub fn report_captured(self, error: &CapturedError) {
         match error.downcast_ref::<ServerFnError>() {
             Some(error) => self.report(error),
-            None => self.show(BannerKind::Error, GENERIC_MESSAGE),
+            None => {
+                self.show(BannerKind::Error, GENERIC_MESSAGE);
+            }
         }
     }
 
-    /// Shows a banner.
-    pub fn show(mut self, kind: BannerKind, message: impl Into<String>) {
+    /// Shows a banner, replacing the current one. Returns its id, for [`Errors::dismiss_if`].
+    pub fn show(mut self, kind: BannerKind, message: impl Into<String>) -> u64 {
         let id = *self.next_id.peek();
         self.next_id.set(id + 1);
         self.banner.set(Some(Banner {
@@ -99,11 +110,20 @@ impl Errors {
             message: message.into(),
             id,
         }));
+        id
     }
 
     /// Hides the banner.
     pub fn dismiss(mut self) {
         self.banner.set(None);
+    }
+
+    /// Hides the banner if it is still the one with this `id` (not replaced by a newer one).
+    pub fn dismiss_if(mut self, id: u64) {
+        let current = self.banner.peek().as_ref().map(|banner| banner.id);
+        if current == Some(id) {
+            self.banner.set(None);
+        }
     }
 
     /// The banner on screen, if any.
@@ -186,8 +206,33 @@ mod tests {
         );
     }
 
+    /// The `429` our rate limiter sends: its message already has the wait, and is shown as it is.
+    #[cfg(feature = "server")]
     #[test]
-    fn a_429_says_how_long_to_wait() {
+    fn the_rate_limiter_429_is_shown_as_it_is() {
+        for secs in [1, 42, 125] {
+            let message = crate::server::rate_limit::too_many_requests_message(secs);
+            let details = serde_json::json!({ "retry_after_secs": secs });
+            let shown = surfaced(&server(429, &message, Some(details)));
+            assert_eq!(shown.message, message);
+            assert_eq!(shown.message.matches("again in").count(), 1);
+            assert!(!shown.sign_in);
+        }
+    }
+
+    /// The same message, as the gallery shows it, without the server feature.
+    #[test]
+    fn a_429_that_says_when_is_not_repeated() {
+        let message = "Too many requests. Please try again in 1 second.";
+        let details = serde_json::json!({ "retry_after_secs": 1 });
+        assert_eq!(
+            surfaced(&server(429, message, Some(details))).message,
+            message
+        );
+    }
+
+    #[test]
+    fn a_429_that_does_not_say_when_gets_the_wait() {
         let details = serde_json::json!({ "retry_after_secs": 12 });
         assert_eq!(
             surfaced(&server(429, "Too many requests.", Some(details))).message,

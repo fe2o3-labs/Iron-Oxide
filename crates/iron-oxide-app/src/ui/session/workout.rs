@@ -51,6 +51,8 @@ pub fn Workout(
     let mut busy = use_signal(|| false);
     // The set being saved, frozen until the server answers for good.
     let mut pending = use_signal(|| None::<LoggedSet<Timestamp>>);
+    // The banner that reported the failed save, cleared once a retry succeeds.
+    let mut failed_banner = use_signal(|| None::<u64>);
     // The finish being sent, resent unchanged after a failure.
     let mut finishing = use_signal(|| None::<(SessionOutcome, Timestamp)>);
     let mut ask = use_signal(|| None::<Ask>);
@@ -255,7 +257,6 @@ pub fn Workout(
         if *busy.peek() {
             return;
         }
-        let retry = pending.peek().is_some();
         let set = pending.peek().clone().unwrap_or_else(|| {
             flow::logged_set(
                 SetId::new_v7(),
@@ -281,14 +282,15 @@ pub fn Workout(
                         rest::store(session_id, &started);
                         rest.set(Some(started));
                     }
-                    if retry {
-                        // The failure it reported is over.
-                        errors.dismiss();
+                    if let Some(id) = failed_banner.take() {
+                        // The failure it reported is over (unless a newer banner replaced it).
+                        errors.dismiss_if(id);
                     }
                 }
                 Err(error) => {
                     let failure = ApiFailure::classify(&error);
                     errors.report(&error);
+                    failed_banner.set(errors.banner().map(|banner| banner.id));
                     match failure.kind {
                         // Refused for good: let the lifter change it and send a new set.
                         FailureKind::Invalid | FailureKind::NotFound | FailureKind::Forbidden => {

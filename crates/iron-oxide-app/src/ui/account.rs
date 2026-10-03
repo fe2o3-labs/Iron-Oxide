@@ -525,20 +525,20 @@ fn SignedOut(auth: Auth) -> Element {
         }
         div { class: "io-actions",
             button {
-                id: "passkey-sign-up",
-                class: "io-button io-button-primary",
-                disabled,
-                "aria-busy": busy == Some(Busy::SignUp),
-                onclick: sign_up,
-                if busy == Some(Busy::SignUp) { "Creating account…" } else { "Create account with a passkey" }
-            }
-            button {
                 id: "passkey-sign-in",
                 class: "io-button io-button-primary",
                 disabled,
                 "aria-busy": busy == Some(Busy::SignIn),
                 onclick: sign_in,
                 if busy == Some(Busy::SignIn) { "Signing in…" } else { "Sign in with a passkey" }
+            }
+            button {
+                id: "passkey-sign-up",
+                class: "io-button io-button-secondary",
+                disabled,
+                "aria-busy": busy == Some(Busy::SignUp),
+                onclick: sign_up,
+                if busy == Some(Busy::SignUp) { "Creating account…" } else { "Create account with a passkey" }
             }
             button {
                 id: "google-sign-in",

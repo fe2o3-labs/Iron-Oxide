@@ -185,6 +185,34 @@ mod tests {
         }
     }
 
+    /// Tap targets are 56 px; 44 px is only for the header's icon buttons (and the header rows:
+    /// the top bar and the workout's header).
+    #[test]
+    fn only_header_icon_buttons_use_the_small_tap_size() {
+        let css = css();
+        let mut selectors = Vec::new();
+        for (index, _) in css.match_indices("var(--io-tap-small)") {
+            let block_start = css[..index].rfind('{').unwrap();
+            let rule_start = css[..block_start].rfind('}').map_or(0, |end| end + 1);
+            selectors.push(
+                css[rule_start..block_start]
+                    .trim()
+                    .rsplit("*/")
+                    .next()
+                    .unwrap()
+                    .trim(),
+            );
+        }
+        selectors.sort_unstable();
+        selectors.dedup();
+        assert_eq!(
+            selectors,
+            [".io-icon-button", ".io-session-header", ".io-topbar"]
+        );
+        assert!(block(&css, "button.io-chip {").contains("min-height: var(--io-tap);"));
+        assert!(block(&css, ".io-banner .io-icon-button {").contains("height: var(--io-tap);"));
+    }
+
     #[test]
     fn every_font_is_declared_in_the_stylesheet() {
         let css = css();
