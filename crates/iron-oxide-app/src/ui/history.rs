@@ -26,10 +26,8 @@ use iron_oxide_domain::{ProgramId, entitlements::Feature};
 
 use super::errors::{Errors, use_errors};
 use super::shell::Route;
-use super::weight::UnitSetting;
 use crate::api::billing::my_entitlements;
 use crate::api::programs::{get_active_program, get_program};
-use crate::api::settings::get_settings;
 pub use details::HistorySession;
 pub use list::History;
 pub use progress::ExerciseProgress;
@@ -105,25 +103,14 @@ pub fn HistoryLayout() -> Element {
     let names = use_signal(Names::default);
     let charts = use_signal(|| ChartAccess::Checking);
     let context = use_context_provider(|| HistoryContext { names, charts });
-    let unit = use_context::<UnitSetting>().0;
 
     use_hook(move || {
         if !cfg!(feature = "web") {
             return;
         }
         context.check_plan(errors);
-        // Weights in the user's unit. The settings screen (#34) keeps it up to date afterwards.
-        spawn(async move {
-            let mut unit = unit;
-            match get_settings().await {
-                Ok(settings) => {
-                    if *unit.peek() != settings.unit {
-                        unit.set(settings.unit);
-                    }
-                }
-                Err(error) => errors.report(&error),
-            }
-        });
+        // Weights are in the user's unit: the shared settings (`ui::user_settings`) set it as
+        // soon as the session is signed in.
         // The active program names most exercises, including on the chart screens (an exercise's
         // series does not say which program it came from).
         spawn(async move {
