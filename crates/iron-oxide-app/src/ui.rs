@@ -7,6 +7,7 @@
 //! - `weight`: weights in the user's unit.
 //! - `plates`: the plate calculator (inline, as a sheet, and the `/tools/plates` page).
 //! - `history`: the history screens (#33).
+//! - `session`: the workout session screens (#28).
 
 mod account;
 #[cfg_attr(
@@ -31,6 +32,7 @@ mod errors;
 mod gallery;
 mod history;
 mod plates;
+mod session;
 mod shell;
 pub(crate) mod theme;
 pub mod unsaved;

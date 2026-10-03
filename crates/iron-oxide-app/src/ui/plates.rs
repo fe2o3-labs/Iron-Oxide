@@ -7,7 +7,7 @@
 //!
 //! Three ways in:
 //! - [`PlateCalculator`]: the calculator for a weight, inline (loads the settings itself).
-//! - [`PlateCalculatorSheet`]: the same in a bottom sheet, opened from the session screen (#28).
+//! - [`PlateCalculatorSheet`]: the same in a bottom sheet, opened from the set screen (#28).
 //! - [`PlateTool`]: the `/tools/plates` page, with a weight stepper.
 
 use dioxus::prelude::*;
@@ -240,7 +240,6 @@ fn use_plate_view(weight: Weight, setup: PlateSetup) -> Memo<PlateView> {
 /// ```ignore
 /// PlateCalculator { weight: target }
 /// ```
-#[allow(dead_code, reason = "opened by the session screen (#28)")]
 #[component]
 pub fn PlateCalculator(weight: Weight) -> Element {
     let settings = use_plate_settings();
@@ -264,7 +263,6 @@ pub fn PlateCalculator(weight: Weight) -> Element {
 ///     PlateCalculatorSheet { weight: target, on_close: move |()| plates_open.set(false) }
 /// }
 /// ```
-#[allow(dead_code, reason = "opened by the session screen (#28)")]
 #[component]
 pub fn PlateCalculatorSheet(weight: Weight, on_close: EventHandler<()>) -> Element {
     rsx! {
