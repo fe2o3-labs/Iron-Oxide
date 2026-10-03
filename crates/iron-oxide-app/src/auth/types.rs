@@ -5,6 +5,17 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Request header the outbox (#30) sends with every write: the id of the user the write was
+/// queued for. When present, `AuthUser` refuses the request with `409`
+/// [`ACCOUNT_CHANGED_MESSAGE`] unless it is the session's user, so a write queued for one
+/// account never lands in another (the browser's cookie may have changed in another tab).
+/// Requests without it are unaffected.
+pub const EXPECTED_USER_HEADER: &str = "x-io-expected-user";
+
+/// The `409` message for a request whose [`EXPECTED_USER_HEADER`] is not the session's user.
+pub const ACCOUNT_CHANGED_MESSAGE: &str =
+    "Signed in with another account. Sign in again to send your unsaved changes.";
+
 /// Identifies a user account (`users.id`).
 ///
 /// Only the server creates one from the session; a user id sent by the client is never trusted.
