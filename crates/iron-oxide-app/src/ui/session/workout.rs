@@ -60,6 +60,8 @@ pub fn Workout(initial: Active, on_reload: EventHandler<()>) -> Element {
     });
     // The screen stays on for the whole workout.
     use_hook(|| Rc::new(platform::ScreenAwake::keep()));
+    // Any tap, or the page coming back, resumes a suspended or interrupted audio context.
+    use_hook(|| Rc::new(platform::KeepAudioReady::new()));
 
     let state = active.read();
     let plan = &state.plan;
@@ -334,12 +336,12 @@ struct Edit {
 fn rest_length(state: &Active, done: Step) -> Option<iron_oxide_domain::Seconds> {
     let steps = flow::steps(&state.plan, state.settings.bar_weight);
     let index = steps.iter().position(|step| *step == done)?;
-    let has_next = flow::current_step(&steps, &state.plan, &state.sets, &state.skipped).is_some();
+    let next = flow::current_step(&steps, &state.plan, &state.sets, &state.skipped);
     flow::rest_after(
         &state.plan,
         &steps,
         index,
-        has_next,
+        next,
         state.settings.default_rest,
     )
 }

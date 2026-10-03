@@ -351,36 +351,69 @@ pub fn clock_text(left: Duration) -> String {
     Seconds::from_millis_ceil(millis).map_or_else(|_| "–".to_owned(), |seconds| seconds.to_string())
 }
 
-/// The rest after the working or warm-up set `steps[done]`, or `None` for no rest timer:
+/// The rest after the working or warm-up set `steps[done]`, before `next` (the next step not done
+/// yet, skipped exercises left out), or `None` for no rest timer:
 /// - none after the last set of the day, nor after a warm-up (warm-ups lead straight into the
 ///   next set);
-/// - in a superset, the rest of a member before the last is the transition to the next member
-///   (often 0: none);
-/// - otherwise the exercise's rest, or the user's default rest when the program says 0.
+/// - in a superset, when `next` is another member's working set, the member's own rest is the
+///   transition (often 0: none);
+/// - otherwise, in a superset (the round is over, or the other members were skipped), the
+///   superset's rest: its last member's, or the member's own when that one is 0;
+/// - outside a superset, the exercise's rest;
+/// - a rest of 0 there takes the user's default rest.
 #[must_use]
 pub fn rest_after(
     plan: &SessionPlan,
     steps: &[Step],
     done: usize,
-    has_next: bool,
+    next: Option<usize>,
     default_rest: Seconds,
 ) -> Option<Seconds> {
     let step = steps.get(done)?;
-    if !has_next || step.warm_up {
+    let next = steps.get(next?)?;
+    if step.warm_up {
         return None;
     }
     let exercise = &plan.exercises[step.exercise].exercise;
-    let transition = exercise.superset.is_some()
-        && plan
-            .exercises
-            .get(step.exercise + 1)
-            .is_some_and(|next| next.exercise.superset == exercise.superset);
-    let rest = if transition || !exercise.rest.is_zero() {
-        exercise.rest
-    } else {
-        default_rest
+    let rest = match &exercise.superset {
+        Some(label) => {
+            let same_group = next.exercise != step.exercise
+                && !next.warm_up
+                && plan.exercises[next.exercise].exercise.superset.as_ref() == Some(label)
+                && group_of(plan, step.exercise).contains(&next.exercise);
+            if same_group {
+                return (!exercise.rest.is_zero()).then_some(exercise.rest);
+            }
+            let last = group_of(plan, step.exercise).end - 1;
+            let group_rest = plan.exercises[last].exercise.rest;
+            if group_rest.is_zero() {
+                exercise.rest
+            } else {
+                group_rest
+            }
+        }
+        None => exercise.rest,
     };
-    (!rest.is_zero()).then_some(rest)
+    Some(if rest.is_zero() { default_rest } else { rest }).filter(|rest| !rest.is_zero())
+}
+
+/// The plan positions of the superset `exercise` belongs to (the exercise alone outside one).
+fn group_of(plan: &SessionPlan, exercise: usize) -> std::ops::Range<usize> {
+    let label = &plan.exercises[exercise].exercise.superset;
+    if label.is_none() {
+        return exercise..exercise + 1;
+    }
+    let same = |index: usize| &plan.exercises[index].exercise.superset == label;
+    let start = (0..=exercise)
+        .rev()
+        .take_while(|&index| same(index))
+        .last()
+        .unwrap_or(exercise);
+    let end = (exercise..plan.exercises.len())
+        .take_while(|&index| same(index))
+        .last()
+        .map_or(exercise + 1, |last| last + 1);
+    start..end
 }
 
 /// The rest screen's header: `REST · BACK SQUAT` and `Set 2 logged ✓` for the set it follows.
@@ -1135,42 +1168,62 @@ mod tests {
         let steps = steps(&plan, kg(20.0));
         let default = Seconds::new(120);
         // [press warm-up, press 1, chin 1, press 2, chin 2, curl 1]
+        let rest = |plan: &SessionPlan, steps: &[Step], done: usize| {
+            rest_after(
+                plan,
+                steps,
+                done,
+                (done + 1 < steps.len()).then_some(done + 1),
+                default,
+            )
+        };
+        assert_eq!(rest(&plan, &steps, 0), None, "after a warm-up");
+        assert_eq!(rest(&plan, &steps, 1), None, "A1 → A2 transition of 0");
         assert_eq!(
-            rest_after(&plan, &steps, 0, true, default),
-            None,
-            "after a warm-up"
-        );
-        assert_eq!(
-            rest_after(&plan, &steps, 1, true, default),
-            None,
-            "A1 → A2 transition of 0"
-        );
-        assert_eq!(
-            rest_after(&plan, &steps, 2, true, default),
+            rest(&plan, &steps, 2),
             Some(Seconds::new(90)),
             "the last member rests for the group"
         );
-        assert_eq!(
-            rest_after(&plan, &steps, 4, true, default),
-            Some(Seconds::new(90))
-        );
+        assert_eq!(rest(&plan, &steps, 4), Some(Seconds::new(90)));
         // A rest of 0 outside a superset takes the user's default; the last set rests not at all.
         let mut single = planned("curl", 0, 2, None);
         single.exercise.rest = Seconds::new(0);
         let alone = super::tests::plan(vec![single]);
         let alone_steps = super::steps(&alone, kg(20.0));
-        assert_eq!(
-            rest_after(&alone, &alone_steps, 0, true, default),
-            Some(default)
-        );
-        assert_eq!(rest_after(&alone, &alone_steps, 1, false, default), None);
+        assert_eq!(rest(&alone, &alone_steps, 0), Some(default));
+        assert_eq!(rest(&alone, &alone_steps, 1), None);
         // A transition with its own rest keeps it.
         let mut timed = superset_day();
         timed.exercises[0].exercise.rest = Seconds::new(15);
         let timed_steps = super::steps(&timed, kg(20.0));
+        assert_eq!(rest(&timed, &timed_steps, 1), Some(Seconds::new(15)));
+    }
+
+    /// Review of #99: skipping one member keeps the superset's shared rest for the other.
+    #[test]
+    fn superset_rest_when_the_other_member_is_skipped() {
+        let plan = superset_day();
+        let steps = steps(&plan, kg(20.0));
+        let skipped: BTreeSet<ExerciseId> = [ExerciseId::new("chin-up").unwrap()].into();
+        let mut sets = vec![
+            logged("press", true, 0, 20.0, 2_000),
+            logged("press", false, 0, 100.0, 3_000),
+        ];
+        let rest_length = |sets: &[LoggedSet<Timestamp>], done: usize| {
+            let next = current_step(&steps, &plan, sets, &skipped);
+            rest_after(&plan, &steps, done, next, Seconds::new(120))
+        };
+        assert_eq!(current_step(&steps, &plan, &sets, &skipped), Some(3));
+        assert_eq!(rest_length(&sets, 1), Some(Seconds::new(90)));
+        sets.push(logged("press", false, 1, 100.0, 4_000));
+        assert_eq!(rest_length(&sets, 3), Some(Seconds::new(90)));
+        // The last member skipped the other way round: chin-up rests with its own 90 s.
+        let press: BTreeSet<ExerciseId> = [ExerciseId::new("press").unwrap()].into();
+        let chin = vec![logged("chin-up", false, 0, 0.0, 3_000)];
+        let next = current_step(&steps, &plan, &chin, &press);
         assert_eq!(
-            rest_after(&timed, &timed_steps, 1, true, default),
-            Some(Seconds::new(15))
+            rest_after(&plan, &steps, 2, next, Seconds::new(120)),
+            Some(Seconds::new(90))
         );
     }
 
