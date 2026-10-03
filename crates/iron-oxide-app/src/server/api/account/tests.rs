@@ -1165,21 +1165,21 @@ async fn a_trickled_import_times_out_and_frees_its_slot(db: PgPool) {
         .unwrap();
     let (status, body) = c.send(request).await;
     assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{body}");
-    let slots = api.import_slots();
+    let slots = api.account_slots();
     assert_eq!(
         slots.available_permits(),
-        MAX_CONCURRENT_IMPORTS,
+        MAX_ACCOUNT_OPERATIONS,
         "the slot is freed"
     );
     // Twice as many trickled imports as slots, one after the other: none is left holding one.
-    for _ in 0..2 * MAX_CONCURRENT_IMPORTS {
+    for _ in 0..2 * MAX_ACCOUNT_OPERATIONS {
         let request = c
             .post(IMPORT)
             .body(crate::server::limits::tests::chunked(8 * 1024, true))
             .unwrap();
         assert_eq!(c.send(request).await.0, StatusCode::REQUEST_TIMEOUT);
     }
-    assert_eq!(slots.available_permits(), MAX_CONCURRENT_IMPORTS);
+    assert_eq!(slots.available_permits(), MAX_ACCOUNT_OPERATIONS);
     assert_ne!(
         import(&mut c, &document).await.unwrap(),
         ImportSummary::default()
@@ -1198,8 +1198,8 @@ async fn a_third_concurrent_import_is_a_retryable_503(db: PgPool) {
 
     // Two imports running: every slot is taken.
     let held = api
-        .import_slots()
-        .try_acquire_many_owned(u32::try_from(MAX_CONCURRENT_IMPORTS).unwrap())
+        .account_slots()
+        .try_acquire_many_owned(u32::try_from(MAX_ACCOUNT_OPERATIONS).unwrap())
         .unwrap();
     let response = c
         .send_response(c.post(IMPORT).body(Body::from(body.clone())).unwrap())
@@ -1225,5 +1225,171 @@ async fn a_third_concurrent_import_is_a_retryable_503(db: PgPool) {
     assert_ne!(
         import(&mut c, &document).await.unwrap(),
         ImportSummary::default()
+    );
+}
+
+/// The re-check's scenario: two accounts with diverging copies of one program import each other's
+/// exports. The second export then holds the program and its "(imported)" companion, which the
+/// same import also creates: each creation id is resolved once, never inserted twice.
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn diverging_copies_import_each_others_exports_and_then_nothing(db: PgPool) {
+    let api = TestApi::new(db.clone()).await;
+    let (mut a, mut b) = api.users_a_and_b().await;
+    let creation = CreationId::new_v7();
+    upload(
+        &mut a,
+        json!({ "kind": "new_program", "creation_id": creation }),
+        &program_json("Main", 5),
+    )
+    .await;
+    let first = export(&mut a).await;
+    import(&mut b, &first).await.unwrap();
+    // Each edits their copy.
+    for (user, reps) in [(&mut a, 6), (&mut b, 7)] {
+        let program: Vec<Value> = user
+            .call("/api/programs/list", json!({ "include_archived": false }))
+            .await
+            .unwrap();
+        upload(
+            user,
+            json!({ "kind": "new_version", "program_id": program[0]["id"] }),
+            &program_json("Main", reps),
+        )
+        .await;
+    }
+    // A imports B's export: A's program gets its companion with B's version.
+    let from_b = export(&mut b).await;
+    let summary = import(&mut a, &from_b).await.unwrap();
+    assert_eq!((summary.programs, summary.versions), (1, 1));
+    // B imports A's export, which now holds the program and its companion.
+    let from_a = export(&mut a).await;
+    let names: Vec<&str> = from_a.programs.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["Main", "Main (imported)"]);
+    let b_before = row_counts(&db, b.id).await;
+    let summary = import(&mut b, &from_a).await.unwrap();
+    assert!(summary.programs >= 1, "{summary:?}");
+    assert_ne!(row_counts(&db, b.id).await, b_before);
+
+    // Again, both ways: nothing.
+    let b_after = export(&mut b).await;
+    assert_eq!(
+        import(&mut b, &from_a).await.unwrap(),
+        ImportSummary::default()
+    );
+    assert_eq!(
+        import(&mut a, &from_b).await.unwrap(),
+        ImportSummary::default()
+    );
+    assert_eq!(training(&export(&mut b).await), training(&b_after));
+    // Each account's own program still trains with its own current version.
+    for (user, reps) in [(&mut a, 6), (&mut b, 7)] {
+        let active: Value = user
+            .call("/api/programs/list", json!({ "include_archived": false }))
+            .await
+            .unwrap();
+        let detail: Value = user
+            .call(
+                "/api/programs/get",
+                json!({ "program_id": active[0]["id"] }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            detail["document"]["days"][0]["exercises"][0]["work"]["reps"]["reps"],
+            json!(reps)
+        );
+    }
+}
+
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn a_deletion_while_two_imports_run_is_a_retryable_503(db: PgPool) {
+    let api = TestApi::new(db.clone()).await;
+    let mut a = api.user("A").await;
+    seed(&mut a).await;
+    let counts = row_counts(&db, a.id).await;
+    // Two imports (or deletions) running: every slot is taken.
+    let held = api
+        .account_slots()
+        .try_acquire_many_owned(u32::try_from(MAX_ACCOUNT_OPERATIONS).unwrap())
+        .unwrap();
+    let response = a
+        .send_response(a.post(DELETE).body(Body::from("{}")).unwrap())
+        .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.headers()[header::RETRY_AFTER],
+        BUSY_RETRY_AFTER_SECS.to_string().as_str()
+    );
+    assert_eq!(row_counts(&db, a.id).await, counts, "nothing deleted");
+    drop(held);
+    a.call::<()>(DELETE, json!({})).await.unwrap();
+    assert_eq!(
+        api.account_slots().available_permits(),
+        MAX_ACCOUNT_OPERATIONS
+    );
+}
+
+/// Imports whose clients go away never hold more dedicated (60 s) connections than the slots:
+/// each slot is held by the import's work, which goes on without its client.
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn abandoned_imports_never_hold_more_dedicated_connections_than_the_slots(db: PgPool) {
+    let api = TestApi::new(db.clone()).await;
+    let mut a = api.user("A").await;
+    seed(&mut a).await;
+    let mut document = export(&mut a).await;
+    document.sessions[0].sets = (0..20_000_u16).map(|i| set(i % 100, t(1))).collect();
+    let body = json!({ "document": serde_json::to_string(&document).unwrap() }).to_string();
+    let mut importers = Vec::new();
+    for i in 0..6 {
+        importers.push(api.user(&format!("C{i}")).await);
+    }
+
+    let count_dedicated = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM pg_stat_activity
+             WHERE application_name = $1 AND datname = current_database()",
+        )
+        .bind(crate::server::db::account::ACCOUNT_CONNECTION_NAME)
+        .fetch_one(&db)
+        .await
+        .unwrap()
+    };
+    let tasks: Vec<_> = importers
+        .into_iter()
+        .map(|user| {
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut user = user;
+                let request = user.post(IMPORT).body(Body::from(body)).unwrap();
+                user.send_response(request).await.status()
+            })
+        })
+        .collect();
+    // The clients give up almost at once.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    for task in &tasks {
+        task.abort();
+    }
+    let slots = api.account_slots();
+    let mut max = 0;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        max = max.max(count_dedicated().await);
+        let idle = slots.available_permits() == MAX_ACCOUNT_OPERATIONS;
+        if idle && count_dedicated().await == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "imports never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        max <= i64::try_from(MAX_ACCOUNT_OPERATIONS).unwrap(),
+        "{max} dedicated connections at once"
     );
 }

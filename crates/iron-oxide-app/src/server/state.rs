@@ -38,9 +38,9 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// The Postgres connection pool.
     pub db: PgPool,
-    /// The account imports this process runs at once (#22), see
-    /// `server::api::account::MAX_CONCURRENT_IMPORTS`.
-    pub import_slots: Arc<Semaphore>,
+    /// The account imports and deletions this process runs at once (#22), see
+    /// `server::api::account::MAX_ACCOUNT_OPERATIONS`.
+    pub account_slots: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -62,7 +62,7 @@ impl AppState {
         Self {
             config,
             db,
-            import_slots: Arc::new(Semaphore::new(super::api::account::MAX_CONCURRENT_IMPORTS)),
+            account_slots: Arc::new(Semaphore::new(super::api::account::MAX_ACCOUNT_OPERATIONS)),
         }
     }
 }

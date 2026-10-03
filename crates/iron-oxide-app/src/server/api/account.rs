@@ -7,12 +7,13 @@ use std::{
 };
 
 use dioxus::logger::tracing;
+use dioxus::prelude::ServerFnError;
 use dioxus::server::axum::{
     body::Body,
     extract::{FromRequestParts, Request},
-    http::{HeaderValue, StatusCode, header::RETRY_AFTER},
+    http::StatusCode,
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use iron_oxide_domain::{
     CreationId, ExerciseId, LoggedSet, Reps, Seconds, SessionId, SessionStatus, SetId,
@@ -26,12 +27,10 @@ use sqlx::{
     Connection, PgConnection, PgPool,
     types::{Uuid, time::OffsetDateTime},
 };
+use std::sync::Arc;
+use tokio::sync::OwnedSemaphorePermit;
 
-use super::{
-    ApiError,
-    error::{INTERNAL, TRANSIENT},
-    errors_layer, offset_date_time, settings, timestamp,
-};
+use super::{ApiError, error::INTERNAL, errors_layer, offset_date_time, settings, timestamp};
 use crate::api::{
     account::{
         EXPORT_FORMAT, EXPORT_FORMAT_VERSION, ExportAccount, ExportDocument, ExportLinkedAccount,
@@ -281,20 +280,39 @@ fn parse_status(name: &str) -> Result<SessionStatus, String> {
 
 // --- Import ------------------------------------------------------------------------------------
 
-/// How many imports one server process runs at once. Each holds its body (up to
-/// [`IMPORT_BODY_LIMIT`]), the decoded document and its parsed form: about 80 MB at the largest,
-/// on a 512 MB machine. A third concurrent import gets a retryable `503` with `Retry-After`
-/// before its body is read.
-pub const MAX_CONCURRENT_IMPORTS: usize = 2;
+/// How many account imports and deletions one server process runs at once, together. Each runs on
+/// a dedicated connection with 60 s deadlines (`repo::long_connection`), and an import also holds
+/// its body (up to [`IMPORT_BODY_LIMIT`]), the decoded document and its parsed form: about 80 MB
+/// at the largest, on a 512 MB machine. One more gets a retryable `503` with `Retry-After`
+/// ([`BUSY_RETRY_AFTER_SECS`]): an import before its body is read.
+pub const MAX_ACCOUNT_OPERATIONS: usize = 2;
 
-/// How long a client waits before retrying an import refused because every slot was taken.
+/// How long a client waits before retrying an import or a deletion refused for lack of a slot.
 pub const BUSY_RETRY_AFTER_SECS: u64 = 5;
+
+/// One of the process's [`MAX_ACCOUNT_OPERATIONS`] slots, held by an import or a deletion until its
+/// work has finished. An import's is taken by its middleware and handed to the server function
+/// through the request's extensions: Dioxus runs the function in a task of its own that goes on
+/// after the client disconnects, and the slot goes with it, so abandoned imports never hold more
+/// dedicated connections than the slots.
+#[derive(Debug, Clone)]
+pub struct AccountSlot(#[allow(dead_code, reason = "held, never read")] Arc<OwnedSemaphorePermit>);
+
+/// Takes one of the process's account slots, or a retryable `503`.
+fn take_slot(state: &AppState) -> Result<AccountSlot, ApiError> {
+    match state.account_slots.clone().try_acquire_owned() {
+        Ok(permit) => Ok(AccountSlot(Arc::new(permit))),
+        Err(_) => {
+            tracing::warn!("account import or deletion refused: every slot is taken");
+            Err(ApiError::Busy(BUSY_RETRY_AFTER_SECS))
+        }
+    }
+}
 
 /// Middleware of `import_account_data`, in order:
 /// 1. the session: a signed-out client gets its `401` without the body being read;
-/// 2. one of the process's [`MAX_CONCURRENT_IMPORTS`] slots, held until the response is ready
-///    (the body read and the server function included): none free is a retryable `503` with
-///    `Retry-After`;
+/// 2. an [`AccountSlot`] (none free: `503` with `Retry-After`), put in the request's extensions for
+///    the server function, which holds it until the import has finished;
 /// 3. the body, with [`limits::read_body`]: `413` past [`IMPORT_BODY_LIMIT`] (announced or
 ///    actually sent), `408` when it does not arrive within the import's read timeout, which then
 ///    frees the slot. The route is in `limits::OWN_BODY_LIMIT`, so the default cap leaves it alone.
@@ -307,15 +325,11 @@ pub async fn limit_import_body(request: Request, next: Next) -> Response {
         tracing::error!("AppState missing on the import route: check server::router");
         return errors_layer::error_response(StatusCode::INTERNAL_SERVER_ERROR, INTERNAL, None);
     };
-    let Ok(_slot) = state.import_slots.clone().try_acquire_owned() else {
-        tracing::warn!("import refused: every import slot is taken");
-        let mut response =
-            errors_layer::error_response(StatusCode::SERVICE_UNAVAILABLE, TRANSIENT, None);
-        response
-            .headers_mut()
-            .insert(RETRY_AFTER, HeaderValue::from(BUSY_RETRY_AFTER_SECS));
-        return response;
+    let slot = match take_slot(&state) {
+        Ok(slot) => slot,
+        Err(error) => return ServerFnError::from(error).into_response(),
     };
+    parts.extensions.insert(slot);
     let timeout = state.config.request_limits.import_body_read_timeout;
     match limits::read_body(&parts.headers, body, IMPORT_BODY_LIMIT, timeout).await {
         Ok(bytes) => {
@@ -340,6 +354,8 @@ pub async fn import(
     pool: &PgPool,
     user: AuthUser,
     document: &str,
+    // Held until the import has finished, client gone or not.
+    _slot: AccountSlot,
 ) -> Result<ImportSummary, ApiError> {
     if document.len() > MAX_EXPORT_BYTES {
         return Err(too_large());
@@ -686,11 +702,17 @@ impl Import {
         summary.training_maxes =
             count(repo::insert_training_maxes(tx, owner, &self.training_maxes).await?);
 
+        // Every program of this import, by creation id: the account's (looked up above), and those
+        // this import creates (the export's programs and the companions), so that no creation id
+        // is ever inserted twice, whatever the order (an export may hold a program and its
+        // companion, which an earlier step of the same import may have just created).
+        let mut resolved = existing;
         let mut program_ids = HashMap::new();
         let mut version_ids = HashMap::new();
         for program in &self.programs {
-            let id = match existing.get(&program.creation_id) {
-                Some(id) => *id,
+            let account_has = resolved.get(&program.creation_id).copied();
+            let id = match account_has {
+                Some(id) => id,
                 None => {
                     if !program.archived {
                         entitlements::reserve_quota(tx, user, Quota::CustomPrograms).await?;
@@ -703,11 +725,13 @@ impl Import {
                         created_at: program.created_at,
                     };
                     summary.programs += 1;
-                    repo::insert_program(tx, owner, &new).await?
+                    let id = repo::insert_program(tx, owner, &new).await?;
+                    resolved.insert(program.creation_id, id);
+                    id
                 }
             };
             program_ids.insert(program.creation_id, id);
-            if existing.contains_key(&program.creation_id) {
+            if account_has.is_some() {
                 // The account's program keeps its versions, its current version and its place
                 // as the active program. Versions are matched by content, never by number
                 // alone; the export's versions it does not have go to the program's archived
@@ -726,8 +750,14 @@ impl Import {
                     continue;
                 }
                 let creation = companion_creation_id(program.creation_id);
-                let companion = match repo::program_by_creation(tx, owner, creation).await? {
-                    Some((companion, _)) => companion,
+                let known = match resolved.get(&creation) {
+                    Some(companion) => Some(*companion),
+                    None => repo::program_by_creation(tx, owner, creation)
+                        .await?
+                        .map(|(companion, _)| companion),
+                };
+                let companion = match known {
+                    Some(companion) => companion,
                     None => {
                         summary.programs += 1;
                         let name = companion_name(&program.name);
@@ -743,6 +773,7 @@ impl Import {
                         repo::insert_program(tx, owner, &new).await?
                     }
                 };
+                resolved.insert(creation, companion);
                 for (number, version) in
                     add_versions(tx, owner, companion, foreign, &mut summary).await?
                 {
@@ -923,6 +954,8 @@ pub async fn delete(ctx: &AuthContext, user: AuthUser) -> Result<(), ApiError> {
         Err(error) => return Err(error.into()),
     }
     let owner = user.owner();
+    // One of the slots shared with the imports, held until the deletion has finished.
+    let _slot = take_slot(&ctx.app)?;
     // Before anything is deleted: a failure keeps the account, so the user is never left billed
     // for an account that no longer exists.
     billing::cancel_before_account_deletion(ctx.db(), owner).await?;

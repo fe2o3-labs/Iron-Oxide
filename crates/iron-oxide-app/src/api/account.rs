@@ -218,11 +218,11 @@ pub async fn export_account_data() -> Result<ExportDocument, ServerFnError> {
 ///   (a program version that is not a valid program carries its problems, as for an upload);
 /// - `403` when the new programs would take the account over its plan's program limit. Nothing is
 ///   written then.
-#[post("/api/account/import", state: Extension<AppState>, user: AuthUser)]
+#[post("/api/account/import", state: Extension<AppState>, user: AuthUser, slot: Extension<account::AccountSlot>)]
 #[middleware(DefaultBodyLimit::max(IMPORT_BODY_LIMIT))]
 #[middleware(dioxus::server::axum::middleware::from_fn(account::limit_import_body))]
 pub async fn import_account_data(document: String) -> Result<ImportSummary, ServerFnError> {
-    Ok(account::import(&state.db, user, &document).await?)
+    Ok(account::import(&state.db, user, &document, slot.0).await?)
 }
 
 /// Deletes the signed-in user's account and everything it owns, signs out all of its sessions on

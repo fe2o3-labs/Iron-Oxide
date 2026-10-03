@@ -121,10 +121,18 @@ and where it goes. A new table fails the test until it is added there and here.
      (`IMPORT_BODY_READ_TIMEOUT_SECS`, against 10 s for other requests). A real export of 8 MiB
      travels as about 9.4 MB, which takes 60 s at 1.25 Mbit/s. A slower body gets `408` and frees
      its import slot.
-   - **At most 2 imports at once per server process** (`MAX_CONCURRENT_IMPORTS`): each holds its
-     body, the decoded text and the parsed document, about 80 MB at the largest, on a 512 MB
-     machine. A third gets `503` with `Retry-After: 5`, after the session check and before its body
-     is read. It is retryable, like every `503`.
+   - **At most 2 account operations at once per server process** (`MAX_ACCOUNT_OPERATIONS`,
+     imports and deletions together). Each runs on a dedicated connection with 60 s deadlines, and
+     an import holds its body, the decoded text and the parsed document, about 80 MB at the
+     largest, on a 512 MB machine. One more gets `503` with `Retry-After: 5` (and
+     `retry_after_secs` in the details); an import gets it after the session check and before its
+     body is read. It is retryable, like every `503`.
+   - **The slot is held by the work, not the request.** The import's middleware takes it and
+     hands it to the server function (an `AccountSlot` in the request's extensions); Dioxus runs
+     the function in a task of its own that goes on after the client disconnects, and the slot
+     goes with it. Abandoned imports therefore never hold more dedicated connections than the
+     slots (`abandoned_imports_never_hold_more_dedicated_connections_than_the_slots` counts them in
+     `pg_stat_activity`, where they are `application_name = 'iron-oxide-account'`).
 2. **Version, then content.** All of the document is validated before anything is written:
    - the domain types: slugs, weights, reps;
    - the domain validators: program documents, settings;
@@ -185,6 +193,11 @@ and where it goes. A new table fails the test until it is added there and here.
      `companion_creation_id`), so importing the same export again finds the same companion;
    - holding each version once (matched by content), under its own number if free, else the next
      free one.
+
+   Every program of an import is resolved by `creation_id` through one map: the account's
+   programs, and those the import creates (the export's, and the companions). An export that holds
+   a program and its companion, whose companion the same import has just created, therefore never
+   inserts that `creation_id` twice (`diverging_copies_import_each_others_exports_and_then_nothing`).
 
    The export's sessions of those versions point at the companion's, so their day always exists
    in their version and their plan loads. **Tradeoff:** those sessions belong to the companion,

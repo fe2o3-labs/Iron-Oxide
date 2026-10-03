@@ -23,6 +23,9 @@ use super::{
 /// a slow machine and a large account's cascade.
 pub const ACCOUNT_DEADLINE: &str = "60s";
 
+/// The `application_name` of a [`long_connection`], to tell them apart in `pg_stat_activity`.
+pub const ACCOUNT_CONNECTION_NAME: &str = "iron-oxide-account";
+
 /// A connection of its own for an import or an account deletion, with the three deadlines
 /// (`statement_timeout`, `idle_in_transaction_session_timeout`, `transaction_timeout`) at
 /// [`ACCOUNT_DEADLINE`] instead of the pool's 5 s.
@@ -37,8 +40,10 @@ pub async fn long_connection(pool: &PgPool) -> Result<PgConnection, RepoError> {
     sqlx::query!(
         "SELECT set_config('statement_timeout', $1, false) AS statement,
                 set_config('idle_in_transaction_session_timeout', $1, false) AS idle,
-                set_config('transaction_timeout', $1, false) AS transaction",
-        ACCOUNT_DEADLINE
+                set_config('transaction_timeout', $1, false) AS transaction,
+                set_config('application_name', $2, false) AS name",
+        ACCOUNT_DEADLINE,
+        ACCOUNT_CONNECTION_NAME
     )
     .fetch_one(&mut conn)
     .await?;

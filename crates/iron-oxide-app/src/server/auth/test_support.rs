@@ -74,7 +74,7 @@ pub struct TestApp {
     pub router: Router,
     pub google: MockGoogle,
     /// The app's account-import slots (#22), for tests that hold them.
-    pub import_slots: Arc<tokio::sync::Semaphore>,
+    pub account_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl TestApp {
@@ -96,7 +96,7 @@ impl TestApp {
         let auth = AuthState::with_google_issuer(&config, &google.issuer).unwrap();
         let state = AppState::new(Arc::new(config), db);
         Self {
-            import_slots: state.import_slots.clone(),
+            account_slots: state.account_slots.clone(),
             router: router(state, auth),
             google,
         }

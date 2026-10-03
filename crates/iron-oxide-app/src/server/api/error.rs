@@ -66,6 +66,11 @@ pub enum ApiError {
     /// shown to the user.
     #[error("forbidden: {0}")]
     Forbidden(Cow<'static, str>),
+    /// `503` with `Retry-After`: every slot for this kind of work is taken (account imports and
+    /// deletions, #22). `details` carry `retry_after_secs`, which `errors_layer` also sends as the
+    /// `Retry-After` header.
+    #[error("busy, retry after {0} s")]
+    Busy(u64),
     /// `500`: a bug or an unexpected failure. The text is for the logs only.
     #[error("internal error: {0}")]
     Internal(String),
@@ -100,7 +105,7 @@ impl ApiError {
             Self::InvalidProgram(_) => (422, INVALID_PROGRAM),
             Self::InvalidProgramIn(message, _) => (422, message),
             Self::TooLarge(message) => (413, message),
-            Self::Transient(_) => (503, TRANSIENT),
+            Self::Transient(_) | Self::Busy(_) => (503, TRANSIENT),
             Self::Unauthorized => (401, UNAUTHORIZED),
             Self::Forbidden(message) => (403, message),
             Self::Internal(_) => (500, INTERNAL),
@@ -129,6 +134,7 @@ impl From<ApiError> for ServerFnError {
             ApiError::InvalidProgram(problems) | ApiError::InvalidProgramIn(_, problems) => {
                 serde_json::to_value(problems).ok()
             }
+            ApiError::Busy(secs) => Some(serde_json::json!({ "retry_after_secs": secs })),
             _ => None,
         };
         ServerFnError::ServerError {

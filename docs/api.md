@@ -60,6 +60,7 @@ logged, never returned.
 | `Transient(detail)` | 503 | `The server is busy. Please try again.` | The same request can simply be retried: it may have been saved before a dropped connection, but every write is idempotent. Covers a concurrent write, a pool timeout, a dropped connection, a serialization failure or a deadlock. |
 | `Unauthorized` | 401 | `Please sign in.` | Not signed in (normally rejected earlier by `AuthUser`) |
 | `Forbidden(msg)` | 403 | `msg` | Plan gating (#21) |
+| `Busy(secs)` | 503 | `The server is busy. Please try again.` | Every slot for this work is taken (account imports and deletions). `details` carry `retry_after_secs`, and the error layer sends it as `Retry-After` too. |
 | `Internal(detail)` | 500 | `Something went wrong. Please try again.` | Bugs, corrupt stored data, any other database failure |
 
 The conversions:
@@ -386,8 +387,8 @@ format, the import rules and the deletion are in [`docs/export-format.md`](expor
 | Function | Route | Arguments | Returns | Errors |
 |---|---|---|---|---|
 | `export_account_data` | `/api/account/export` | | `ExportDocument` | 413 past `MAX_EXPORT_BYTES` (8 MiB) |
-| `import_account_data` | `/api/account/import` | `document` (the export's JSON text) | `ImportSummary` (what was added) | 413 body or document too large; 422 not an export, unsupported `format_version`, invalid content (`InvalidProgramIn` for a program version); 403 over the plan's program limit; 503 with `Retry-After` when 2 imports already run |
-| `delete_account` | `/api/account/delete` | | `()`, and the cookie is cleared | 403 without a sign-in in the last 10 minutes |
+| `import_account_data` | `/api/account/import` | `document` (the export's JSON text) | `ImportSummary` (what was added) | 413 body or document too large; 422 not an export, unsupported `format_version`, invalid content (`InvalidProgramIn` for a program version); 403 over the plan's program limit; 503 with `Retry-After` when 2 account operations already run |
+| `delete_account` | `/api/account/delete` | | `()`, and the cookie is cleared | 403 without a sign-in in the last 10 minutes; 503 with `Retry-After` when 2 account operations already run |
 
 - **Import is idempotent.** Rows are matched by their keys and what the account already has wins:
   the same export imported twice adds nothing the second time.

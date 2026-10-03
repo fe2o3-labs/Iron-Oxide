@@ -116,8 +116,8 @@ impl TestApi {
     }
 
     /// The app's account-import slots (#22).
-    pub fn import_slots(&self) -> std::sync::Arc<tokio::sync::Semaphore> {
-        self.app.import_slots.clone()
+    pub fn account_slots(&self) -> std::sync::Arc<tokio::sync::Semaphore> {
+        self.app.account_slots.clone()
     }
 
     /// A browser with no session.
