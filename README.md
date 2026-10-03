@@ -3,6 +3,8 @@ Zero-cost gains. The only overhead is the barbell
 
 A strength-training PWA written in Rust with [Dioxus](https://dioxuslabs.com) fullstack.
 
+How we work (tickets, pull requests, reviews, keeping branches up to date): see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Layout
 
 | Path | What |
