@@ -81,7 +81,8 @@
 //! - **Training max rule**: sets at least as heavy as what the session was prescribed. A set
 //!   logged with its target ([`WorkingSet::target`], the prefill the lifter saw, stored since #60)
 //!   counts when it is at least that target's weight, **exactly**: "lifted at least what was
-//!   prescribed then", whatever the step was. A set logged without one (before #60) is compared
+//!   prescribed then", whatever the step was. A set logged without one (before #60), or with a
+//!   target that has no weight (never a training max prescription), is compared
 //!   with its prescription's exact weight (its percentage of the training max at that point of
 //!   the replay, or its fixed weight, unrounded) less a fixed tolerance of 1.25 kg, half of the
 //!   2.5 kg the step was capped at then, so that any target the app could have shown counts. Near

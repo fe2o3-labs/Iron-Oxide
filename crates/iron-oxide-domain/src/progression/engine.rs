@@ -288,16 +288,19 @@ fn judge_weighted(session: &Judgeable<'_>, fallback: Weight) -> (SessionVerdict,
 }
 
 /// Judges a session under the training max rule: only prescribed working sets at least as heavy
-/// as what they were prescribed count. A set logged with its target ([`WorkingSet::target`])
-/// counts when it is at least that target's weight, exactly; a set logged without one (before
-/// #60) when it is at least `legacy_at_least` (the [`training_max_threshold`]).
+/// as what they were prescribed count. A set logged with a weighted target
+/// ([`WorkingSet::target`]) counts when it is at least that target's weight, exactly; a set logged
+/// without one (before #60), or with a weightless target (never a training max prescription, so
+/// not one to trust: any lift would beat it), when it is at least `legacy_at_least` (the
+/// [`training_max_threshold`]).
 fn judge_at_least(session: &Judgeable<'_>, legacy_at_least: Weight) -> SessionVerdict {
     let reps = prescribed_sets(session.sets, session.prescribed)
         .into_iter()
         .filter(|set| {
-            let at_least = set.target.map_or(legacy_at_least, |target| {
-                target.weight.unwrap_or(Weight::ZERO)
-            });
+            let at_least = set
+                .target
+                .and_then(|target| target.weight)
+                .unwrap_or(legacy_at_least);
             set.weight.unwrap_or(Weight::ZERO) >= at_least
         })
         .map(|set| set.reps)
@@ -1056,6 +1059,16 @@ mod tests {
         assert_eq!(at_least(&mixed, 3, five, legacy), SessionVerdict::Success);
         mixed[2] = WorkingSet::new(kg(75.0), Reps::new(5));
         assert_eq!(at_least(&mixed, 3, five, legacy), SessionVerdict::Failure);
+        // A weightless target is no training max prescription: the legacy threshold applies, so
+        // a light set does not count just because it beats "nothing".
+        let weightless = SetTarget {
+            weight: None,
+            ..shown(0.0)
+        };
+        let any = [lifted(20.0, weightless); 3];
+        assert_eq!(at_least(&any, 3, five, legacy), SessionVerdict::Failure);
+        let enough = [lifted(77.5, weightless); 3];
+        assert_eq!(at_least(&enough, 3, five, legacy), SessionVerdict::Success);
     }
 
     #[test]
