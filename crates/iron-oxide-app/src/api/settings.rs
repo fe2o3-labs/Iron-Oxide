@@ -16,6 +16,13 @@ use {
     dioxus::server::axum::Extension,
 };
 
+/// The largest weight step [`update_settings`] accepts: 25 kg.
+#[cfg_attr(
+    not(any(feature = "server", test)),
+    allow(dead_code, reason = "checked by the server")
+)]
+pub const MAX_WEIGHT_STEP_KG: f64 = 25.0;
+
 /// The longest default rest [`update_settings`] accepts: one hour.
 pub const MAX_DEFAULT_REST: Seconds = Seconds::new(3_600);
 
@@ -29,11 +36,37 @@ pub struct Settings {
     /// The rest between sets when the program does not say.
     pub default_rest: Seconds,
     pub sound_enabled: bool,
+    /// How far the weight steppers move in kg mode.
+    pub kg_weight_step: Weight,
+    /// How far the weight steppers move in lb mode.
+    pub lb_weight_step: Weight,
+    /// Whether the rest timer vibrates the phone (where the browser can).
+    pub vibration_enabled: bool,
 }
 
 impl Settings {
+    /// How far the weight steppers move in `unit`.
+    #[must_use]
+    pub const fn weight_step(&self, unit: Unit) -> Weight {
+        match unit {
+            Unit::Kg => self.kg_weight_step,
+            Unit::Lb => self.lb_weight_step,
+        }
+    }
+
+    /// The same settings with `step` as the weight step of `unit`.
+    #[must_use]
+    pub fn with_weight_step(&self, unit: Unit, step: Weight) -> Self {
+        let mut settings = self.clone();
+        match unit {
+            Unit::Kg => settings.kg_weight_step = step,
+            Unit::Lb => settings.lb_weight_step = step,
+        }
+        settings
+    }
+
     /// The settings of a user who never saved any: kg, a 20 kg bar, the domain's default kg plate
-    /// inventory, 2 minutes of rest and sound on.
+    /// inventory, 2 minutes of rest, sound and vibration on, and steps of 2.5 kg or 5 lb.
     #[must_use]
     #[cfg_attr(
         not(any(feature = "server", test)),
@@ -49,6 +82,9 @@ impl Settings {
             plate_inventory: PlateInventory::default_for(Unit::Kg),
             default_rest: Seconds::new(120),
             sound_enabled: true,
+            kg_weight_step: Weight::from_kg(2.5).unwrap_or(Weight::ZERO),
+            lb_weight_step: Weight::from_lb(5.0).unwrap_or(Weight::ZERO),
+            vibration_enabled: true,
         }
     }
 }
@@ -69,6 +105,11 @@ pub struct SettingsUpdate {
     pub plate_inventory: Vec<PlateInput>,
     pub default_rest: Seconds,
     pub sound_enabled: bool,
+    /// The kg weight step, in kg.
+    pub kg_weight_step: f64,
+    /// The lb weight step, in kg (a [`Weight`]'s JSON, like every weight).
+    pub lb_weight_step: f64,
+    pub vibration_enabled: bool,
 }
 
 /// A plate size (in kg) and how many pairs of it are available: a [`PlateStock`] before
@@ -102,6 +143,9 @@ impl From<Settings> for SettingsUpdate {
                 .collect(),
             default_rest: settings.default_rest,
             sound_enabled: settings.sound_enabled,
+            kg_weight_step: settings.kg_weight_step.as_kg(),
+            lb_weight_step: settings.lb_weight_step.as_kg(),
+            vibration_enabled: settings.vibration_enabled,
         }
     }
 }

@@ -19,7 +19,7 @@ group's limit does not affect another's.
 | `auth_finish` | `passkey/sign-up/finish`, `passkey/sign-in/finish`, `passkey/add/finish` | 30 at once, then 1 every 2 s | 10 at once, then 1 a minute |
 | `google_callback` | `GET`/`HEAD /auth/google/callback` | 30 at once, then 1 every 2 s | none |
 | `session` | `auth/me`, `auth/sign-out` | 300 at once, then 5 a second | none |
-| `account` | `passkey/remove`, `google/unlink` | 60 at once, then 1 a second | 10 at once, then 1 a minute |
+| `account` | `passkey/remove`, `google/unlink`, `sign-out-everywhere`, `rename` | 60 at once, then 1 a second | 10 at once, then 1 a minute |
 | `write` | every other `POST`, `PUT`, `PATCH` or `DELETE`, on any path | 600 at once, then 10 a second | 120 at once, then 2 a second |
 
 Route paths are under `/api/auth/` unless shown in full. Requests with a safe method (`GET`, `HEAD`,

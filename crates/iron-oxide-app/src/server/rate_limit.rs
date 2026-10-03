@@ -120,6 +120,8 @@ pub const ROUTES: &[(&str, RouteGroup)] = &[
     ("/api/auth/sign-out", RouteGroup::Session),
     ("/api/auth/passkey/remove", RouteGroup::Account),
     ("/api/auth/google/unlink", RouteGroup::Account),
+    ("/api/auth/sign-out-everywhere", RouteGroup::Account),
+    ("/api/auth/rename", RouteGroup::Account),
 ];
 
 /// The group of a request, or `None` when it is not limited.

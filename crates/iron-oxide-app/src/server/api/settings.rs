@@ -6,7 +6,9 @@ use iron_oxide_domain::{
 use sqlx::{PgPool, types::time::OffsetDateTime};
 
 use super::{ApiError, timestamp};
-use crate::api::settings::{MAX_DEFAULT_REST, Settings, SettingsUpdate, TrainingMax};
+use crate::api::settings::{
+    MAX_DEFAULT_REST, MAX_WEIGHT_STEP_KG, Settings, SettingsUpdate, TrainingMax,
+};
 use crate::server::db::{
     ids::UserId,
     settings::{self as repo, UserSettings},
@@ -84,12 +86,26 @@ pub fn validate(update: SettingsUpdate) -> Result<Settings, ApiError> {
             ),
         ));
     }
+    let step = |kg: f64, field: &'static str| {
+        let message =
+            format!("A weight step must be more than 0 and at most {MAX_WEIGHT_STEP_KG} kg.");
+        let max = Weight::from_kg(MAX_WEIGHT_STEP_KG).unwrap_or(Weight::MAX);
+        match Weight::from_kg(kg) {
+            Ok(step) if !step.is_zero() && step <= max => Ok(step),
+            _ => Err(ApiError::invalid_field(field, message)),
+        }
+    };
+    let kg_weight_step = step(update.kg_weight_step, "kg_weight_step")?;
+    let lb_weight_step = step(update.lb_weight_step, "lb_weight_step")?;
     Ok(Settings {
         unit: update.unit,
         bar_weight,
         plate_inventory,
         default_rest: update.default_rest,
         sound_enabled: update.sound_enabled,
+        kg_weight_step,
+        lb_weight_step,
+        vibration_enabled: update.vibration_enabled,
     })
 }
 
@@ -105,6 +121,11 @@ fn from_stored(stored: UserSettings) -> Result<Settings, ApiError> {
             .map_err(|_| corrupt("user_settings.plate_inventory"))?,
         default_rest: Seconds::new(stored.default_rest_s),
         sound_enabled: stored.sound_enabled,
+        kg_weight_step: Weight::from_nanograms(stored.kg_weight_step_ng)
+            .map_err(|_| corrupt("user_settings.kg_weight_step_ng"))?,
+        lb_weight_step: Weight::from_nanograms(stored.lb_weight_step_ng)
+            .map_err(|_| corrupt("user_settings.lb_weight_step_ng"))?,
+        vibration_enabled: stored.vibration_enabled,
     })
 }
 
@@ -119,6 +140,9 @@ fn to_stored(settings: &Settings) -> Result<UserSettings, ApiError> {
             .map_err(|error| ApiError::internal(format!("plate inventory JSON: {error}")))?,
         default_rest_s: settings.default_rest.get(),
         sound_enabled: settings.sound_enabled,
+        kg_weight_step_ng: settings.kg_weight_step.as_nanograms(),
+        lb_weight_step_ng: settings.lb_weight_step.as_nanograms(),
+        vibration_enabled: settings.vibration_enabled,
     })
 }
 
@@ -224,6 +248,9 @@ mod tests {
             plate_inventory: vec![plate(5.0, 1), plate(20.0, 4)],
             default_rest: Seconds::new(90),
             sound_enabled: false,
+            kg_weight_step: 1.25,
+            lb_weight_step: Weight::from_lb(2.5).unwrap().as_kg(),
+            vibration_enabled: false,
         }
     }
 
@@ -320,6 +347,20 @@ mod tests {
                 },
                 "Keep at least one plate size.",
             ),
+            (
+                SettingsUpdate {
+                    kg_weight_step: 0.0,
+                    ..custom()
+                },
+                "A weight step must be more than 0 and at most 25 kg.",
+            ),
+            (
+                SettingsUpdate {
+                    lb_weight_step: 25.5,
+                    ..custom()
+                },
+                "A weight step must be more than 0 and at most 25 kg.",
+            ),
         ] {
             assert_eq!(validate(update).unwrap_err().public(), (422, message));
         }
@@ -347,6 +388,17 @@ mod tests {
             ..to_stored(&settings).unwrap()
         };
         assert_eq!(from_stored(corrupt_bar).unwrap_err().public().0, 500);
+    }
+
+    #[test]
+    fn the_api_defaults_are_the_column_defaults() {
+        let stored = from_stored(UserSettings::defaults()).unwrap();
+        let defaults = Settings::defaults();
+        assert_eq!(stored.kg_weight_step, defaults.kg_weight_step);
+        assert_eq!(stored.lb_weight_step, defaults.lb_weight_step);
+        assert_eq!(stored.vibration_enabled, defaults.vibration_enabled);
+        assert_eq!(stored.bar_weight, defaults.bar_weight);
+        assert_eq!(stored.plate_inventory, defaults.plate_inventory);
     }
 
     #[test]
@@ -424,6 +476,31 @@ mod tests {
             (error.status.as_u16(), error.message.as_str()),
             (422, "The bar weight must be between 0 and 2000 kg.")
         );
+        // Weight steps are refused out of range, naming their field (#103).
+        for (update, field) in [
+            (
+                SettingsUpdate {
+                    kg_weight_step: 0.0,
+                    ..custom()
+                },
+                "kg_weight_step",
+            ),
+            (
+                SettingsUpdate {
+                    lb_weight_step: 30.0,
+                    ..custom()
+                },
+                "lb_weight_step",
+            ),
+        ] {
+            let (status, body) = a.call_raw(UPDATE, json!({ "settings": update })).await;
+            assert_eq!(status.as_u16(), 422);
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                body["data"]["ServerError"]["details"]["field"], field,
+                "{body}"
+            );
+        }
         // No bar and no plates are refused, each naming its field.
         for (update, field, message) in [
             (

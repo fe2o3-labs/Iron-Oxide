@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled\n         FROM user_settings WHERE user_id = $1",
+  "query": "SELECT unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled,\n                kg_weight_step_ng, lb_weight_step_ng, vibration_enabled\n         FROM user_settings WHERE user_id = $1",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,21 @@
         "ordinal": 4,
         "name": "sound_enabled",
         "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "kg_weight_step_ng",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "lb_weight_step_ng",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "vibration_enabled",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
@@ -39,8 +54,11 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
       false
     ]
   },
-  "hash": "f211298b99c1d533f1e4cda93e48e0feb9240b3866e8d08cb6aa8c08dd1ae847"
+  "hash": "1c1cb818547b84cad8b08475006b1fc6b6d23c51ea3af8573831ecefefbe8b21"
 }
