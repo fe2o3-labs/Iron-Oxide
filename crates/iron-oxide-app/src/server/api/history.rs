@@ -20,8 +20,9 @@ use crate::server::db::{
     sets,
 };
 
-/// The formula of every e1RM in the history.
-const FORMULA: E1rmFormula = E1rmFormula::Epley;
+/// The formula of every e1RM in the history: the end-of-session summary's, so the history's PR
+/// flags and estimates always agree with it.
+const FORMULA: E1rmFormula = E1rmFormula::STANDARD;
 /// Nanoseconds in a microsecond, the database's time precision.
 const NANOS_PER_MICRO: i128 = 1_000;
 
@@ -410,7 +411,7 @@ mod tests {
     }
 
     fn epley(weight: Weight, reps: u16) -> Option<Weight> {
-        iron_oxide_domain::E1rmFormula::Epley.estimate(weight, Reps::new(reps))
+        FORMULA.estimate(weight, Reps::new(reps))
     }
 
     #[test]
@@ -1219,5 +1220,76 @@ mod tests {
         assert_eq!(series.points.len(), 1);
         // 100 x 5 + 100 x 4; the warm-up and the bench add nothing.
         assert_eq!(series.points[0].volume, Volume::of(kg(100.0), Reps::new(9)));
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn sessions_started_and_finished_together_page_stably(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let mut a = api.user("A").await;
+        let (_, version) = db_testing::program(&api.db, a.id).await;
+        // An earlier session to beat, then two sessions with the same start and the same finish
+        // (one in progress at a time: each ends before the next starts, at the same instants).
+        let base = seed(
+            &api.db,
+            a.id,
+            version,
+            0,
+            &[("back-squat", Some(100.0), 5, false)],
+            Some(600),
+        )
+        .await;
+        let mut twins = Vec::new();
+        for weight in [105.0, 110.0] {
+            twins.push(
+                seed(
+                    &api.db,
+                    a.id,
+                    version,
+                    1_000,
+                    &[("back-squat", Some(weight), 5, false)],
+                    Some(600),
+                )
+                .await,
+            );
+        }
+        // History order: by finish then id, both descending; the twins tie on the finish.
+        let mut by_id = twins.clone();
+        by_id.sort_by_key(|id| std::cmp::Reverse(id.as_uuid()));
+        let expected: Vec<Uuid> = by_id.iter().chain([&base]).map(|id| id.as_uuid()).collect();
+
+        let mut flags_by_size = Vec::new();
+        for limit in [1, 2, 3] {
+            let mut seen = Vec::new();
+            let mut cursor: Option<HistoryCursor> = None;
+            loop {
+                let page: HistoryPage = a
+                    .call(PAGE, json!({ "cursor": cursor, "limit": limit }))
+                    .await
+                    .unwrap();
+                seen.extend(page.sessions.iter().map(|s| (s.id.as_uuid(), s.set_pr)));
+                match page.next {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+            let ids: Vec<Uuid> = seen.iter().map(|(id, _)| *id).collect();
+            // No session skipped or repeated across pages, always in the same order.
+            assert_eq!(ids, expected, "limit {limit}");
+            flags_by_size.push(seen);
+        }
+        // The PR flags do not depend on where the page breaks fall.
+        assert!(
+            flags_by_size.windows(2).all(|pair| pair[0] == pair[1]),
+            "{flags_by_size:?}"
+        );
+        // Both twins lift more than every session before them, whichever way the tie breaks.
+        let flags: Vec<bool> = flags_by_size[0].iter().map(|(_, pr)| *pr).collect();
+        assert_eq!(
+            flags.last(),
+            Some(&false),
+            "the first session has nothing to beat"
+        );
+        assert!(flags[..2].iter().all(|pr| *pr), "{flags:?}");
     }
 }
