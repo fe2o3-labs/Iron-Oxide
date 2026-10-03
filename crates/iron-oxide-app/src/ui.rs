@@ -10,6 +10,7 @@
 //! - `settings`: the Settings page.
 //! - `prefs`: preferences kept on this device only.
 //! - `history`: the history screens (#33).
+//! - `home`: the home screen (#27).
 //! - `session`: the workout session screens (#28).
 
 mod account;
@@ -34,6 +35,7 @@ mod errors;
 #[cfg(debug_assertions)]
 mod gallery;
 mod history;
+mod home;
 mod plates;
 mod prefs;
 mod session;

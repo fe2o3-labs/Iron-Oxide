@@ -15,6 +15,7 @@ use iron_oxide_domain::{LoggedSet, Reps, SessionOutcome, SetId, Weight};
 
 use super::flow::{self, Entry, Step};
 use super::rest::{self, Rest, RestScreen};
+use super::summary::Finished;
 use super::{Active, forget, note, platform, store_skipped, writes};
 use crate::api::error::{ApiFailure, FailureKind};
 use crate::auth::browser::sleep;
@@ -34,9 +35,14 @@ enum Ask {
     Finish,
 }
 
-/// The session in progress. `on_reload` reloads it from the server (after a conflict).
+/// The session in progress. `on_reload` reloads it from the server (after a conflict);
+/// `on_finished` receives the summary of a completed workout.
 #[component]
-pub fn Workout(initial: Active, on_reload: EventHandler<()>) -> Element {
+pub fn Workout(
+    initial: Active,
+    on_reload: EventHandler<()>,
+    on_finished: EventHandler<Finished>,
+) -> Element {
     let mut active = use_signal(|| initial);
     let errors = use_errors();
     let unit = use_unit();
@@ -88,15 +94,19 @@ pub fn Workout(initial: Active, on_reload: EventHandler<()>) -> Element {
             let result = writes::finish_session(session_id, outcome, at).await;
             busy.set(false);
             match result {
-                Ok(_summary) => {
+                Ok(summary) => {
                     forget(session_id);
-                    let message = if outcome == SessionOutcome::Abandoned {
-                        "Workout discarded."
+                    if outcome == SessionOutcome::Abandoned {
+                        note(errors, "Workout discarded.");
+                        navigator.push(Route::Home {});
                     } else {
-                        "Workout saved."
-                    };
-                    note(errors, message);
-                    navigator.push(Route::Home {});
+                        let state = active.peek();
+                        on_finished.call(Finished {
+                            summary,
+                            plan: state.plan.clone(),
+                            sets: state.sets.clone(),
+                        });
+                    }
                 }
                 Err(error) => {
                     let failure = ApiFailure::classify(&error);

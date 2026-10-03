@@ -1,10 +1,12 @@
-//! The workout session (#28): start the next workout, log it one set at a time, finish it.
+//! The workout session (#28): start the next workout, log it one set at a time, finish it and
+//! see its summary.
 //!
 //! - `flow`: the pure view model (order of the sets, prefill, labels), unit-tested.
 //! - `writes`: every session write (start, save a set, finish), in one file so the offline outbox
 //!   (#30) can take them over.
 //! - `workout`: the active session screen.
 //! - `rest`: the rest timer between sets (#29).
+//! - `summary`: the end-of-session summary (#32).
 //! - `platform`: the browser clock, `localStorage`, sound, vibration and the screen wake lock.
 //!
 //! The page loads on the client only (like the shell's sign-in check), so the server render shows
@@ -12,10 +14,11 @@
 //! plan and the sets already saved, so a reload continues at the next set.
 
 mod flow;
-mod platform;
+pub(crate) mod platform;
 mod rest;
+mod summary;
 mod workout;
-mod writes;
+pub(crate) mod writes;
 
 use std::collections::BTreeSet;
 
@@ -32,6 +35,7 @@ use crate::ui::components::{Button, Card, EmptyState, LoadingState};
 use crate::ui::errors::{BannerKind, Errors, use_errors};
 use crate::ui::shell::Route;
 use crate::ui::weight::{UnitSetting, use_unit};
+use summary::{Finished, SummaryScreen};
 use workout::Workout;
 
 /// A session in progress, as the screen works on it.
@@ -56,6 +60,8 @@ enum Page {
     /// No session can start (no active program): the server's message.
     Blocked(String),
     Active(Box<Active>),
+    /// The workout just finished: its summary.
+    Summary(Box<Finished>),
 }
 
 /// The `/session` page.
@@ -102,7 +108,14 @@ pub fn SessionPage() -> Element {
                 key: "{active.plan.session.id}",
                 initial: *active,
                 on_reload: move |()| { spawn(load(page, errors, unit)); },
+                on_finished: move |finished: Finished| {
+                    let mut page = page;
+                    page.set(Page::Summary(Box::new(finished)));
+                },
             }
+        },
+        Page::Summary(finished) => rsx! {
+            SummaryScreen { finished: *finished }
         },
     }
 }
