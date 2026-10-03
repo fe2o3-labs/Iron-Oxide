@@ -330,6 +330,20 @@ pub fn PlateLoadout(
     let miss = miss_text(&view, unit);
     rsx! {
         section { class: "io-card io-plates", aria_label: "Plates",
+            if let Some(note) = note {
+                div {
+                    class: if source == PlateSource::Failed { "io-notice io-notice-error io-plates-note" } else { "io-notice io-plates-note" },
+                    role: "status",
+                    p { "{note}" }
+                    if let (PlateSource::Failed, Some(on_retry)) = (source, on_retry) {
+                        Button {
+                            variant: ButtonVariant::Ghost,
+                            onclick: move |_| on_retry.call(()),
+                            "Retry"
+                        }
+                    }
+                }
+            }
             div { class: "io-plates-total",
                 span { class: "io-label", "{status}" }
                 div { class: "io-plates-number",
@@ -361,20 +375,6 @@ pub fn PlateLoadout(
                 }
             }
             p { class: "io-muted io-hint", "Bar {bar}" }
-            if let Some(note) = note {
-                div {
-                    class: if source == PlateSource::Failed { "io-notice io-notice-error io-plates-note" } else { "io-notice io-plates-note" },
-                    role: "status",
-                    p { "{note}" }
-                    if let (PlateSource::Failed, Some(on_retry)) = (source, on_retry) {
-                        Button {
-                            variant: ButtonVariant::Secondary,
-                            onclick: move |_| on_retry.call(()),
-                            "Retry"
-                        }
-                    }
-                }
-            }
         }
     }
 }

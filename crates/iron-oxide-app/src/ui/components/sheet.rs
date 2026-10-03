@@ -58,6 +58,9 @@ const sheet = sheets["{id}"];
 if (sheet) {{
   sheet.cleanup();
   delete sheets["{id}"];
+  // Leave the modal state first: the page is inert until then, so the opener could not take focus.
+  const dialog = document.getElementById("{id}");
+  if (dialog && dialog.open) dialog.close();
   if (history.state && history.state.ioSheet === "{id}") history.back();
   if (sheet.opener && sheet.opener.isConnected && sheet.opener.focus) sheet.opener.focus();
 }}
