@@ -9,7 +9,8 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 
-use super::CallFailure;
+use super::shell::{SessionStatus, set_session, use_session};
+use crate::api::error::ApiFailure;
 use crate::auth::api::{
     google_begin, google_unlink, is_unauthorized, me, passkey_add_begin, passkey_add_finish,
     passkey_remove, passkey_sign_in_begin, passkey_sign_in_finish, passkey_sign_up_begin,
@@ -71,13 +72,10 @@ fn is_signed_out_error(error: &ServerFnError) -> bool {
     is_unauthorized(error)
 }
 
-/// The text shown for a failed server call. The sign-in server functions only put messages
-/// meant for the user in `ServerError`, so those are shown as they are.
+/// The text shown for a failed server call: the server's own message for 4xx and 503 answers, a
+/// generic one otherwise (see `ApiFailure::classify`).
 fn server_message(error: &ServerFnError) -> String {
-    match error {
-        ServerFnError::ServerError { message, .. } => message.clone(),
-        other => CallFailure::from_server_fn_error(other).to_string(),
-    }
+    ApiFailure::classify(error).message
 }
 
 /// The notice for a failure. A cancelled passkey prompt is a gentle note, not an error.
@@ -254,6 +252,14 @@ pub fn Account() -> Element {
         if cfg!(feature = "web") {
             spawn(auth.load());
         }
+    });
+
+    // The shell shows the app or the sign-in screen from the session status: keep it in step.
+    let session = use_session();
+    use_effect(move || match *auth.state.read() {
+        AccountState::SignedIn(_) => set_session(session, SessionStatus::SignedIn),
+        AccountState::SignedOut => set_session(session, SessionStatus::SignedOut),
+        AccountState::Loading | AccountState::LoadFailed(_) => {}
     });
 
     // The outbox (#30) sends the signed-in user's writes.
@@ -528,20 +534,20 @@ fn SignedOut(auth: Auth) -> Element {
         }
         div { class: "io-actions",
             button {
-                id: "passkey-sign-up",
-                class: "io-button io-button-primary",
-                disabled,
-                "aria-busy": busy == Some(Busy::SignUp),
-                onclick: sign_up,
-                if busy == Some(Busy::SignUp) { "Creating account…" } else { "Create account with a passkey" }
-            }
-            button {
                 id: "passkey-sign-in",
                 class: "io-button io-button-primary",
                 disabled,
                 "aria-busy": busy == Some(Busy::SignIn),
                 onclick: sign_in,
                 if busy == Some(Busy::SignIn) { "Signing in…" } else { "Sign in with a passkey" }
+            }
+            button {
+                id: "passkey-sign-up",
+                class: "io-button io-button-secondary",
+                disabled,
+                "aria-busy": busy == Some(Busy::SignUp),
+                onclick: sign_up,
+                if busy == Some(Busy::SignUp) { "Creating account…" } else { "Create account with a passkey" }
             }
             button {
                 id: "google-sign-in",
@@ -822,9 +828,14 @@ mod tests {
             server_message(&server_error(409, "This passkey is already registered.")),
             "This passkey is already registered."
         );
-        assert!(
-            server_message(&ServerFnError::Request(RequestError::Connect("x".into())))
-                .starts_with("Could not reach the server")
+        assert_eq!(
+            server_message(&ServerFnError::Request(RequestError::Connect("x".into()))),
+            crate::api::error::NETWORK_MESSAGE
+        );
+        // A 500's text is never shown.
+        assert_eq!(
+            server_message(&server_error(500, "db.rs:12 panicked")),
+            crate::api::error::GENERIC_MESSAGE
         );
     }
 
@@ -918,8 +929,11 @@ mod tests {
             AccountState::SignedOut
         );
         assert_eq!(
-            loaded(Err(server_error(500, "Something went wrong."))),
-            AccountState::LoadFailed("Something went wrong.".to_owned())
+            loaded(Err(server_error(
+                503,
+                "The server is busy. Please try again."
+            ))),
+            AccountState::LoadFailed("The server is busy. Please try again.".to_owned())
         );
     }
 

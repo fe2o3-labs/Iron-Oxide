@@ -188,10 +188,10 @@ and declares `environment: production` can still read it, so review workflow cha
 accordingly.)
 
 ```sh
-gh api -X PUT repos/guizmaii-opensource/Iron-Oxide/environments/production \
+gh api -X PUT repos/fe2o3-labs/Iron-Oxide/environments/production \
   -F 'deployment_branch_policy[protected_branches]=false' \
   -F 'deployment_branch_policy[custom_branch_policies]=true'
-gh api -X POST repos/guizmaii-opensource/Iron-Oxide/environments/production/deployment-branch-policies \
+gh api -X POST repos/fe2o3-labs/Iron-Oxide/environments/production/deployment-branch-policies \
   -f name=main -f type=branch
 ```
 
@@ -202,7 +202,7 @@ Then create a deploy token scoped to this app only, and store it as a secret **o
 
 ```sh
 fly tokens create deploy --app iron-oxide --name github-actions --expiry 8760h \
-  | gh secret set FLY_API_TOKEN --env production --repo guizmaii-opensource/Iron-Oxide
+  | gh secret set FLY_API_TOKEN --env production --repo fe2o3-labs/Iron-Oxide
 ```
 
 The token goes straight from flyctl to GitHub without being printed. It expires after a year
@@ -213,8 +213,8 @@ deploy anything but `main`, including manual runs.
 Then trigger a deploy: push to `main`, or run the workflow by hand:
 
 ```sh
-gh workflow run deploy.yml --repo guizmaii-opensource/Iron-Oxide --ref main
-gh run watch --repo guizmaii-opensource/Iron-Oxide
+gh workflow run deploy.yml --repo fe2o3-labs/Iron-Oxide --ref main
+gh run watch --repo fe2o3-labs/Iron-Oxide
 ```
 
 ### 6. Custom domain `app.iron-oxyde.com`

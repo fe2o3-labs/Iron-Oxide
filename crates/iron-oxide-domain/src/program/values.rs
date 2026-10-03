@@ -8,8 +8,8 @@ use std::str::FromStr;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::PROGRAM_SCHEMA_URL;
 use super::error::echo;
+use super::{LEGACY_PROGRAM_SCHEMA_URL, PROGRAM_SCHEMA_URL};
 use crate::{Percent, Reps, Unit, ValueError, Weight};
 
 /// A weight together with the unit it was written in: `{"kg": 60}` or `{"lb": 135}`.
@@ -576,8 +576,9 @@ impl fmt::Display for DemoUrl {
     }
 }
 
-/// The `$schema` field of a program document: only [`PROGRAM_SCHEMA_URL`] is accepted, so the
-/// app never stores and serves back an arbitrary link.
+/// The `$schema` field of a program document: only [`PROGRAM_SCHEMA_URL`] and the legacy
+/// [`LEGACY_PROGRAM_SCHEMA_URL`] are accepted (and only the former is written), so the app never
+/// stores and serves back an arbitrary link.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct SchemaUrl;
 
@@ -598,7 +599,7 @@ impl Serialize for SchemaUrl {
 impl<'de> Deserialize<'de> for SchemaUrl {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let url = String::deserialize(deserializer)?;
-        if url == PROGRAM_SCHEMA_URL {
+        if url == PROGRAM_SCHEMA_URL || url == LEGACY_PROGRAM_SCHEMA_URL {
             Ok(Self)
         } else {
             Err(de::Error::custom(format_args!(
@@ -614,6 +615,29 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn the_legacy_schema_url_is_read_but_never_written() {
+        let legacy = format!("\"{LEGACY_PROGRAM_SCHEMA_URL}\"");
+        let url: SchemaUrl = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(
+            serde_json::to_string(&url).unwrap(),
+            format!("\"{PROGRAM_SCHEMA_URL}\"")
+        );
+        assert!(serde_json::from_str::<SchemaUrl>("\"https://example.com/x.json\"").is_err());
+    }
+
+    #[test]
+    fn a_document_with_the_legacy_schema_url_loads_and_is_written_with_the_new_one() {
+        let json = crate::program::builtin_programs().unwrap()[0]
+            .json()
+            .replace(PROGRAM_SCHEMA_URL, LEGACY_PROGRAM_SCHEMA_URL);
+        assert!(json.contains(LEGACY_PROGRAM_SCHEMA_URL));
+        let program = crate::program::Program::from_json(&json).unwrap();
+        let written = program.to_json_pretty().unwrap();
+        assert!(written.contains(PROGRAM_SCHEMA_URL), "{written}");
+        assert!(!written.contains(LEGACY_PROGRAM_SCHEMA_URL), "{written}");
+    }
 
     fn kg(value: f64) -> UnitWeight {
         UnitWeight::new(value, Unit::Kg).unwrap()

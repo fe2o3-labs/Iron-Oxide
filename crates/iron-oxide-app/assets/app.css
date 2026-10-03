@@ -1,0 +1,835 @@
+/*
+ * Iron Oxide stylesheet: the "Forge" design tokens, the self-hosted fonts, the app shell and the
+ * shared components (#26). The only stylesheet of the app; documented in docs/palette.md.
+ *
+ * Dark-first. The light theme follows `prefers-color-scheme: light`; `data-theme="light"` or
+ * `data-theme="dark"` on any element forces one theme for its subtree (the component gallery
+ * shows both side by side).
+ *
+ * Components use the tokens, never hex values. The two light blocks below must stay identical
+ * (a unit test checks it, and the WCAG contrast of the text tokens, in `ui/theme.rs`).
+ */
+
+/* --- Fonts ------------------------------------------------------------------------------------ */
+/*
+ * Self-hosted from public/fonts/ (Fontsource variable builds, Latin subset; SIL Open Font
+ * License 1.1, licence files next to the fonts). Precached by the service worker and preloaded by
+ * `ui::App`, so nothing is fetched from a third party and the app works offline.
+ */
+@font-face {
+  font-family: "Big Shoulders Display";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("/fonts/big-shoulders-display-latin-wght.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308,
+    U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 700;
+  src: url("/fonts/ibm-plex-sans-latin-wght.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308,
+    U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url("/fonts/jetbrains-mono-latin-wght.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308,
+    U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* --- Tokens ----------------------------------------------------------------------------------- */
+
+:root {
+  --io-font-display: "Big Shoulders Display", "Arial Narrow", sans-serif;
+  --io-font-body: "IBM Plex Sans", "Helvetica Neue", system-ui, sans-serif;
+  --io-font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --io-gutter: 20px;
+  --io-nav-height: 64px;
+  --io-radius-card: 20px;
+  --io-radius-control: 16px;
+  --io-tap: 56px;
+  --io-tap-small: 44px;
+
+}
+
+/* Older names, kept as aliases so in-flight work keeps its colours. Declared on every themed
+ * element, so that they follow a forced theme. */
+:root,
+[data-theme] {
+  --io-bg: var(--io-ground);
+  --io-surface-2: var(--io-raised);
+  --io-border: var(--io-line);
+  --io-text-muted: var(--io-muted);
+  --io-primary: var(--io-accent);
+  --io-on-primary: var(--io-on-accent);
+  --io-primary-strong: var(--io-accent-text);
+}
+
+/* Dark (default). */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --io-ground: #121416;       /* page background; also THEME_COLOR (src/pwa.rs) and the manifest */
+  --io-surface: #1b1e22;      /* cards */
+  --io-surface-edge: #1b1e22; /* card border: invisible in dark */
+  --io-raised: #2a2f35;       /* secondary buttons, the minus of a stepper */
+  --io-chip: #24282d;
+  --io-track: #3a3f46;        /* empty progress segments */
+  --io-track-soft: #2a2f35;   /* empty progress bars */
+  --io-line: #2e3339;         /* decorative borders */
+  --io-line-strong: #707780;  /* control outlines (inputs), 3:1 on surface */
+  --io-text: #f2ece4;
+  --io-muted: #a79f95;
+  --io-accent: #e8703a;       /* fills only */
+  --io-on-accent: #121416;
+  --io-accent-text: #f08a4b;  /* labels and links */
+  --io-action: #e8703a;       /* the primary action (Done) */
+  --io-on-action: #121416;
+  --io-danger: #f06a5b;
+  --io-success: #5fbf7f;
+  --io-warning: #e8b04a;
+  --io-focus: #f08a4b;
+}
+
+/* light:begin */
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --io-ground: #f1ede6;
+    --io-surface: #ffffff;
+    --io-surface-edge: #e2dcd2;
+    --io-raised: #ece7df;
+    --io-chip: #e6e1d8;
+    --io-track: #d6d0c6;
+    --io-track-soft: #ddd7cd;
+    --io-line: #d3ccc1;
+    --io-line-strong: #8c857b;
+    --io-text: #17191c;
+    --io-muted: #5f5850;
+    --io-accent: #e8703a;
+    --io-on-accent: #17191c;
+    --io-accent-text: #b04e1a;
+    --io-action: #17191c;
+    --io-on-action: #f1ede6;
+    --io-danger: #b3261e;
+    --io-success: #256b40;
+    --io-warning: #8a5a00;
+    --io-focus: #b04e1a;
+  }
+}
+/* light:end */
+
+/* light:begin */
+[data-theme="light"] {
+  color-scheme: light;
+  --io-ground: #f1ede6;
+  --io-surface: #ffffff;
+  --io-surface-edge: #e2dcd2;
+  --io-raised: #ece7df;
+  --io-chip: #e6e1d8;
+  --io-track: #d6d0c6;
+  --io-track-soft: #ddd7cd;
+  --io-line: #d3ccc1;
+  --io-line-strong: #8c857b;
+  --io-text: #17191c;
+  --io-muted: #5f5850;
+  --io-accent: #e8703a;
+  --io-on-accent: #17191c;
+  --io-accent-text: #b04e1a;
+  --io-action: #17191c;
+  --io-on-action: #f1ede6;
+  --io-danger: #b3261e;
+  --io-success: #256b40;
+  --io-warning: #8a5a00;
+  --io-focus: #b04e1a;
+}
+/* light:end */
+
+/* --- Base ------------------------------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background-color: var(--io-ground);
+  color: var(--io-text);
+}
+
+body {
+  font-family: var(--io-font-body);
+  font-size: 16px;
+  line-height: 1.45;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  overflow-x: hidden;
+}
+
+a {
+  color: var(--io-accent-text);
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+:focus-visible {
+  outline: 3px solid var(--io-focus);
+  outline-offset: 2px;
+}
+
+.io-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.io-muted {
+  color: var(--io-muted);
+}
+
+.io-label {
+  font-family: var(--io-font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--io-accent-text);
+}
+
+.io-title {
+  font-family: var(--io-font-display);
+  font-weight: 900;
+  font-size: 48px;
+  line-height: 0.9;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.io-hint {
+  font-size: 15px;
+}
+
+/* --- App shell -------------------------------------------------------------------------------- */
+
+.io-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  width: 100%;
+  max-width: 40rem;
+  min-height: 100dvh;
+  margin: 0 auto;
+  padding-top: calc(env(safe-area-inset-top) + 16px);
+  padding-right: max(var(--io-gutter), env(safe-area-inset-right));
+  padding-bottom: calc(var(--io-nav-height) + env(safe-area-inset-bottom) + 24px);
+  padding-left: max(var(--io-gutter), env(safe-area-inset-left));
+  overflow-x: clip;
+}
+
+.io-shell-bare {
+  padding-top: calc(env(safe-area-inset-top) + 40px);
+  padding-bottom: calc(env(safe-area-inset-bottom) + 24px);
+}
+
+.io-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: var(--io-tap-small);
+}
+
+/* Room for status indicators next to the brand (offline, unsaved changes). */
+.io-topbar-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.io-page {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  min-width: 0;
+}
+
+.io-page-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* --- Bottom navigation ------------------------------------------------------------------------ */
+
+.io-nav {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 10;
+  background: var(--io-surface);
+  border-top: 1px solid var(--io-line);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+.io-nav ul {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 0;
+  list-style: none;
+}
+
+.io-nav a {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: var(--io-nav-height);
+  color: var(--io-muted);
+  font-family: var(--io-font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-decoration: none;
+  text-transform: uppercase;
+  touch-action: manipulation;
+}
+
+.io-nav a[aria-current="page"] {
+  color: var(--io-accent-text);
+}
+
+.io-nav a[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 25%;
+  right: 25%;
+  height: 3px;
+  border-radius: 0 0 3px 3px;
+  background: var(--io-accent);
+}
+
+.io-nav svg {
+  width: 24px;
+  height: 24px;
+}
+
+/* --- Buttons ---------------------------------------------------------------------------------- */
+
+.io-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--io-tap);
+  min-width: var(--io-tap);
+  padding: 0 20px;
+  border: 1px solid transparent;
+  border-radius: var(--io-radius-control);
+  font: inherit;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+}
+
+.io-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.io-button[aria-busy="true"] {
+  cursor: progress;
+}
+
+.io-button-primary {
+  background: var(--io-action);
+  color: var(--io-on-action);
+}
+
+.io-button-secondary {
+  background: var(--io-raised);
+  color: var(--io-text);
+}
+
+.io-button-ghost {
+  background: transparent;
+  color: var(--io-accent-text);
+  border-color: var(--io-line);
+}
+
+.io-button-danger {
+  background: transparent;
+  color: var(--io-danger);
+  border-color: var(--io-line);
+}
+
+.io-button-block {
+  width: 100%;
+}
+
+/* The big action of a screen (Done): 76 px, display type. */
+.io-button-xl {
+  min-height: 76px;
+  border-radius: var(--io-radius-card);
+  font-family: var(--io-font-display);
+  font-size: 34px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.io-icon-button {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--io-tap-small);
+  height: var(--io-tap-small);
+  padding: 0;
+  border: 1px solid var(--io-line);
+  border-radius: 12px;
+  background: var(--io-surface);
+  color: var(--io-text);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.io-icon-button svg {
+  width: 22px;
+  height: 22px;
+}
+
+.io-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* --- Card ------------------------------------------------------------------------------------- */
+
+.io-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+  background: var(--io-surface);
+  border: 1px solid var(--io-surface-edge);
+  border-radius: var(--io-radius-card);
+}
+
+.io-card h2 {
+  font-family: var(--io-font-display);
+  font-size: 30px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.io-card h3 {
+  margin-top: 6px;
+  font-family: var(--io-font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--io-muted);
+}
+
+/* --- Stepper ---------------------------------------------------------------------------------- */
+
+.io-stepper {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.io-stepper-button {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  height: 72px;
+  padding: 0;
+  border: none;
+  border-radius: var(--io-radius-control);
+  font-family: var(--io-font-body);
+  font-size: 36px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+}
+
+.io-stepper-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.io-stepper-minus {
+  background: var(--io-raised);
+  color: var(--io-text);
+}
+
+.io-stepper-plus {
+  background: var(--io-accent);
+  color: var(--io-on-accent);
+}
+
+.io-stepper-value {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+}
+
+.io-stepper-number {
+  font-family: var(--io-font-display);
+  font-weight: 900;
+  font-size: 96px;
+  line-height: 0.9;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.io-stepper-label {
+  font-family: var(--io-font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--io-muted);
+}
+
+/* --- Chip ------------------------------------------------------------------------------------- */
+
+.io-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.io-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 999px;
+  background: var(--io-chip);
+  color: var(--io-text);
+  font-family: var(--io-font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+/* A chip you can pick is a tap target: 56 px, like every control but the header icon buttons. */
+button.io-chip {
+  min-height: var(--io-tap);
+  padding: 0 14px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.io-chip[aria-pressed="true"] {
+  background: var(--io-accent);
+  color: var(--io-on-accent);
+}
+
+/* --- Progress --------------------------------------------------------------------------------- */
+
+.io-progress {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  gap: 6px;
+}
+
+.io-progress-segment {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--io-track);
+}
+
+.io-progress-segment[data-done="true"] {
+  background: var(--io-accent);
+}
+
+/* --- Banner (toast) --------------------------------------------------------------------------- */
+
+.io-banners {
+  position: fixed;
+  top: calc(env(safe-area-inset-top) + 12px);
+  right: max(var(--io-gutter), env(safe-area-inset-right));
+  left: max(var(--io-gutter), env(safe-area-inset-left));
+  z-index: 20;
+  max-width: 40rem;
+  margin: 0 auto;
+  pointer-events: none;
+}
+
+.io-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 4px 4px 16px;
+  border: 1px solid var(--io-line);
+  border-left: 4px solid var(--io-danger);
+  border-radius: var(--io-radius-control);
+  background: var(--io-surface);
+  color: var(--io-text);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
+  pointer-events: auto;
+}
+
+.io-banner p {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.io-banner-info {
+  border-left-color: var(--io-success);
+}
+
+.io-banner-warning {
+  border-left-color: var(--io-warning);
+}
+
+.io-banner .io-icon-button {
+  width: var(--io-tap);
+  height: var(--io-tap);
+  border: none;
+  background: transparent;
+}
+
+/* --- Inline notices (forms) ------------------------------------------------------------------- */
+
+.io-notice {
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: var(--io-raised);
+  border-left: 4px solid var(--io-line-strong);
+}
+
+.io-notice-error {
+  border-left-color: var(--io-danger);
+}
+
+.io-notice-info {
+  border-left-color: var(--io-success);
+}
+
+/* --- Full-screen states (loading, empty) ------------------------------------------------------ */
+
+.io-state {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  min-height: 60dvh;
+  padding: 24px 0;
+  text-align: center;
+}
+
+.io-card .io-state {
+  min-height: 0;
+}
+
+.io-state .io-title {
+  font-size: 40px;
+}
+
+.io-state p {
+  max-width: 22rem;
+  color: var(--io-muted);
+}
+
+.io-spinner {
+  width: 48px;
+  height: 48px;
+  border: 5px solid var(--io-track);
+  border-top-color: var(--io-accent);
+  border-radius: 50%;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .io-spinner {
+    animation: io-spin 900ms linear infinite;
+  }
+
+  .io-button,
+  .io-stepper-button,
+  .io-chip {
+    transition:
+      background-color 120ms ease,
+      transform 80ms ease;
+  }
+
+  .io-button:active:not(:disabled),
+  .io-stepper-button:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+}
+
+@keyframes io-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --- Forms ------------------------------------------------------------------------------------ */
+
+.io-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.io-field label {
+  font-weight: 600;
+}
+
+.io-field label .io-muted {
+  font-weight: 400;
+}
+
+.io-input {
+  min-height: var(--io-tap);
+  width: 100%;
+  padding: 0 16px;
+  background: var(--io-ground);
+  color: var(--io-text);
+  border: 1px solid var(--io-line-strong);
+  border-radius: 14px;
+  font: inherit;
+  font-size: 17px;
+}
+
+.io-input::placeholder {
+  color: var(--io-muted);
+  opacity: 1;
+}
+
+/* --- Account panel ---------------------------------------------------------------------------- */
+
+.io-waiting {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: var(--io-raised);
+}
+
+.io-account-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.io-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.io-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--io-line);
+}
+
+.io-row-main {
+  display: flex;
+  flex: 1 1 12rem;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.io-row-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.io-row-meta {
+  font-size: 14px;
+}
+
+.io-badge {
+  padding: 2px 8px;
+  border: 1px solid var(--io-success);
+  border-radius: 999px;
+  color: var(--io-success);
+  font-family: var(--io-font-mono);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* --- Component gallery (debug builds) --------------------------------------------------------- */
+
+.io-gallery-theme {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  margin: 0 calc(-1 * var(--io-gutter));
+  padding: 24px var(--io-gutter);
+  background: var(--io-ground);
+  color: var(--io-text);
+}
