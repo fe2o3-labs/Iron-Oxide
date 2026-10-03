@@ -9,6 +9,7 @@
 //! request succeeds, so retrying after a lost answer returns the program the first attempt
 //! created instead of a second one (which would also take a second slot of the plan's quota).
 
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use iron_oxide_domain::entitlements::{Entitlements, Feature, Limit, Quota};
 use iron_oxide_domain::program::{
@@ -143,6 +144,23 @@ pub fn too_large_message() -> String {
     )
 }
 
+/// The text of a picked file: UTF-8 (as JSON must be), and at most [`MAX_DOCUMENT_BYTES`] once
+/// decoded, the size the server checks.
+///
+/// # Errors
+/// A message for the user.
+pub fn decode_document(bytes: &[u8]) -> Result<String, String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| {
+        "This file is not UTF-8 text. Save the program.json as UTF-8 and try again.".to_owned()
+    })?;
+    // A byte-order mark is not part of the JSON.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if text.len() > MAX_DOCUMENT_BYTES {
+        return Err(too_large_message());
+    }
+    Ok(text.to_owned())
+}
+
 /// Why an action failed, as the screen shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionFailure {
@@ -223,7 +241,43 @@ enum Screen {
     Mine(ProgramId),
 }
 
+/// Sets a signal that may belong to a component that is gone (the user navigated away while an
+/// action ran); `false` if it is gone.
+fn try_set<T: 'static>(mut signal: Signal<T>, value: T) -> bool {
+    match signal.try_write() {
+        Ok(mut slot) => {
+            *slot = value;
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Marks an action as running for as long as it lives: dropping it, however the action ends,
+/// clears the component's busy flag (if the component is still there).
+struct BusyGuard(Signal<bool>);
+
+impl BusyGuard {
+    /// Starts an action, unless one is already running in this component.
+    fn start(busy: Signal<bool>) -> Option<Self> {
+        if busy.try_peek().is_ok_and(|busy| *busy) {
+            return None;
+        }
+        try_set(busy, true);
+        Some(Self(busy))
+    }
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        try_set(self.0, false);
+    }
+}
+
 /// The screen's shared state. `Copy`, so every handler can take one.
+///
+/// Actions run with `spawn_forever`, so they finish even if the user leaves the screen: their
+/// outcome then goes to the app-wide banner instead of the screen.
 #[derive(Clone, Copy, PartialEq)]
 struct Programs {
     screen: Signal<Screen>,
@@ -237,49 +291,68 @@ struct Programs {
     pending_copy: Signal<Option<(BuiltinProgramId, CreationId)>>,
     /// A new-program upload whose answer was lost: retried with the same id.
     pending_upload: Signal<Option<(String, CreationId)>>,
-    busy: Signal<bool>,
     errors: Errors,
 }
 
 impl Programs {
-    fn open(mut self, screen: Screen) {
-        self.plan_notice.set(None);
-        self.problems.set(None);
-        self.screen.set(screen);
-        scroll_to_top();
-    }
-
-    fn changed(mut self) {
-        let next = *self.generation.peek() + 1;
-        self.generation.set(next);
-    }
-
-    /// Starts an action, unless one is running.
-    fn start(mut self) -> bool {
-        if *self.busy.peek() {
-            return false;
+    fn open(self, screen: Screen) {
+        self.clear_notices();
+        if try_set(self.screen, screen) {
+            scroll_to_top();
         }
-        self.busy.set(true);
-        self.plan_notice.set(None);
-        self.problems.set(None);
-        true
     }
 
-    fn done(mut self) {
-        self.busy.set(false);
+    /// Opens `screen` if the user is still on `from` (they may have moved on meanwhile).
+    fn open_from(self, from: &Screen, screen: Screen) {
+        if self.screen.try_peek().is_ok_and(|current| *current == *from) {
+            self.open(screen);
+        }
     }
 
-    /// Shows why an action failed.
-    fn fail(mut self, error: &ServerFnError) {
-        let errors_ = self.errors;
+    fn changed(self) {
+        if let Ok(generation) = self.generation.try_peek().map(|generation| *generation) {
+            try_set(self.generation, generation + 1);
+        }
+    }
+
+    fn clear_notices(self) {
+        try_set(self.plan_notice, None);
+        try_set(self.problems, None);
+    }
+
+    /// Shows why an action failed: on the screen, or in the banner if the screen is gone.
+    fn fail(self, error: &ServerFnError) {
         match action_failure(error) {
-            ActionFailure::Problems(problems) => self.problems.set(Some(problems)),
-            ActionFailure::Plan(message) => self.plan_notice.set(Some(message)),
-            ActionFailure::Other(message) if error_is_413(error) => {
-                errors_.show(BannerKind::Error, message);
+            ActionFailure::Problems(problems) => {
+                let count = problems.errors.len() + problems.omitted;
+                if !try_set(self.problems, Some(problems)) {
+                    self.errors.show(
+                        BannerKind::Error,
+                        format!(
+                            "The program was not uploaded: it has {count} problem(s). Upload it \
+                             again from Programs to see them."
+                        ),
+                    );
+                }
             }
-            ActionFailure::Other(_) => errors_.report(error),
+            ActionFailure::Plan(message) => {
+                if !try_set(self.plan_notice, Some(message.clone())) {
+                    self.errors.show(BannerKind::Error, message);
+                }
+            }
+            ActionFailure::Other(message) if error_is_413(error) => {
+                self.errors.show(BannerKind::Error, message);
+            }
+            ActionFailure::Other(_) => self.errors.report(error),
         }
+    }
+
+    fn pending_upload(self) -> Option<(String, CreationId)> {
+        self.pending_upload.try_peek().ok().and_then(|pending| pending.clone())
+    }
+
+    fn pending_copy(self) -> Option<(BuiltinProgramId, CreationId)> {
+        self.pending_copy.try_peek().ok().and_then(|pending| pending.clone())
     }
 }
 
@@ -310,7 +383,6 @@ pub fn ProgramsPage() -> Element {
         problems: use_signal(|| None),
         pending_copy: use_signal(|| None),
         pending_upload: use_signal(|| None),
-        busy: use_signal(|| false),
         errors: use_errors(),
     };
     let screen = state.screen.read().clone();
@@ -378,10 +450,7 @@ fn ProgramList(state: Programs) -> Element {
         }
         loaded.ok()
     });
-    let entitlements = use_resource(move || async move {
-        let _ = state.generation.read();
-        my_entitlements().await.ok()
-    });
+    let entitlements = use_entitlements(state);
 
     let header = rsx! {
         div { class: "io-page-header",
@@ -541,7 +610,8 @@ fn UploadCard(
     let mut picks = use_signal(|| 0_u32);
     let allowed = allowance.as_ref().is_none_or(|(allowed, _)| *allowed);
     let slots = allowance.and_then(|(_, slots)| slots);
-    let busy = *state.busy.read();
+    let busy_flag = use_signal(|| false);
+    let busy = *busy_flag.read();
     let input_id = if target.is_some() {
         "upload-version"
     } else {
@@ -554,27 +624,27 @@ fn UploadCard(
         };
         let next = *picks.peek() + 1;
         picks.set(next);
+        // An early guard on the raw size; the decoded text is checked again below.
         if usize::try_from(file.size()).map_or(true, |size| size > MAX_DOCUMENT_BYTES) {
             state.errors.show(BannerKind::Error, too_large_message());
             return;
         }
-        if !state.start() {
+        let Some(guard) = BusyGuard::start(busy_flag) else {
             return;
-        }
-        spawn(async move {
-            let document = match file.read_string().await {
-                Ok(document) => document,
-                Err(_) => {
-                    state.errors.show(
-                        BannerKind::Error,
-                        "This file could not be read. Is it a text file?",
-                    );
-                    state.done();
-                    return;
-                }
+        };
+        state.clear_notices();
+        spawn_forever(async move {
+            let _guard = guard;
+            let document = match file.read_bytes().await {
+                Ok(bytes) => decode_document(&bytes),
+                Err(_) => Err("This file could not be read.".to_owned()),
             };
-            upload(state, target, document).await;
-            state.done();
+            match document {
+                Ok(document) => upload(state, target, document).await,
+                Err(message) => {
+                    state.errors.show(BannerKind::Error, message);
+                }
+            }
         });
     };
 
@@ -647,16 +717,14 @@ async fn upload(state: Programs, target: Option<ProgramId>, document: String) {
     let upload_target = match target {
         Some(program_id) => UploadTarget::NewVersion { program_id },
         None => {
-            let creation_id = creation_id_for(state.pending_upload.peek().as_ref(), &document);
-            let mut pending = state.pending_upload;
-            pending.set(Some((document.clone(), creation_id)));
+            let creation_id = creation_id_for(state.pending_upload().as_ref(), &document);
+            try_set(state.pending_upload, Some((document.clone(), creation_id)));
             UploadTarget::NewProgram { creation_id }
         }
     };
     match upload_program(upload_target, document).await {
         Ok(outcome) => {
-            let mut pending = state.pending_upload;
-            pending.set(None);
+            try_set(state.pending_upload, None);
             let message = match (outcome.saved, target.is_some()) {
                 (false, true) => "No change: this is the same as the latest version.".to_owned(),
                 (false, false) => format!(
@@ -669,18 +737,30 @@ async fn upload(state: Programs, target: Option<ProgramId>, document: String) {
             state.errors.show(BannerKind::Info, message);
             state.changed();
             if target.is_none() {
-                state.open(Screen::Mine(outcome.program.id));
+                state.open_from(&Screen::List, Screen::Mine(outcome.program.id));
             }
         }
         Err(error) => {
             // Refused for good: the next attempt is a new upload.
             if !ApiFailure::classify(&error).is_retryable() {
-                let mut pending = state.pending_upload;
-                pending.set(None);
+                try_set(state.pending_upload, None);
             }
             state.fail(&error);
         }
     }
+}
+
+/// The user's entitlements, reloaded after every change; a failure is reported.
+fn use_entitlements(state: Programs) -> Resource<Option<Entitlements>> {
+    let errors = use_errors();
+    use_resource(move || async move {
+        let _ = state.generation.read();
+        let result = my_entitlements().await;
+        if let Err(error) = &result {
+            errors.report(error);
+        }
+        result.ok()
+    })
 }
 
 /// The days of a program: each day's exercises, their work, load and progression.
@@ -747,7 +827,8 @@ fn BuiltinDetail(state: Programs, id: BuiltinProgramId) -> Element {
         .read()
         .clone()
         .map(|list| list.and_then(|list| list.into_iter().find(|b| b.builtin_id == id)));
-    let busy = *state.busy.read();
+    let busy_flag = use_signal(|| false);
+    let busy = *busy_flag.read();
     let builtin = match found {
         None => return rsx! { BackButton { state } LoadingState {} },
         Some(None) => {
@@ -760,17 +841,18 @@ fn BuiltinDetail(state: Programs, id: BuiltinProgramId) -> Element {
     };
     let copy_id = builtin.builtin_id.clone();
     let copy = move |_| {
-        if !state.start() {
+        let Some(guard) = BusyGuard::start(busy_flag) else {
             return;
-        }
+        };
+        state.clear_notices();
         let builtin_id = copy_id.clone();
-        spawn(async move {
-            let creation_id = creation_id_for(state.pending_copy.peek().as_ref(), &builtin_id);
-            let mut pending = state.pending_copy;
-            pending.set(Some((builtin_id.clone(), creation_id)));
+        spawn_forever(async move {
+            let _guard = guard;
+            let creation_id = creation_id_for(state.pending_copy().as_ref(), &builtin_id);
+            try_set(state.pending_copy, Some((builtin_id.clone(), creation_id)));
             match copy_builtin_program(builtin_id.as_str().to_owned(), creation_id).await {
                 Ok(detail) => {
-                    pending.set(None);
+                    try_set(state.pending_copy, None);
                     state.errors.show(
                         BannerKind::Info,
                         format!(
@@ -779,18 +861,15 @@ fn BuiltinDetail(state: Programs, id: BuiltinProgramId) -> Element {
                         ),
                     );
                     state.changed();
-                    state.done();
-                    state.open(Screen::Mine(detail.program.id));
-                    return;
+                    state.open_from(&Screen::Builtin(builtin_id), Screen::Mine(detail.program.id));
                 }
                 Err(error) => {
                     if !ApiFailure::classify(&error).is_retryable() {
-                        pending.set(None);
+                        try_set(state.pending_copy, None);
                     }
                     state.fail(&error);
                 }
             }
-            state.done();
         });
     };
     rsx! {
@@ -841,7 +920,9 @@ fn MineDetail(state: Programs, id: ProgramId) -> Element {
         }
         loaded.ok()
     });
-    let busy = *state.busy.read();
+    let entitlements = use_entitlements(state);
+    let busy_flag = use_signal(|| false);
+    let busy = *busy_flag.read();
     let loaded = data.read().clone();
     let data_ = match loaded {
         None => return rsx! { BackButton { state } LoadingState {} },
@@ -853,15 +934,22 @@ fn MineDetail(state: Programs, id: ProgramId) -> Element {
         }
         Some(Some(data_)) => data_,
     };
+    let allowance = entitlements
+        .read()
+        .clone()
+        .flatten()
+        .map(|entitlements| upload_allowance(&entitlements, 0));
     let program = data_.detail.program.clone();
     let archived = program.archived;
     let active = data_.active;
 
     let activate = move |_| {
-        if !state.start() {
+        let Some(guard) = BusyGuard::start(busy_flag) else {
             return;
-        }
-        spawn(async move {
+        };
+        state.clear_notices();
+        spawn_forever(async move {
+            let _guard = guard;
             match set_active_program(id).await {
                 Ok(detail) => {
                     state.errors.show(
@@ -875,14 +963,15 @@ fn MineDetail(state: Programs, id: ProgramId) -> Element {
                 }
                 Err(error) => state.fail(&error),
             }
-            state.done();
         });
     };
     let archive = move |_| {
-        if !state.start() {
+        let Some(guard) = BusyGuard::start(busy_flag) else {
             return;
-        }
-        spawn(async move {
+        };
+        state.clear_notices();
+        spawn_forever(async move {
+            let _guard = guard;
             match set_program_archived(id, !archived).await {
                 Ok(()) => {
                     let message = if archived {
@@ -895,7 +984,6 @@ fn MineDetail(state: Programs, id: ProgramId) -> Element {
                 }
                 Err(error) => state.fail(&error),
             }
-            state.done();
         });
     };
 
@@ -957,7 +1045,7 @@ fn MineDetail(state: Programs, id: ProgramId) -> Element {
                 }
             }
         }
-        UploadCard { state, allowance: None, target: Some(id) }
+        UploadCard { state, allowance, target: Some(id) }
     }
 }
 
@@ -1199,6 +1287,21 @@ mod tests {
         let names = |list: &[ProgramView]| list.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(&current), ["P1", "P3"]);
         assert_eq!(names(&archived), ["P2"]);
+    }
+
+    #[test]
+    fn picked_files_must_be_utf8_and_fit_once_decoded() {
+        assert_eq!(decode_document(b"{}"), Ok("{}".to_owned()));
+        assert_eq!(decode_document(b"\xef\xbb\xbf{}"), Ok("{}".to_owned()));
+        assert!(
+            decode_document(b"{\"name\": \"\xff\"}")
+                .unwrap_err()
+                .contains("UTF-8")
+        );
+        let exactly = "a".repeat(MAX_DOCUMENT_BYTES);
+        assert_eq!(decode_document(exactly.as_bytes()), Ok(exactly.clone()));
+        let over = format!("{exactly}a");
+        assert_eq!(decode_document(over.as_bytes()), Err(too_large_message()));
     }
 
     #[test]

@@ -947,7 +947,6 @@ button.io-chip {
   opacity: 0.5;
 }
 
-input[type="file"]:focus-visible + .io-file-button,
 .io-file-button:has(+ input[type="file"]:focus-visible) {
   outline: 3px solid var(--io-accent-text);
   outline-offset: 2px;
