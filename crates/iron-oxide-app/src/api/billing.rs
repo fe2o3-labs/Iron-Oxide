@@ -13,7 +13,6 @@ use dioxus::server::axum::Extension;
 ///
 /// Read from `users.plan` on every call. A `POST`, like every call that reads the signed-in user,
 /// so it is never cached. Fails with 401 when signed out.
-#[allow(dead_code, reason = "shown by the account and settings screens (#34)")]
 #[post("/api/billing/entitlements", state: Extension<AppState>, user: AuthUser)]
 pub async fn my_entitlements() -> Result<Entitlements, ServerFnError> {
     Ok(entitlements::entitlements_of(&state.db, user).await?)
