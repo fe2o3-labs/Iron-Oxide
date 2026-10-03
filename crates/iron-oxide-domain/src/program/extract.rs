@@ -12,7 +12,10 @@
 //! 1. **Candidates**: the complete top-level `{…}` blocks inside each code fence (```` ``` ```` or
 //!    `~~~`), and those of the whole text.
 //! 2. Only **program-shaped** candidates count: blocks with the program's [`SHAPE_KEYS`] as keys.
-//!    A snippet such as `{"kg": 2.5}` in the prose is never chosen and never reported on.
+//!    A snippet such as `{"kg": 2.5}` in the prose is never chosen and never reported on. A block
+//!    that is not a valid program (stray braces around the answer, `{"program": {…}}`) is looked
+//!    into, [`MAX_DEPTH`] levels deep: a program inside it is a candidate, and a broken block
+//!    around a program is not one itself.
 //! 3. A program-shaped block that starts but never closes, with no complete program after it,
 //!    means the answer was cut off: [`ExtractError::CutOff`], even if an earlier complete program
 //!    (an echo of the current one) is there.
@@ -43,6 +46,9 @@ pub const SHAPE_KEYS: [&str; 2] = ["name", "days"];
 
 /// How many times a scan restarts after a block that never closes.
 const MAX_RESCANS: usize = 8;
+
+/// How many levels of blocks that are not programs are looked into for a program.
+const MAX_DEPTH: usize = 4;
 
 /// Why no single program could be taken from a pasted text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -105,24 +111,23 @@ pub fn extract_json(text: &str) -> Result<&str, ExtractError> {
         return Err(ExtractError::Empty);
     }
     let mut complete = BTreeSet::new();
-    let mut unclosed = BTreeSet::new();
+    let mut unclosed = Vec::new();
     for region in fences(text)
         .into_iter()
         .chain(std::iter::once(0..text.len()))
     {
         scan(text, region, &mut complete, &mut unclosed);
     }
+    let candidates = program_candidates(text, complete);
     let slice = |range: &Range<usize>| text.get(range.clone()).unwrap_or_default();
-    let programs: Vec<Range<usize>> = complete
-        .into_iter()
-        .map(|(start, end)| start..end)
-        .filter(|range| is_program_shaped(slice(range)))
-        .collect();
-    let cut_off = unclosed.iter().any(|&start| {
-        !programs.iter().any(|program| program.start > start)
-            && has_shape_keys(text.get(start..).unwrap_or_default())
+    // Cut off: a program-shaped block that never closes, after the last complete candidate. Its
+    // keys are only looked for up to the end of its own region, so the check stays linear.
+    let last_candidate = candidates.iter().map(|range| range.start).max();
+    let cut_off = unclosed.iter().any(|&(start, end)| {
+        last_candidate.is_none_or(|last| start > last)
+            && has_shape_keys(text.get(start..end).unwrap_or_default())
     });
-    match programs.as_slice() {
+    match candidates.as_slice() {
         _ if cut_off => Err(ExtractError::CutOff),
         [only] => Ok(slice(only)),
         [] => Err(ExtractError::NoJson),
@@ -130,6 +135,76 @@ pub fn extract_json(text: &str) -> Result<&str, ExtractError> {
             count: several.len(),
         }),
     }
+}
+
+/// What a complete block is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// A JSON object with the program's keys.
+    Program,
+    /// Not valid JSON, but with the program's keys: a broken program, or stray braces around one.
+    Broken,
+    /// Anything else.
+    Other,
+}
+
+fn shape(block: &str) -> Shape {
+    match serde_json::from_str::<serde_json::Value>(block) {
+        Ok(serde_json::Value::Object(object))
+            if SHAPE_KEYS.iter().all(|key| object.contains_key(*key)) =>
+        {
+            Shape::Program
+        }
+        Ok(_) => Shape::Other,
+        Err(_) if has_shape_keys(block) => Shape::Broken,
+        Err(_) => Shape::Other,
+    }
+}
+
+/// The program candidates among the complete blocks, sorted: the programs, the inner programs of
+/// blocks that are not programs (up to [`MAX_DEPTH`] levels; the inner blocks of a level are
+/// disjoint, so each level reads the text at most once per region), and the broken blocks that
+/// have no program inside.
+fn program_candidates(text: &str, complete: BTreeSet<(usize, usize)>) -> Vec<Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut programs = BTreeSet::new();
+    let mut broken = Vec::new();
+    let mut level: Vec<(usize, usize)> = complete.into_iter().collect();
+    for depth in 0..=MAX_DEPTH {
+        let mut inner = BTreeSet::new();
+        for &(start, end) in &level {
+            match shape(text.get(start..end).unwrap_or_default()) {
+                Shape::Program => {
+                    programs.insert((start, end));
+                    continue;
+                }
+                Shape::Broken => broken.push((start, end)),
+                Shape::Other => {}
+            }
+            if depth < MAX_DEPTH && end > start + 1 {
+                scan_once(bytes, start + 1..end - 1, &mut inner);
+            }
+        }
+        level = inner.into_iter().collect();
+        if level.is_empty() {
+            break;
+        }
+    }
+    // A broken block around a program is stray braces, not a second candidate.
+    let mut candidates: BTreeSet<(usize, usize)> = programs.iter().copied().collect();
+    for (start, end) in broken {
+        let holds_program = programs
+            .range((start + 1, 0)..)
+            .next()
+            .is_some_and(|&(inner_start, _)| inner_start < end);
+        if !holds_program {
+            candidates.insert((start, end));
+        }
+    }
+    candidates
+        .into_iter()
+        .map(|(start, end)| start..end)
+        .collect()
 }
 
 /// The byte ranges of the contents of the code fences: from the line after an opening fence (three
@@ -173,7 +248,7 @@ fn scan(
     text: &str,
     region: Range<usize>,
     complete: &mut BTreeSet<(usize, usize)>,
-    unclosed: &mut BTreeSet<usize>,
+    unclosed: &mut Vec<(usize, usize)>,
 ) {
     let bytes = text.as_bytes();
     let mut from = region.start;
@@ -181,7 +256,7 @@ fn scan(
         let Some(open) = scan_once(bytes, from..region.end, complete) else {
             return;
         };
-        unclosed.insert(open);
+        unclosed.push((open, region.end));
         match bytes
             .get(open + 1..region.end)
             .and_then(|rest| rest.iter().position(|byte| *byte == b'{'))
@@ -235,18 +310,6 @@ fn scan_once(
         }
     }
     (depth > 0).then_some(start)
-}
-
-/// Whether a complete block is a program: a JSON object with the [`SHAPE_KEYS`], or, when it is
-/// not valid JSON (the validator will say why), a block that has them as keys.
-fn is_program_shaped(block: &str) -> bool {
-    match serde_json::from_str::<serde_json::Value>(block) {
-        Ok(serde_json::Value::Object(object)) => {
-            SHAPE_KEYS.iter().all(|key| object.contains_key(*key))
-        }
-        Ok(_) => false,
-        Err(_) => has_shape_keys(block),
-    }
 }
 
 /// Whether every one of the [`SHAPE_KEYS`] appears in `text` as a key: `"name"` then `:`.
@@ -465,6 +528,53 @@ mod tests {
         );
         let fenced = "```\n{}\n```\n".repeat(20_000);
         assert_eq!(extract_json(&fenced), Err(ExtractError::NoJson));
+    }
+
+    /// Fix round of #111: every fence used to rescan the rest of the text (12.9 s for 1 MiB).
+    #[test]
+    fn many_fences_take_linear_time() {
+        let started = std::time::Instant::now();
+        // Each fence opens a block that never closes and has no program keys.
+        let unit = "```\n{\n```\n";
+        let text = unit.repeat(MAX_PASTE_BYTES / unit.len());
+        assert!(text.len() > MAX_PASTE_BYTES - unit.len());
+        assert_eq!(extract_json(&text), Err(ExtractError::NoJson));
+        let unit = "```json\n{\"name\": \"x\", \"days\": [\n```\n";
+        let text = unit.repeat(MAX_PASTE_BYTES / unit.len());
+        assert_eq!(extract_json(&text), Err(ExtractError::CutOff));
+        let closed = "```json\n{\"name\": \"x\", \"days\": []}\n```\n";
+        let text = closed.repeat(MAX_PASTE_BYTES / closed.len());
+        assert!(matches!(
+            extract_json(&text),
+            Err(ExtractError::Several { .. })
+        ));
+        let elapsed = started.elapsed();
+        // Linear: tens of milliseconds even in a debug build; quadratic took seconds in release.
+        assert!(elapsed.as_secs_f64() < 2.0, "{elapsed:?}");
+    }
+
+    /// Fix round of #111: a stray `{` before and `}` after made one block around the program.
+    #[test]
+    fn a_program_wrapped_in_stray_braces_is_found() {
+        for text in [
+            format!("{{\n```json\n{PROGRAM}\n```\n}}"),
+            format!("{{ Here you go:\n{PROGRAM}\nEnjoy }}"),
+            format!("{{{{ {PROGRAM} }}}}"),
+            format!("{{\"program\": {PROGRAM}}}"),
+        ] {
+            assert_eq!(extract_json(&text), Ok(PROGRAM), "{text}");
+        }
+        // Two programs inside the same stray braces are still two.
+        assert_eq!(
+            extract_json(&format!("{{ {PROGRAM}\n{OTHER} }}")),
+            Err(ExtractError::Several { count: 2 })
+        );
+        assert_eq!(
+            extract_json(&format!(
+                "{{\n```json\n{PROGRAM}\n```\n```json\n{OTHER}\n```\n}}"
+            )),
+            Err(ExtractError::Several { count: 2 })
+        );
     }
 
     #[test]

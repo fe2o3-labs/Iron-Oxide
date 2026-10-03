@@ -183,11 +183,16 @@ impl Flow {
 }
 
 /// Whether `program` is the same as the program's current version (`current`, its document).
+/// The `$schema` link is not part of the program: with or without it, they are the same.
 #[must_use]
 pub fn is_current_version(current: Option<&str>, program: &Program) -> bool {
+    let without_schema = |program: &Program| Program {
+        schema: None,
+        ..program.clone()
+    };
     current
         .and_then(|document| Program::from_json(document).ok())
-        .is_some_and(|current| current == *program)
+        .is_some_and(|current| without_schema(&current) == without_schema(program))
 }
 
 /// The flow's state, held by the Programs screen so it survives the lists reloading. Reset when
@@ -817,6 +822,17 @@ mod tests {
         let other = Program::from_json(&VALID.replace("\"Mine\"", "\"Other\"")).unwrap();
         assert!(!is_current_version(Some(&current), &other));
         assert!(!is_current_version(None, &program));
+        // Fix round of #111: the stored version carries `$schema`, the AI's answer doesn't.
+        assert_eq!(program.schema, None);
+        let with_schema = VALID.replacen(
+            '{',
+            &format!(
+                "{{\"$schema\": \"{}\",",
+                iron_oxide_domain::program::PROGRAM_SCHEMA_URL
+            ),
+            1,
+        );
+        assert!(is_current_version(Some(&with_schema), &program));
     }
 
     #[test]
