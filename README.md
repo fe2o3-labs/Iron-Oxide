@@ -472,8 +472,8 @@ License files) and optimised screenshots. No framework, no build step and no thi
   (`LANDING_PORT` changes the port). `make landing-build` only assembles it.
 - **The prompt has one source: `programs/ai-prompt.md`** (#108), which the app shows too.
   `make landing-build` puts it into the page (`scripts/landing-prompt.py`, between the
-  `prompt:begin`/`prompt:end` markers of `landing/index.html`); the text written there is only a
-  fallback while that file does not exist. Edit the prompt in `programs/ai-prompt.md`, never in the page.
+  `prompt:begin`/`prompt:end` markers of `landing/index.html`) and fails if the file is missing.
+  Edit the prompt in `programs/ai-prompt.md`, never in the page.
 - The site also publishes `schemas/program.schema.json` at `/program.schema.json`.
 - `.github/workflows/landing.yml` deploys it to GitHub Pages on every push to `main` that touches
   `landing/`, the schema or the workflow; pull requests only build it. `landing/CNAME` holds the

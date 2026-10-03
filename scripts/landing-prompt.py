@@ -4,8 +4,7 @@
 The prompt that asks an AI assistant for a program lives in one file, `programs/ai-prompt.md`
 (#108): the app shows it and the landing page shows it. This script replaces the text between the
 `<!-- prompt:begin -->` and `<!-- prompt:end -->` markers of the built index.html with that file,
-HTML-escaped. While the file does not exist yet, the page keeps the copy written between the
-markers in `landing/index.html`.
+HTML-escaped. The page has no copy of its own: the build fails if the file is missing or empty.
 
 Usage: landing-prompt.py <built index.html> <prompt file>
 """
@@ -23,8 +22,8 @@ def main() -> int:
         print(f"{page_path}: expected one {BEGIN} ... {END} pair", file=sys.stderr)
         return 1
     if not prompt_path.exists():
-        print(f"{prompt_path} not found: the page keeps the prompt written in landing/index.html")
-        return 0
+        print(f"{prompt_path} not found: the landing page needs the AI prompt", file=sys.stderr)
+        return 1
     prompt = prompt_path.read_text(encoding="utf-8").strip()
     if not prompt:
         print(f"{prompt_path} is empty", file=sys.stderr)

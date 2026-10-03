@@ -285,6 +285,9 @@ else
   echo "  FAIL  landing-build refusals deleted nothing"
   failures=$((failures + 1))
 fi
+mv "$work/programs/ai-prompt.md" "$work/programs/ai-prompt.md.off"
+run fail "landing-build fails without programs/ai-prompt.md" "the landing page needs the AI prompt" -- landing-build
+mv "$work/programs/ai-prompt.md.off" "$work/programs/ai-prompt.md"
 run ok "landing-build assembles dist/landing with the schema" "Landing page: dist/landing" -- landing-build
 if [ -f "$work/dist/landing/program.schema.json" ] \
   && grep -qF '<!-- prompt:begin -->Ask me &amp; then write<!-- prompt:end -->' "$work/dist/landing/index.html"; then
