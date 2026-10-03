@@ -324,11 +324,13 @@ p {
   touch-action: manipulation;
 }
 
-.io-nav a[aria-current="page"] {
+.io-nav a[aria-current="page"],
+.io-nav a[data-section="true"] {
   color: var(--io-accent-text);
 }
 
-.io-nav a[aria-current="page"]::before {
+.io-nav a[aria-current="page"]::before,
+.io-nav a[data-section="true"]::before {
   content: "";
   position: absolute;
   top: 0;

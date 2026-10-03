@@ -244,7 +244,10 @@ fn BottomNav() -> Element {
                     li { key: "{item.label}",
                         Link {
                             to: item.route.clone(),
-                            aria_current: if in_section(&item.route, &current) { "page" } else { "false" },
+                            // `Link` sets `aria-current="page"` itself on an exact match (and drops
+                            // any other value on navigation); the tab's highlight follows the
+                            // section, so a session's details still light History.
+                            "data-section": in_section(&item.route, &current),
                             {(item.icon)()}
                             span { "{item.label}" }
                         }
