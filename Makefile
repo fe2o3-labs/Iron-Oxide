@@ -162,6 +162,7 @@ need-compose = $(need-docker)
 	compile test test-make test-db test-all fmt fmt-check lint sqlx-check smoke secrets check \
 	build docker-build docker-run deploy logs \
 	adb-reverse android-open ios-open tailscale-serve tailscale-reset \
+	landing landing-build \
 	clean clean-all prune
 
 ##@ Setup
@@ -424,6 +425,27 @@ tailscale-serve: ## Publish the app over HTTPS to your tailnet (tailscale serve)
 tailscale-reset: ## Stop publishing the app to your tailnet
 	$(Q)$(call need-cmd,tailscale,brew install --cask tailscale-app)
 	$(Q)tailscale serve reset
+
+##@ Landing page
+
+# The static site of iron-oxyde.com: landing/ plus the program JSON Schema, which the page's prompt
+# points AI assistants at (https://iron-oxyde.com/program.schema.json). The Pages workflow
+# (.github/workflows/landing.yml) deploys the same LANDING_OUT.
+LANDING_OUT ?= dist/landing
+# Port of the local preview (`make landing`).
+LANDING_PORT ?= 8000
+
+landing-build: ## Assemble the landing page into LANDING_OUT (dist/landing)
+	$(Q)rm -rf $(LANDING_OUT)
+	$(Q)mkdir -p $(LANDING_OUT)
+	$(Q)cp -R landing/. $(LANDING_OUT)/
+	$(Q)cp schemas/program.schema.json $(LANDING_OUT)/program.schema.json
+	$(Q)echo "Landing page: $(LANDING_OUT)"
+
+landing: landing-build ## Preview the landing page on http://localhost:LANDING_PORT (8000)
+	$(Q)$(call need-cmd,python3,Install Python 3: brew install python)
+	$(Q)$(call step,landing page on http://localhost:$(LANDING_PORT) (Ctrl-C stops it))
+	$(Q)python3 -m http.server $(LANDING_PORT) --bind 127.0.0.1 --directory $(LANDING_OUT)
 
 ##@ Misc
 
