@@ -335,6 +335,100 @@ pub fn clock_text(left: Duration) -> String {
     Seconds::from_millis_ceil(millis).map_or_else(|_| "–".to_owned(), |seconds| seconds.to_string())
 }
 
+/// The rest after the working or warm-up set `steps[done]`, or `None` for no rest timer:
+/// - none after the last set of the day, nor after a warm-up (warm-ups lead straight into the
+///   next set);
+/// - in a superset, the rest of a member before the last is the transition to the next member
+///   (often 0: none);
+/// - otherwise the exercise's rest, or the user's default rest when the program says 0.
+#[must_use]
+pub fn rest_after(
+    plan: &SessionPlan,
+    steps: &[Step],
+    done: usize,
+    has_next: bool,
+    default_rest: Seconds,
+) -> Option<Seconds> {
+    let step = steps.get(done)?;
+    if !has_next || step.warm_up {
+        return None;
+    }
+    let exercise = &plan.exercises[step.exercise].exercise;
+    let transition = exercise.superset.is_some()
+        && plan
+            .exercises
+            .get(step.exercise + 1)
+            .is_some_and(|next| next.exercise.superset == exercise.superset);
+    let rest = if transition || !exercise.rest.is_zero() {
+        exercise.rest
+    } else {
+        default_rest
+    };
+    (!rest.is_zero()).then_some(rest)
+}
+
+/// The rest screen's header: `REST · BACK SQUAT` and `Set 2 logged ✓` for the set it follows.
+#[must_use]
+pub fn rest_header(plan: &SessionPlan, set: &LoggedSet<Timestamp>) -> (String, String) {
+    let name = plan
+        .exercises
+        .iter()
+        .find(|planned| planned.exercise.id == set.exercise)
+        .map_or_else(
+            || set.exercise.to_string(),
+            |planned| planned.exercise.name.clone(),
+        );
+    let kind = if set.warm_up { "Warm-up" } else { "Set" };
+    (
+        format!("REST · {}", name.to_uppercase()),
+        format!("{kind} {} logged ✓", set.set_index + 1),
+    )
+}
+
+/// The "up next" card of the rest screen: `UP NEXT · SET 3 / 5` and `5 × 100 kg`. The exercise
+/// is named when it differs from the one just done (`after`).
+#[must_use]
+pub fn up_next(
+    steps: &[Step],
+    next: usize,
+    after: usize,
+    plan: &SessionPlan,
+    unit: Unit,
+) -> (String, String) {
+    let step = &steps[next];
+    let kind = if step.warm_up { "WARM-UP" } else { "SET" };
+    let position = format!("{kind} {} / {}", step.set_index + 1, step.of);
+    let label = if step.exercise == after {
+        format!("UP NEXT · {position}")
+    } else {
+        let name = plan.exercises[step.exercise].exercise.name.to_uppercase();
+        format!("UP NEXT · {name} · {position}")
+    };
+    let value = match (step.target.goal, step.target.weight) {
+        (SetGoal::Reps { reps, range }, Some(weight)) => {
+            let reps = range.map_or_else(
+                || reps.get().to_string(),
+                |range| format!("{}–{}", range.min.get(), range.max.get()),
+            );
+            format!("{reps} × {}", weight_text(weight, unit))
+        }
+        (goal, Some(weight)) => format!("{} · {}", goal_text(goal), weight_text(weight, unit)),
+        (goal, None) => goal_text(goal),
+    };
+    (label, value)
+}
+
+/// How much of a rest is left, in percent: what fills its bar (full at the start, empty at the
+/// end, as on the board).
+#[must_use]
+pub fn rest_left_percent(left: Duration, total: Duration) -> u32 {
+    if total.is_zero() {
+        return 0;
+    }
+    let share = left.min(total).as_millis().saturating_mul(100) / total.as_millis();
+    u32::try_from(share).unwrap_or(100)
+}
+
 /// `5 reps`, `8–12 reps`, `0:45 hold`, `8 rounds · 0:30 on, 1:30 off`.
 #[must_use]
 pub fn goal_text(goal: SetGoal) -> String {
@@ -952,5 +1046,99 @@ mod tests {
         assert_eq!(clock_text(Duration::from_millis(200)), "0:01");
         assert_eq!(clock_text(Duration::ZERO), "0:00");
         assert_eq!(clock_text(Duration::from_secs(180)), "3:00");
+    }
+
+    fn superset_day() -> SessionPlan {
+        let mut press = planned("press", 1, 2, Some("a"));
+        press.exercise.rest = Seconds::new(0);
+        let mut chin = planned("chin-up", 0, 2, Some("a"));
+        chin.exercise.rest = Seconds::new(90);
+        let mut curl = planned("curl", 0, 1, None);
+        curl.exercise.rest = Seconds::new(0);
+        plan(vec![press, chin, curl])
+    }
+
+    #[test]
+    fn rests_follow_the_program_and_supersets() {
+        let plan = superset_day();
+        let steps = steps(&plan, kg(20.0));
+        let default = Seconds::new(120);
+        // [press warm-up, press 1, chin 1, press 2, chin 2, curl 1]
+        assert_eq!(
+            rest_after(&plan, &steps, 0, true, default),
+            None,
+            "after a warm-up"
+        );
+        assert_eq!(
+            rest_after(&plan, &steps, 1, true, default),
+            None,
+            "A1 → A2 transition of 0"
+        );
+        assert_eq!(
+            rest_after(&plan, &steps, 2, true, default),
+            Some(Seconds::new(90)),
+            "the last member rests for the group"
+        );
+        assert_eq!(
+            rest_after(&plan, &steps, 4, true, default),
+            Some(Seconds::new(90))
+        );
+        // A rest of 0 outside a superset takes the user's default; the last set rests not at all.
+        let mut single = planned("curl", 0, 2, None);
+        single.exercise.rest = Seconds::new(0);
+        let alone = super::tests::plan(vec![single]);
+        let alone_steps = super::steps(&alone, kg(20.0));
+        assert_eq!(
+            rest_after(&alone, &alone_steps, 0, true, default),
+            Some(default)
+        );
+        assert_eq!(rest_after(&alone, &alone_steps, 1, false, default), None);
+        // A transition with its own rest keeps it.
+        let mut timed = superset_day();
+        timed.exercises[0].exercise.rest = Seconds::new(15);
+        let timed_steps = super::steps(&timed, kg(20.0));
+        assert_eq!(
+            rest_after(&timed, &timed_steps, 1, true, default),
+            Some(Seconds::new(15))
+        );
+    }
+
+    #[test]
+    fn the_rest_screen_reads_like_the_board() {
+        let plan = plan(vec![
+            planned("back-squat", 0, 5, None),
+            planned("bench-press", 0, 3, None),
+        ]);
+        let steps = steps(&plan, kg(20.0));
+        let set = logged("back-squat", false, 1, 100.0, 2_000);
+        assert_eq!(
+            rest_header(&plan, &set),
+            ("REST · BACK SQUAT".to_owned(), "Set 2 logged ✓".to_owned())
+        );
+        assert_eq!(
+            up_next(&steps, 2, 0, &plan, Unit::Kg),
+            ("UP NEXT · SET 3 / 5".to_owned(), "5 × 100 kg".to_owned())
+        );
+        assert_eq!(
+            up_next(&steps, 5, 0, &plan, Unit::Kg),
+            (
+                "UP NEXT · BENCH PRESS · SET 1 / 3".to_owned(),
+                "5 × 100 kg".to_owned()
+            )
+        );
+        // 2:14 of 3:00, as on the board.
+        assert_eq!(
+            rest_left_percent(Duration::from_secs(134), Duration::from_secs(180)),
+            74
+        );
+        assert_eq!(
+            rest_left_percent(Duration::ZERO, Duration::from_secs(180)),
+            0
+        );
+        assert_eq!(
+            rest_left_percent(Duration::from_secs(180), Duration::from_secs(180)),
+            100
+        );
+        assert_eq!(rest_left_percent(Duration::ZERO, Duration::ZERO), 0);
     }
 }
