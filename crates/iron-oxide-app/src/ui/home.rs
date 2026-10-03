@@ -5,19 +5,23 @@
 //! rotation); starting a session goes through [`super::session::writes`].
 
 use dioxus::prelude::*;
+use iron_oxide_domain::program::Day;
 use iron_oxide_domain::progression::{NextTargets, SetGoal};
-use iron_oxide_domain::{SessionId, SessionStatus, Unit, Weight, time::Timestamp};
+use iron_oxide_domain::{
+    DayId, ProgramVersionId, SessionId, SessionStatus, Unit, Weight, time::Timestamp,
+};
 
 use super::components::{Button, Card, EmptyState, LoadingState};
-use super::errors::use_errors;
+use super::errors::{Errors, use_errors};
 use super::session::writes;
 use super::shell::Route;
 use super::weight::{use_unit, weight_number, weight_text};
 use crate::api::error::{ApiFailure, FailureKind};
 use crate::api::history::{SessionSummary, history_page};
-use crate::api::programs::{ProgramDetail, get_active_program};
+use crate::api::programs::{get_active_program, get_program};
 use crate::api::sessions::{
-    NextSessionPlan, PlannedExercise, SessionView, get_in_progress_session, get_next_session_plan,
+    NextSessionPlan, PlannedExercise, SessionPlan, get_in_progress_session, get_next_session_plan,
+    get_session_plan,
 };
 
 /// What the home screen shows once loaded.
@@ -30,34 +34,145 @@ enum HomeData {
 
 #[derive(Debug, Clone, PartialEq)]
 struct Today {
-    program: ProgramDetail,
-    next: NextSessionPlan,
-    /// The session in progress, if any: Resume instead of Start.
-    in_progress: Option<SessionView>,
-    /// The most recently ended session.
-    last: Option<SessionSummary>,
+    shown: Shown,
+    last: LastSession,
 }
 
-async fn load() -> Result<HomeData, ServerFnError> {
+/// The session in progress, read from its own program version (never from the active program,
+/// which may have changed since it started).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Running {
+    /// The name of the session's program.
+    pub program_name: String,
+    /// The session's plan: its day's name and exercises, from the session's version.
+    pub plan: SessionPlan,
+}
+
+/// The header, the preview and the button of the home screen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shown {
+    pub program_name: String,
+    pub day_name: String,
+    pub exercises: Vec<PlannedExercise>,
+    /// Resume instead of Start.
+    pub in_progress: bool,
+}
+
+/// What the home screen shows: the session in progress if there is one (its own program, version
+/// and day), else the next day of the active program.
+#[must_use]
+pub fn shown(active_name: &str, next: &NextSessionPlan, running: Option<&Running>) -> Shown {
+    match running {
+        Some(running) => Shown {
+            program_name: running.program_name.clone(),
+            day_name: running.plan.day_name.clone(),
+            exercises: running.plan.exercises.clone(),
+            in_progress: true,
+        },
+        None => Shown {
+            program_name: active_name.to_owned(),
+            day_name: next.day_name.clone(),
+            exercises: next.exercises.clone(),
+            in_progress: false,
+        },
+    }
+}
+
+/// The last-session line's data. A failed read only degrades this line.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LastSession {
+    /// No session has ended yet.
+    None,
+    Loaded {
+        summary: SessionSummary,
+        /// The day's name in the session's own version, when known.
+        day_name: Option<String>,
+        /// The session's program, when it is not the active one.
+        other_program: Option<String>,
+    },
+    /// The history could not be read (the error is reported).
+    Failed,
+}
+
+/// The name of a session's day, from the active program only when the session ran that exact
+/// version (day ids such as `a` repeat across programs and versions).
+#[must_use]
+pub fn day_name_in_version(
+    version: ProgramVersionId,
+    days: &[Day],
+    session_version: ProgramVersionId,
+    day: &DayId,
+) -> Option<String> {
+    if version != session_version {
+        return None;
+    }
+    days.iter()
+        .find(|candidate| &candidate.id == day)
+        .map(|candidate| candidate.name.clone())
+}
+
+async fn load(errors: Errors) -> Result<HomeData, ServerFnError> {
     // Without an active program the next plan is a 409: ask for it only with one.
-    let Some(program) = get_active_program().await? else {
+    let Some(active) = get_active_program().await? else {
         return Ok(HomeData::NoProgram);
     };
-    let in_progress = get_in_progress_session()
-        .await?
-        .map(|session| session.session);
+    let running = match get_in_progress_session().await? {
+        Some(session) => {
+            let session = session.session;
+            let plan = get_session_plan(session.id).await?;
+            let program_name = if session.program_id == active.program.id {
+                active.program.name.clone()
+            } else {
+                get_program(session.program_id).await?.program.name
+            };
+            Some(Running { program_name, plan })
+        }
+        None => None,
+    };
     let next = get_next_session_plan().await?;
-    let last = history_page(None, Some(1))
-        .await?
-        .sessions
-        .into_iter()
-        .next();
+    let last = match history_page(None, Some(1)).await {
+        Ok(page) => match page.sessions.into_iter().next() {
+            None => LastSession::None,
+            Some(summary) => {
+                let day_name = match day_name_in_version(
+                    active.version.id,
+                    &active.document.days,
+                    summary.program_version_id,
+                    &summary.day_id,
+                ) {
+                    Some(name) => Some(name),
+                    // Another version: its own plan has the day's name. Without it, the id.
+                    None => get_session_plan(summary.id)
+                        .await
+                        .ok()
+                        .map(|plan| plan.day_name),
+                };
+                let other_program =
+                    (summary.program_id != active.program.id).then(|| summary.program_name.clone());
+                LastSession::Loaded {
+                    summary,
+                    day_name,
+                    other_program,
+                }
+            }
+        },
+        Err(error) => {
+            errors.report(&error);
+            LastSession::Failed
+        }
+    };
     Ok(HomeData::Ready(Box::new(Today {
-        program,
-        next,
-        in_progress,
+        shown: shown(&active.program.name, &next, running.as_ref()),
         last,
     })))
+}
+
+/// Whether a failed start keeps its id and time for the next tap: yes when the server may have
+/// started it without the answer arriving (503, 429, network), so the retry replays the same
+/// start instead of making a second one (a false 409).
+#[must_use]
+pub const fn keeps_attempt(kind: FailureKind) -> bool {
+    kind.is_retryable()
 }
 
 /// One exercise of the preview: `"5 × 5 · 100 kg"`, `"3 × 45 s"`, `"Training max needed"`.
@@ -77,8 +192,11 @@ pub fn exercise_summary(targets: &NextTargets, unit: Unit) -> String {
         _ if !same_goal => format!("{count} sets"),
         SetGoal::Reps { reps, .. } => format!("{count} × {reps}"),
         SetGoal::Hold { seconds } => format!("{count} × {} s", seconds.get()),
-        SetGoal::Intervals { work, rest, rounds } => {
+        SetGoal::Intervals { work, rest, rounds } if count == 1 => {
             format!("{rounds} × {}/{} s", work.get(), rest.get())
+        }
+        SetGoal::Intervals { work, rest, rounds } => {
+            format!("{count} × {rounds} × {}/{} s", work.get(), rest.get())
         }
     };
     let weights: Vec<Weight> = sets.iter().filter_map(|set| set.weight).collect();
@@ -128,11 +246,16 @@ const fn civil_from_days(days: i64) -> (i64, usize, i64) {
 
 /// When `then` was, seen from `now`, in the user's local time: `"today"`, `"yesterday"`,
 /// `"3 days ago"` within a week, else the date: `"12 Sep"`, with the year if it is not this one.
+/// `offset_minutes` gives the time zone's offset at a moment (it changes with daylight saving).
 #[must_use]
-pub fn relative_day(then: Timestamp, now: Timestamp, offset_minutes: i32) -> String {
+pub fn relative_day(
+    then: Timestamp,
+    now: Timestamp,
+    offset_minutes: impl Fn(Timestamp) -> i32,
+) -> String {
     let (then_day, today) = (
-        local_day(then, offset_minutes),
-        local_day(now, offset_minutes),
+        local_day(then, offset_minutes(then)),
+        local_day(now, offset_minutes(now)),
     );
     match today - then_day {
         0 => "today".to_owned(),
@@ -151,64 +274,75 @@ pub fn relative_day(then: Timestamp, now: Timestamp, offset_minutes: i32) -> Str
     }
 }
 
-/// The last-session line: `"Last session: yesterday · Day A · 15 sets"`.
+/// The last-session line: `"Last session: yesterday · Day A · 15 sets"`, with the program's
+/// name when it is not the active one. `None` when there is nothing to say.
 #[must_use]
 pub fn last_session_text(
-    last: &SessionSummary,
-    day_name: Option<&str>,
+    last: &LastSession,
     now: Timestamp,
-    offset_minutes: i32,
-) -> String {
+    offset_minutes: impl Fn(Timestamp) -> i32,
+) -> Option<String> {
+    let (summary, day_name, other_program) = match last {
+        LastSession::None => return None,
+        LastSession::Failed => return Some("The last session could not be loaded.".to_owned()),
+        LastSession::Loaded {
+            summary,
+            day_name,
+            other_program,
+        } => (summary, day_name, other_program),
+    };
     let when = relative_day(
-        last.finished_at.unwrap_or(last.started_at),
+        summary.finished_at.unwrap_or(summary.started_at),
         now,
         offset_minutes,
     );
-    let day = day_name.map_or_else(|| last.day_id.to_string(), str::to_owned);
-    let what = match last.status {
+    let day = day_name
+        .clone()
+        .unwrap_or_else(|| summary.day_id.to_string());
+    let what = match summary.status {
         SessionStatus::Skipped => "skipped".to_owned(),
         SessionStatus::Abandoned => "abandoned".to_owned(),
-        SessionStatus::Completed | SessionStatus::InProgress => match last.working_sets {
+        SessionStatus::Completed | SessionStatus::InProgress => match summary.working_sets {
             1 => "1 set".to_owned(),
             sets => format!("{sets} sets"),
         },
     };
-    format!("Last session: {when} · {day} · {what}")
+    Some(match other_program {
+        Some(program) => format!("Last session: {when} · {program} · {day} · {what}"),
+        None => format!("Last session: {when} · {day} · {what}"),
+    })
 }
 
-/// The user's offset from UTC in minutes, east positive (the browser's time zone).
-fn local_offset_minutes() -> i32 {
+/// The user's offset from UTC at `at`, in minutes, east positive (the browser's time zone, with
+/// its daylight saving rules).
+fn local_offset_minutes(at: Timestamp) -> i32 {
     #[cfg(feature = "web")]
     {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "epoch milliseconds stay far below 2^53"
+        )]
+        let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(at.epoch_millis() as f64));
         // getTimezoneOffset() is UTC minus local time, in whole minutes.
         #[allow(
             clippy::cast_possible_truncation,
             reason = "a time zone offset is at most a few hundred minutes"
         )]
-        let west = js_sys::Date::new_0().get_timezone_offset() as i32;
+        let west = date.get_timezone_offset() as i32;
         -west
     }
     #[cfg(not(feature = "web"))]
     {
+        let _ = at;
         0
     }
-}
-
-/// The name of the day `id` in the active program, if it still has one.
-fn day_name(program: &ProgramDetail, id: &iron_oxide_domain::DayId) -> Option<String> {
-    program
-        .document
-        .days
-        .iter()
-        .find(|day| &day.id == id)
-        .map(|day| day.name.clone())
 }
 
 #[component]
 pub fn Home() -> Element {
     let errors = use_errors();
     let mut data = use_resource(move || async move {
-        let loaded = load().await;
+        let loaded = load(errors).await;
         if let Err(error) = &loaded {
             errors.report(error);
         }
@@ -246,47 +380,51 @@ fn TodayView(today: Today, on_stale: EventHandler<()>) -> Element {
     let errors = use_errors();
     let navigator = use_navigator();
     let mut busy = use_signal(|| false);
+    // The id and time of a start the server may have received without its answer arriving: the
+    // next tap replays it (idempotent) instead of starting a second session.
+    let mut attempt = use_signal(|| None::<(SessionId, Timestamp)>);
 
-    let in_progress = today.in_progress.clone();
-    let (day, status) = match &in_progress {
-        Some(session) => (
-            day_name(&today.program, &session.day).unwrap_or_else(|| session.day.to_string()),
-            "In progress",
-        ),
-        None => (today.next.day_name.clone(), "Next up"),
+    let Shown {
+        program_name,
+        day_name,
+        exercises,
+        in_progress,
+    } = today.shown.clone();
+    let status = if in_progress {
+        "In progress"
+    } else {
+        "Next up"
     };
-    // The preview is the next plan's, so only when it is the day shown.
-    let preview: Vec<PlannedExercise> = match &in_progress {
-        Some(session) if session.day != today.next.day => Vec::new(),
-        _ => today.next.exercises.clone(),
-    };
-    let last = today.last.as_ref().map(|last| {
-        let name = day_name(&today.program, &last.day_id);
-        last_session_text(last, name.as_deref(), writes::now(), local_offset_minutes())
-    });
-    let program_name = today.program.program.name.clone();
+    let last = last_session_text(&today.last, writes::now(), local_offset_minutes);
 
     let start = move |_| {
         if *busy.peek() {
             return;
         }
-        if in_progress.is_some() {
+        if in_progress {
             navigator.push(Route::Session {});
             return;
         }
         busy.set(true);
-        // A new id for each attempt; the server recognises a retry of the same attempt.
-        let session_id = SessionId::new_v7();
+        let (session_id, started_at) = attempt
+            .peek()
+            .unwrap_or_else(|| (SessionId::new_v7(), writes::now()));
+        attempt.set(Some((session_id, started_at)));
         spawn(async move {
-            match writes::start_session(session_id, writes::now()).await {
+            match writes::start_session(session_id, started_at).await {
                 Ok(_) => {
+                    attempt.set(None);
                     navigator.push(Route::Session {});
                 }
                 Err(error) => {
                     errors.report(&error);
+                    let kind = ApiFailure::classify(&error).kind;
+                    if !keeps_attempt(kind) {
+                        attempt.set(None);
+                    }
                     // A 409: a session is already in progress (or the program changed): reload,
                     // which shows Resume.
-                    if ApiFailure::classify(&error).kind == FailureKind::Conflict {
+                    if kind == FailureKind::Conflict {
                         on_stale.call(());
                     }
                 }
@@ -298,13 +436,13 @@ fn TodayView(today: Today, on_stale: EventHandler<()>) -> Element {
     rsx! {
         div { class: "io-page-header",
             span { class: "io-label", "{program_name}" }
-            h1 { class: "io-title io-home-day", "{day}" }
+            h1 { class: "io-title io-home-day", "{day_name}" }
             p { class: "io-muted", "{status}" }
         }
-        if !preview.is_empty() {
+        if !exercises.is_empty() {
             Card {
                 ul { class: "io-list io-home-exercises", aria_label: "Exercises",
-                    for planned in preview {
+                    for planned in exercises {
                         li { key: "{planned.exercise.id}", class: "io-row",
                             span { class: "io-row-title", "{planned.exercise.name}" }
                             span { class: "io-muted io-row-meta",
@@ -317,10 +455,16 @@ fn TodayView(today: Today, on_stale: EventHandler<()>) -> Element {
         }
         div { class: "io-actions",
             Button { xl: true, block: true, busy: busy(), onclick: start,
-                if today.in_progress.is_some() { "Resume" } else { "Start" }
+                if in_progress { "Resume" } else { "Start" }
             }
-            p { class: "io-muted io-hint io-home-last",
-                {last.unwrap_or_else(|| "No session yet.".to_owned())}
+            match last {
+                Some(line) => rsx! {
+                    p { class: "io-muted io-hint io-home-last", "{line}" }
+                },
+                None if !in_progress => rsx! {
+                    p { class: "io-muted io-hint io-home-last", "No session yet." }
+                },
+                None => rsx! {},
             }
         }
     }
@@ -329,9 +473,9 @@ fn TodayView(today: Today, on_stale: EventHandler<()>) -> Element {
 #[cfg(test)]
 mod tests {
     use iron_oxide_domain::progression::{ExerciseTargets, SetTarget, TargetSource};
-    use iron_oxide_domain::{
-        DayId, ExerciseId, ProgramId, ProgramVersionId, Reps, Seconds, SessionId,
-    };
+    use iron_oxide_domain::{ExerciseId, ProgramId, Reps, Seconds};
+
+    use crate::api::sessions::SessionView;
 
     use super::*;
 
@@ -394,6 +538,18 @@ mod tests {
             },
         }]);
         assert_eq!(exercise_summary(&sprints, Unit::Kg), "8 × 30/90 s");
+        let two = targets(vec![
+            SetTarget {
+                weight: None,
+                goal: SetGoal::Intervals {
+                    work: Seconds::new(30),
+                    rest: Seconds::new(90),
+                    rounds: 8,
+                },
+            };
+            2
+        ]);
+        assert_eq!(exercise_summary(&two, Unit::Kg), "2 × 8 × 30/90 s");
 
         assert_eq!(exercise_summary(&targets(Vec::new()), Unit::Kg), "");
         let needs = NextTargets::NeedsTrainingMax {
@@ -411,14 +567,17 @@ mod tests {
 
     #[test]
     fn days_are_relative_within_a_week() {
-        assert_eq!(relative_day(hours_before(1), NOW, 0), "today");
-        assert_eq!(relative_day(hours_before(13), NOW, 0), "yesterday");
-        assert_eq!(relative_day(hours_before(24 * 3), NOW, 0), "3 days ago");
-        assert_eq!(relative_day(hours_before(24 * 6), NOW, 0), "6 days ago");
-        assert_eq!(relative_day(hours_before(24 * 7), NOW, 0), "26 Sep");
-        assert_eq!(relative_day(hours_before(24 * 365), NOW, 0), "3 Oct 2025");
+        assert_eq!(relative_day(hours_before(1), NOW, |_| 0), "today");
+        assert_eq!(relative_day(hours_before(13), NOW, |_| 0), "yesterday");
+        assert_eq!(relative_day(hours_before(24 * 3), NOW, |_| 0), "3 days ago");
+        assert_eq!(relative_day(hours_before(24 * 6), NOW, |_| 0), "6 days ago");
+        assert_eq!(relative_day(hours_before(24 * 7), NOW, |_| 0), "26 Sep");
         assert_eq!(
-            relative_day(Timestamp::from_epoch_millis(0), NOW, 0),
+            relative_day(hours_before(24 * 365), NOW, |_| 0),
+            "3 Oct 2025"
+        );
+        assert_eq!(
+            relative_day(Timestamp::from_epoch_millis(0), NOW, |_| 0),
             "1 Jan 1970"
         );
     }
@@ -426,20 +585,20 @@ mod tests {
     #[test]
     fn days_follow_the_local_time_zone() {
         // 13 hours before noon UTC is 23:00 UTC yesterday, but 01:00 today at UTC+2.
-        assert_eq!(relative_day(hours_before(13), NOW, 120), "today");
+        assert_eq!(relative_day(hours_before(13), NOW, |_| 120), "today");
         // 11 hours before is 01:00 UTC today, but 20:00 yesterday at UTC−5.
-        assert_eq!(relative_day(hours_before(11), NOW, -300), "yesterday");
-        assert_eq!(relative_day(hours_before(11), NOW, 0), "today");
+        assert_eq!(relative_day(hours_before(11), NOW, |_| -300), "yesterday");
+        assert_eq!(relative_day(hours_before(11), NOW, |_| 0), "today");
     }
 
     #[test]
     fn leap_days_and_month_ends_are_dated() {
         // 2024-02-29 12:00 UTC.
         let leap = Timestamp::from_epoch_millis(1_709_208_000_000);
-        assert_eq!(relative_day(leap, NOW, 0), "29 Feb 2024");
+        assert_eq!(relative_day(leap, NOW, |_| 0), "29 Feb 2024");
         // 2026-03-31 12:00 UTC.
         let march = Timestamp::from_epoch_millis(1_774_958_400_000);
-        assert_eq!(relative_day(march, NOW, 0), "31 Mar");
+        assert_eq!(relative_day(march, NOW, |_| 0), "31 Mar");
     }
 
     fn summary(status: SessionStatus, working_sets: u32) -> SessionSummary {
@@ -457,24 +616,148 @@ mod tests {
         }
     }
 
+    fn loaded(summary: SessionSummary, day: Option<&str>) -> LastSession {
+        LastSession::Loaded {
+            summary,
+            day_name: day.map(str::to_owned),
+            other_program: None,
+        }
+    }
+
     #[test]
     fn the_last_session_line_says_when_which_day_and_how_much() {
-        let done = summary(SessionStatus::Completed, 15);
+        let line = |last: LastSession| last_session_text(&last, NOW, |_| 0);
         assert_eq!(
-            last_session_text(&done, Some("Day A"), NOW, 0),
-            "Last session: yesterday · Day A · 15 sets"
+            line(loaded(summary(SessionStatus::Completed, 15), Some("Day A"))).as_deref(),
+            Some("Last session: yesterday · Day A · 15 sets")
         );
         assert_eq!(
-            last_session_text(&summary(SessionStatus::Completed, 1), None, NOW, 0),
-            "Last session: yesterday · a · 1 set"
+            line(loaded(summary(SessionStatus::Completed, 1), None)).as_deref(),
+            Some("Last session: yesterday · a · 1 set")
         );
         assert_eq!(
-            last_session_text(&summary(SessionStatus::Skipped, 0), Some("Day A"), NOW, 0),
-            "Last session: yesterday · Day A · skipped"
+            line(loaded(summary(SessionStatus::Skipped, 0), Some("Day A"))).as_deref(),
+            Some("Last session: yesterday · Day A · skipped")
         );
         assert_eq!(
-            last_session_text(&summary(SessionStatus::Abandoned, 3), Some("Day A"), NOW, 0),
-            "Last session: yesterday · Day A · abandoned"
+            line(loaded(summary(SessionStatus::Abandoned, 3), Some("Day A"))).as_deref(),
+            Some("Last session: yesterday · Day A · abandoned")
         );
+        assert_eq!(
+            line(LastSession::Loaded {
+                summary: summary(SessionStatus::Completed, 12),
+                day_name: Some("Upper".to_owned()),
+                other_program: Some("Full body".to_owned()),
+            })
+            .as_deref(),
+            Some("Last session: yesterday · Full body · Upper · 12 sets")
+        );
+        assert_eq!(line(LastSession::None), None);
+        // A failed history read only degrades this line.
+        assert_eq!(
+            line(LastSession::Failed).as_deref(),
+            Some("The last session could not be loaded.")
+        );
+    }
+
+    #[test]
+    fn days_use_the_offset_of_their_own_moment() {
+        // Daylight saving changed in between: UTC+1 when the session ended, UTC+2 now. It ended
+        // on 1 Oct at 22:30 UTC: 23:30 local then (two days ago), though 00:30 on 2 Oct (yesterday)
+        // with today's offset.
+        let then = Timestamp::from_epoch_millis(NOW.epoch_millis() - 37 * 3_600_000 - 1_800_000);
+        let offsets = |at: Timestamp| if at == then { 60 } else { 120 };
+        assert_eq!(relative_day(then, NOW, offsets), "2 days ago");
+        assert_eq!(relative_day(then, NOW, |_| 120), "yesterday");
+    }
+
+    fn day(id: &str, name: &str) -> Day {
+        Day {
+            id: id.parse::<DayId>().unwrap(),
+            name: name.to_owned(),
+            exercises: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_day_is_named_from_the_active_program_only_for_its_own_version() {
+        let active = ProgramVersionId::new_v7();
+        let days = [day("a", "Push"), day("b", "Pull")];
+        let a = "a".parse::<DayId>().unwrap();
+        assert_eq!(
+            day_name_in_version(active, &days, active, &a).as_deref(),
+            Some("Push")
+        );
+        // Day `a` of another program or version is another day.
+        assert_eq!(
+            day_name_in_version(active, &days, ProgramVersionId::new_v7(), &a),
+            None
+        );
+        let gone = "z".parse::<DayId>().unwrap();
+        assert_eq!(day_name_in_version(active, &days, active, &gone), None);
+    }
+
+    fn planned(id: &str, name: &str) -> PlannedExercise {
+        PlannedExercise {
+            exercise: serde_json::from_value(serde_json::json!({
+                "id": id,
+                "name": name,
+                "work": { "reps": { "sets": 3, "reps": 5 } },
+                "rest": 120
+            }))
+            .unwrap(),
+            targets: targets(vec![reps(5, Some(kg(60.0))); 3]),
+        }
+    }
+
+    #[test]
+    fn a_running_session_is_shown_from_its_own_program_and_version() {
+        // The reviewer's scenario: a session of program X (day `a`, deadlifts) runs; meanwhile
+        // the active program became Y (or X got a new version), whose next day is also `a`.
+        let next = NextSessionPlan {
+            program_id: ProgramId::new_v7(),
+            program_version_id: ProgramVersionId::new_v7(),
+            day: "a".parse::<DayId>().unwrap(),
+            day_name: "Y day A".to_owned(),
+            exercises: vec![planned("bench-press", "Bench press")],
+        };
+        let session = SessionView {
+            id: SessionId::new_v7(),
+            program_id: ProgramId::new_v7(),
+            program_version_id: ProgramVersionId::new_v7(),
+            day: "a".parse::<DayId>().unwrap(),
+            status: SessionStatus::InProgress,
+            started_at: hours_before(1),
+            finished_at: None,
+        };
+        let running = Running {
+            program_name: "Program X".to_owned(),
+            plan: SessionPlan {
+                session,
+                day_name: "X day A".to_owned(),
+                exercises: vec![planned("deadlift", "Deadlift")],
+            },
+        };
+        let shown_running = shown("Program Y", &next, Some(&running));
+        assert!(shown_running.in_progress);
+        assert_eq!(shown_running.program_name, "Program X");
+        assert_eq!(shown_running.day_name, "X day A");
+        assert_eq!(shown_running.exercises, running.plan.exercises);
+
+        let shown_next = shown("Program Y", &next, None);
+        assert!(!shown_next.in_progress);
+        assert_eq!(shown_next.program_name, "Program Y");
+        assert_eq!(shown_next.day_name, "Y day A");
+        assert_eq!(shown_next.exercises, next.exercises);
+    }
+
+    #[test]
+    fn only_a_start_that_may_have_landed_is_replayed() {
+        assert!(keeps_attempt(FailureKind::Transient));
+        assert!(keeps_attempt(FailureKind::Network));
+        assert!(keeps_attempt(FailureKind::RateLimited));
+        assert!(!keeps_attempt(FailureKind::Conflict));
+        assert!(!keeps_attempt(FailureKind::Invalid));
+        assert!(!keeps_attempt(FailureKind::Unauthorized));
     }
 }
