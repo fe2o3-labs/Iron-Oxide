@@ -30,9 +30,9 @@ mod components;
 mod errors;
 #[cfg(debug_assertions)]
 mod gallery;
+mod history;
 mod home;
 mod session;
-mod history;
 mod shell;
 pub(crate) mod theme;
 pub mod unsaved;
