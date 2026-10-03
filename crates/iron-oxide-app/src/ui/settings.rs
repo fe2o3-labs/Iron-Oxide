@@ -120,7 +120,7 @@ pub fn use_settings_provider(unit: UnitSetting) -> UserSettings {
                 }
             }
             SessionStatus::SignedOut => settings.clear(),
-            SessionStatus::Checking => {}
+            SessionStatus::Checking | SessionStatus::Unverified => {}
         }
     });
     settings
@@ -619,7 +619,9 @@ fn PlateRow(unit: Unit, stock: PlateStock, editor: Editor) -> Element {
                 plate_inventory,
                 ..settings
             }),
-            Err(message) => errors.show(BannerKind::Error, message),
+            Err(message) => {
+                errors.show(BannerKind::Error, message);
+            }
         }
     };
     rsx! {
