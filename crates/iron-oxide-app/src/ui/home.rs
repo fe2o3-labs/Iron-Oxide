@@ -28,7 +28,7 @@ use crate::api::sessions::{
     get_session_plan,
 };
 use crate::api::settings::Settings;
-use crate::offline::{LocalSession, Outbox, use_outbox};
+use crate::offline::{LocalSession, Outbox, WriteKey, use_outbox};
 use crate::ui::user_settings::use_user_settings;
 
 /// What the home screen shows once loaded.
@@ -49,13 +49,51 @@ pub struct Finishing {
     pub day_name: String,
     /// The next day by the program's rotation, when the program is known (online).
     pub next_day: Option<String>,
+    /// The server refused one of its writes (the start, a set or the finish): its message. It
+    /// then waits for the lifter (Retry or Discard in the unsaved indicator), not for the network.
+    pub refused: Option<String>,
+}
+
+/// The title and text of Home while a finished workout waits: on the network, or, once the server
+/// refused one of its writes, on the lifter.
+#[must_use]
+pub fn finishing_text(finishing: &Finishing) -> (String, String) {
+    let day = &finishing.day_name;
+    match &finishing.refused {
+        Some(reason) => (
+            "Last workout not saved".to_owned(),
+            format!(
+                "The server refused {day}: {reason} Use Retry or Discard in the unsaved changes \
+                 at the top. You can start the next workout once it's settled."
+            ),
+        ),
+        None => (
+            "Finishing your last workout…".to_owned(),
+            format!(
+                "{day} is saved on this device and goes to the server as soon as it can. You can \
+                 start the next workout once it's there."
+            ),
+        ),
+    }
 }
 
 /// Home for a workout ended on this device whose finish is still queued (or refused). The next
 /// day comes from the domain's rotation applied to that workout, when `program` (the active one)
 /// is the workout's program.
 #[must_use]
-pub fn finishing(record: &LocalSession, program: Option<(ProgramId, &Program)>) -> Finishing {
+pub fn finishing(
+    record: &LocalSession,
+    program: Option<(ProgramId, &Program)>,
+    queued: &[(WriteKey, Option<String>)],
+) -> Finishing {
+    let ours = |key: &WriteKey| match key {
+        WriteKey::StartSession(id) | WriteKey::FinishSession(id) => *id == record.session_id,
+        WriteKey::SaveSet(id) => record.sets.iter().any(|set| set.id == *id),
+    };
+    let refused = queued
+        .iter()
+        .filter(|(key, _)| ours(key))
+        .find_map(|(_, refusal)| refusal.clone());
     let day_name = local::screen_of(record)
         .map_or_else(|| record.day.to_string(), |screen| screen.plan.day_name);
     let next_day = program
@@ -74,7 +112,11 @@ pub fn finishing(record: &LocalSession, program: Option<(ProgramId, &Program)>) 
             let day = next_day(&program.rotation, &[ended]).ok()?;
             program.day(day).map(|day| day.name.clone())
         });
-    Finishing { day_name, next_day }
+    Finishing {
+        day_name,
+        next_day,
+        refused,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,7 +235,9 @@ async fn load(errors: Errors, outbox: Outbox) -> Result<HomeData, ServerFnError>
             None => Err(error),
         },
         // ...and a finished one still waits for its finish.
-        (Err(_), Restore::Ended(ended)) => Ok(HomeData::Finishing(finishing(&ended, None))),
+        (Err(_), Restore::Ended(ended)) => {
+            Ok(HomeData::Finishing(finishing(&ended, None, &queued)))
+        }
         (loaded, _) => loaded,
     }
 }
@@ -202,7 +246,7 @@ async fn load_server(
     errors: Errors,
     outbox: Outbox,
     record: Option<LocalSession>,
-    queued: &[(crate::offline::WriteKey, Option<String>)],
+    queued: &[(WriteKey, Option<String>)],
 ) -> Result<HomeData, ServerFnError> {
     // Without an active program the next plan is a 409: ask for it only with one.
     let Some(active) = get_active_program().await? else {
@@ -214,7 +258,7 @@ async fn load_server(
         // Ended on this device: no Resume, and no Start until the finish reaches the server.
         Restore::Ended(ended) => {
             let program = Some((active.program.id, &active.document));
-            return Ok(HomeData::Finishing(finishing(&ended, program)));
+            return Ok(HomeData::Finishing(finishing(&ended, program, queued)));
         }
         decision => {
             if decision == Restore::Drop
@@ -472,12 +516,12 @@ pub fn Home() -> Element {
         Some(Ok(HomeData::Finishing(finishing))) => {
             let next = finishing
                 .next_day
+                .as_ref()
                 .map(|day| format!(" {day} comes next."))
                 .unwrap_or_default();
+            let (title, message) = finishing_text(&finishing);
             rsx! {
-                EmptyState {
-                    title: "Finishing your last workout…",
-                    message: "{finishing.day_name} is saved on this device and goes to the server as soon as it can. You can start the next workout once it's there.{next}",
+                EmptyState { title, message: "{message}{next}",
                     Button { onclick: move |_| data.restart(), "Check again" }
                 }
             }
@@ -878,15 +922,15 @@ mod tests {
         };
         let first = program.day(&program.rotation[0]).unwrap().name.clone();
         let second = program.day(&program.rotation[1]).unwrap().name.clone();
-        let shown = finishing(&record, Some((program_id, &program)));
+        let shown = finishing(&record, Some((program_id, &program)), &[]);
         assert_eq!(shown.next_day.as_deref(), Some(second.as_str()));
         assert_ne!(shown.next_day.as_deref(), Some(first.as_str()));
         // Another active program, or offline: no guess.
         assert_eq!(
-            finishing(&record, Some((ProgramId::new_v7(), &program))).next_day,
+            finishing(&record, Some((ProgramId::new_v7(), &program)), &[]).next_day,
             None
         );
-        assert_eq!(finishing(&record, None).next_day, None);
+        assert_eq!(finishing(&record, None, &[]).next_day, None);
         // Abandoned does not move the rotation: the same day comes next.
         let abandoned = LocalSession {
             finished: Some(crate::offline::LocalFinish {
@@ -896,10 +940,56 @@ mod tests {
             ..record
         };
         assert_eq!(
-            finishing(&abandoned, Some((program_id, &program)))
+            finishing(&abandoned, Some((program_id, &program)), &[])
                 .next_day
                 .as_deref(),
             Some(first.as_str())
         );
+    }
+
+    /// A refused finish waits on the lifter, not the network: Home says so.
+    #[test]
+    fn a_refused_finish_is_not_said_to_be_on_its_way() {
+        let session = SessionId::new_v7();
+        let record = LocalSession {
+            session_id: session,
+            started_at: Timestamp::from_epoch_millis(1_000),
+            program_id: ProgramId::new_v7(),
+            program_version_id: ProgramVersionId::new_v7(),
+            day: "a".parse().unwrap(),
+            sets: Vec::new(),
+            finished: None,
+            screen: None,
+        };
+        let pending = finishing(&record, None, &[(WriteKey::FinishSession(session), None)]);
+        assert_eq!(pending.refused, None);
+        let (title, message) = finishing_text(&pending);
+        assert_eq!(title, "Finishing your last workout…");
+        assert!(message.contains("as soon as it can"));
+
+        let reason = "This session has already ended.";
+        let refused = finishing(
+            &record,
+            None,
+            &[(WriteKey::FinishSession(session), Some(reason.to_owned()))],
+        );
+        assert_eq!(refused.refused.as_deref(), Some(reason));
+        let (title, message) = finishing_text(&refused);
+        assert_eq!(title, "Last workout not saved");
+        assert!(!message.contains("as soon as it can"), "{message}");
+        assert!(
+            message.contains(reason) && message.contains("Retry or Discard"),
+            "{message}"
+        );
+        // Another session's refusal is not this one's.
+        let other = finishing(
+            &record,
+            None,
+            &[(
+                WriteKey::FinishSession(SessionId::new_v7()),
+                Some(reason.to_owned()),
+            )],
+        );
+        assert_eq!(other.refused, None);
     }
 }
