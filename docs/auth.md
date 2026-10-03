@@ -213,8 +213,11 @@ A passkey finish takes its ceremony inside the transaction that does the work
 (`ceremony::complete`). A retryable failure (`503`: no pooled connection in time, a statement
 deadline, a serialization failure) rolls back the take too, so the client can replay the same
 request. Any other failure (verification, an unknown passkey, the passkey limit) still uses the
-ceremony up. Only a failure after the commit (saving the session) cannot be replayed; the user
-then starts again, as on every click of the sign-in buttons.
+ceremony up. What cannot be replayed is a failure once the commit has happened: saving the
+session afterwards, or the connection dropping during `COMMIT` itself (the server answers `503`,
+but the transaction may have committed, ceremony take included). The retry then gets `400`, and
+the user starts again, as on every click of the sign-in buttons; a sign-up that did commit signs
+in with the new passkey.
 
 Ceremonies expire after 5 minutes (passkeys) or 10 minutes (Google). A ceremony started by a
 signed-in user (adding a passkey, linking Google) is bound to that user, and only that user's

@@ -124,7 +124,9 @@ type or a missing field. Dioxus answers them with a `500` whose text is a serde 
 **Every 5xx** gets a fixed message and no details, whatever the function put in it
 (`ServerFnError::new(detail)`, an `anyhow` error, a `{"message", "data"}` body from another
 layer): `503` gets `The server is busy. Please try again.`, every other 5xx the generic message.
-The original text is logged.
+The only detail kept is a 503's `retry_after_secs` (a whole number from 1 to 3600, as the busy
+account import and deletion send), which also becomes the `Retry-After` header. The original text
+is logged.
 
 **429 (rate limiting, #72).** The body is
 
