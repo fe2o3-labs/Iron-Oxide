@@ -192,14 +192,114 @@ pub fn action_failure(error: &ServerFnError) -> ActionFailure {
     }
 }
 
-/// The id to send for a create keyed by `key` (a built-in id, an uploaded document): the one of
-/// the attempt still pending for the same key, else a new one.
-#[must_use]
-pub fn creation_id_for<K: PartialEq>(pending: Option<&(K, CreationId)>, key: &K) -> CreationId {
-    match pending {
-        Some((pending_key, id)) if pending_key == key => *id,
-        _ => CreationId::new_v7(),
+/// One create the user asked for (a copy of a built-in, a new-program upload) and the
+/// `creation_id` it is sent with, kept until it succeeds or is refused for good. Retrying it, or
+/// tapping again after leaving and coming back, sends the same id: the server then returns what
+/// the first request created instead of creating a second one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Intent<K> {
+    pub key: K,
+    pub creation_id: CreationId,
+    /// Whether its request is in flight.
+    pub in_flight: bool,
+}
+
+/// How a create's request ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// Created, or refused for good: the next create is a new one.
+    Done,
+    /// May succeed if sent again (network, 503, 429): keep its id.
+    Retryable,
+}
+
+/// The creates the user asked for, by key. App-level, so they outlive the Programs screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Intents<K> {
+    intents: Vec<Intent<K>>,
+}
+
+impl<K> Default for Intents<K> {
+    fn default() -> Self {
+        Self {
+            intents: Vec::new(),
+        }
     }
+}
+
+impl<K: PartialEq + Clone> Intents<K> {
+    /// Starts a create for `key`: the id to send, the pending one if there is one; `None` while
+    /// a request for it is already in flight.
+    pub fn begin(&mut self, key: &K) -> Option<CreationId> {
+        match self.intents.iter_mut().find(|intent| intent.key == *key) {
+            Some(intent) if intent.in_flight => None,
+            Some(intent) => {
+                intent.in_flight = true;
+                Some(intent.creation_id)
+            }
+            None => {
+                let creation_id = CreationId::new_v7();
+                self.intents.push(Intent {
+                    key: key.clone(),
+                    creation_id,
+                    in_flight: true,
+                });
+                Some(creation_id)
+            }
+        }
+    }
+
+    /// Records how the request for `key` ended.
+    pub fn end(&mut self, key: &K, ended: Ended) {
+        match ended {
+            Ended::Done => self.intents.retain(|intent| intent.key != *key),
+            Ended::Retryable => {
+                if let Some(intent) = self.intents.iter_mut().find(|intent| intent.key == *key) {
+                    intent.in_flight = false;
+                }
+            }
+        }
+    }
+
+    /// Whether a request for `key` is in flight.
+    #[must_use]
+    pub fn in_flight(&self, key: &K) -> bool {
+        self.intents
+            .iter()
+            .any(|intent| intent.key == *key && intent.in_flight)
+    }
+
+    /// Whether any request is in flight.
+    #[must_use]
+    pub fn any_in_flight(&self) -> bool {
+        self.intents.iter().any(|intent| intent.in_flight)
+    }
+}
+
+/// How a create's failure ends it.
+fn ended(error: &ServerFnError) -> Ended {
+    if ApiFailure::classify(error).is_retryable() {
+        Ended::Retryable
+    } else {
+        Ended::Done
+    }
+}
+
+/// The creates in progress, provided by the app root so they outlive the Programs screen.
+#[derive(Clone, Copy, PartialEq)]
+pub struct ProgramIntents {
+    copies: Signal<Intents<BuiltinProgramId>>,
+    /// New-program uploads, keyed by the document.
+    uploads: Signal<Intents<String>>,
+}
+
+/// Provides the creates in progress. Called once, by the app root.
+pub fn use_program_intents_provider() {
+    let intents = ProgramIntents {
+        copies: use_signal(Intents::default),
+        uploads: use_signal(Intents::default),
+    };
+    use_context_provider(|| intents);
 }
 
 /// What the upload card says about the plan: whether uploading is included, and the slots left.
@@ -283,14 +383,11 @@ struct Programs {
     screen: Signal<Screen>,
     /// Bumped after every change, so the lists and details reload.
     generation: Signal<u64>,
-    /// A plan limit (403) to show with a link to the plan.
-    plan_notice: Signal<Option<String>>,
-    /// The problems of the last refused upload.
-    problems: Signal<Option<ProgramProblems>>,
-    /// A copy whose answer was lost: retried with the same id.
-    pending_copy: Signal<Option<(BuiltinProgramId, CreationId)>>,
-    /// A new-program upload whose answer was lost: retried with the same id.
-    pending_upload: Signal<Option<(String, CreationId)>>,
+    /// A plan limit (403) to show with a link to the plan, on the screen of the action it refused.
+    plan_notice: Signal<Option<(Screen, String)>>,
+    /// The problems of the last refused upload, for the program it was for (`None`: a new one).
+    problems: Signal<Option<(Option<ProgramId>, ProgramProblems)>>,
+    intents: ProgramIntents,
     errors: Errors,
 }
 
@@ -324,23 +421,36 @@ impl Programs {
         try_set(self.problems, None);
     }
 
-    /// Shows why an action failed: on the screen, or in the banner if the screen is gone.
-    fn fail(self, error: &ServerFnError) {
+    /// Whether the user is on `screen`.
+    fn is_on(self, screen: &Screen) -> bool {
+        self.screen
+            .try_peek()
+            .is_ok_and(|current| *current == *screen)
+    }
+
+    /// Shows why an action started on `origin` failed: on that screen if the user is still there,
+    /// else in the banner.
+    fn fail(self, error: &ServerFnError, origin: &Screen) {
+        let here = self.is_on(origin);
         match action_failure(error) {
             ActionFailure::Problems(problems) => {
                 let count = problems.errors.len() + problems.omitted;
-                if !try_set(self.problems, Some(problems)) {
+                let target = match origin {
+                    Screen::Mine(id) => Some(*id),
+                    Screen::List | Screen::Builtin(_) => None,
+                };
+                if !(here && try_set(self.problems, Some((target, problems)))) {
                     self.errors.show(
                         BannerKind::Error,
                         format!(
                             "The program was not uploaded: it has {count} problem(s). Upload it \
-                             again from Programs to see them."
+                             again to see them."
                         ),
                     );
                 }
             }
             ActionFailure::Plan(message) => {
-                if !try_set(self.plan_notice, Some(message.clone())) {
+                if !(here && try_set(self.plan_notice, Some((origin.clone(), message.clone())))) {
                     self.errors.show(BannerKind::Error, message);
                 }
             }
@@ -351,18 +461,29 @@ impl Programs {
         }
     }
 
-    fn pending_upload(self) -> Option<(String, CreationId)> {
-        self.pending_upload
-            .try_peek()
-            .ok()
-            .and_then(|pending| pending.clone())
+    /// Starts a copy of `builtin`: its creation id, or `None` while one is in flight.
+    fn begin_copy(self, builtin: &BuiltinProgramId) -> Option<CreationId> {
+        let mut copies = self.intents.copies;
+        copies.try_write().ok()?.begin(builtin)
     }
 
-    fn pending_copy(self) -> Option<(BuiltinProgramId, CreationId)> {
-        self.pending_copy
-            .try_peek()
-            .ok()
-            .and_then(|pending| pending.clone())
+    fn end_copy(self, builtin: &BuiltinProgramId, ended: Ended) {
+        let mut copies = self.intents.copies;
+        if let Ok(mut copies) = copies.try_write() {
+            copies.end(builtin, ended);
+        }
+    }
+
+    fn begin_upload(self, document: &String) -> Option<CreationId> {
+        let mut uploads = self.intents.uploads;
+        uploads.try_write().ok()?.begin(document)
+    }
+
+    fn end_upload(self, document: &String, ended: Ended) {
+        let mut uploads = self.intents.uploads;
+        if let Ok(mut uploads) = uploads.try_write() {
+            uploads.end(document, ended);
+        }
     }
 }
 
@@ -391,8 +512,7 @@ pub fn ProgramsPage() -> Element {
         generation: use_signal(|| 0),
         plan_notice: use_signal(|| None),
         problems: use_signal(|| None),
-        pending_copy: use_signal(|| None),
-        pending_upload: use_signal(|| None),
+        intents: use_context::<ProgramIntents>(),
         errors: use_errors(),
     };
     let screen = state.screen.read().clone();
@@ -406,7 +526,14 @@ pub fn ProgramsPage() -> Element {
 /// A 403 from a plan limit, with a link to the plan.
 #[component]
 fn PlanNotice(state: Programs) -> Element {
-    let Some(message) = state.plan_notice.read().clone() else {
+    let current = state.screen.read().clone();
+    let Some(message) = state
+        .plan_notice
+        .read()
+        .clone()
+        .filter(|(screen, _)| *screen == current)
+        .map(|(_, message)| message)
+    else {
         return rsx! {};
     };
     rsx! {
@@ -419,8 +546,14 @@ fn PlanNotice(state: Programs) -> Element {
 
 /// The problems of a refused upload, one per line, as plain text.
 #[component]
-fn ProblemList(state: Programs) -> Element {
-    let Some(problems) = state.problems.read().clone() else {
+fn ProblemList(state: Programs, target: Option<ProgramId>) -> Element {
+    let Some(problems) = state
+        .problems
+        .read()
+        .clone()
+        .filter(|(key, _)| *key == target)
+        .map(|(_, problems)| problems)
+    else {
         return rsx! {};
     };
     rsx! {
@@ -621,7 +754,9 @@ fn UploadCard(
     let allowed = allowance.as_ref().is_none_or(|(allowed, _)| *allowed);
     let slots = allowance.and_then(|(_, slots)| slots);
     let busy_flag = use_signal(|| false);
-    let busy = *busy_flag.read();
+    // A new-program upload stays in flight after leaving the screen: it is app-level.
+    let busy =
+        *busy_flag.read() || (target.is_none() && state.intents.uploads.read().any_in_flight());
     let input_id = if target.is_some() {
         "upload-version"
     } else {
@@ -694,7 +829,7 @@ fn UploadCard(
                     p { class: "io-muted io-hint", "{slots}" }
                 }
             }
-            ProblemList { state }
+            ProblemList { state, target }
         }
     }
 }
@@ -724,17 +859,24 @@ fn FilePicker(id: &'static str, busy: bool, on_pick: EventHandler<FormEvent>) ->
 }
 
 async fn upload(state: Programs, target: Option<ProgramId>, document: String) {
+    let origin = target.map_or(Screen::List, Screen::Mine);
     let upload_target = match target {
         Some(program_id) => UploadTarget::NewVersion { program_id },
         None => {
-            let creation_id = creation_id_for(state.pending_upload().as_ref(), &document);
-            try_set(state.pending_upload, Some((document.clone(), creation_id)));
+            let Some(creation_id) = state.begin_upload(&document) else {
+                // The same document is already being uploaded.
+                return;
+            };
             UploadTarget::NewProgram { creation_id }
         }
     };
-    match upload_program(upload_target, document).await {
+    let result = upload_program(upload_target, document.clone()).await;
+    if target.is_none() {
+        let how = result.as_ref().map_or_else(ended, |_| Ended::Done);
+        state.end_upload(&document, how);
+    }
+    match result {
         Ok(outcome) => {
-            try_set(state.pending_upload, None);
             let message = match (outcome.saved, target.is_some()) {
                 (false, true) => "No change: this is the same as the latest version.".to_owned(),
                 (false, false) => format!(
@@ -750,13 +892,7 @@ async fn upload(state: Programs, target: Option<ProgramId>, document: String) {
                 state.open_from(&Screen::List, Screen::Mine(outcome.program.id));
             }
         }
-        Err(error) => {
-            // Refused for good: the next attempt is a new upload.
-            if !ApiFailure::classify(&error).is_retryable() {
-                try_set(state.pending_upload, None);
-            }
-            state.fail(&error);
-        }
+        Err(error) => state.fail(&error, &origin),
     }
 }
 
@@ -837,8 +973,7 @@ fn BuiltinDetail(state: Programs, id: BuiltinProgramId) -> Element {
         .read()
         .clone()
         .map(|list| list.and_then(|list| list.into_iter().find(|b| b.builtin_id == id)));
-    let busy_flag = use_signal(|| false);
-    let busy = *busy_flag.read();
+    let busy = state.intents.copies.read().in_flight(&id);
     let builtin = match found {
         None => return rsx! { BackButton { state } LoadingState {} },
         Some(None) => {
@@ -851,18 +986,21 @@ fn BuiltinDetail(state: Programs, id: BuiltinProgramId) -> Element {
     };
     let copy_id = builtin.builtin_id.clone();
     let copy = move |_| {
-        let Some(guard) = BusyGuard::start(busy_flag) else {
+        let builtin_id = copy_id.clone();
+        let Some(creation_id) = state.begin_copy(&builtin_id) else {
+            // Already copying it.
             return;
         };
         state.clear_notices();
-        let builtin_id = copy_id.clone();
         spawn_forever(async move {
-            let _guard = guard;
-            let creation_id = creation_id_for(state.pending_copy().as_ref(), &builtin_id);
-            try_set(state.pending_copy, Some((builtin_id.clone(), creation_id)));
-            match copy_builtin_program(builtin_id.as_str().to_owned(), creation_id).await {
+            let origin = Screen::Builtin(builtin_id.clone());
+            let result = copy_builtin_program(builtin_id.as_str().to_owned(), creation_id).await;
+            state.end_copy(
+                &builtin_id,
+                result.as_ref().map_or_else(ended, |_| Ended::Done),
+            );
+            match result {
                 Ok(detail) => {
-                    try_set(state.pending_copy, None);
                     state.errors.show(
                         BannerKind::Info,
                         format!(
@@ -871,17 +1009,9 @@ fn BuiltinDetail(state: Programs, id: BuiltinProgramId) -> Element {
                         ),
                     );
                     state.changed();
-                    state.open_from(
-                        &Screen::Builtin(builtin_id),
-                        Screen::Mine(detail.program.id),
-                    );
+                    state.open_from(&origin, Screen::Mine(detail.program.id));
                 }
-                Err(error) => {
-                    if !ApiFailure::classify(&error).is_retryable() {
-                        try_set(state.pending_copy, None);
-                    }
-                    state.fail(&error);
-                }
+                Err(error) => state.fail(&error, &origin),
             }
         });
     };
@@ -974,7 +1104,7 @@ fn MineDetail(state: Programs, id: ProgramId) -> Element {
                     );
                     state.changed();
                 }
-                Err(error) => state.fail(&error),
+                Err(error) => state.fail(&error, &Screen::Mine(id)),
             }
         });
     };
@@ -995,7 +1125,7 @@ fn MineDetail(state: Programs, id: ProgramId) -> Element {
                     state.errors.show(BannerKind::Info, message);
                     state.changed();
                 }
-                Err(error) => state.fail(&error),
+                Err(error) => state.fail(&error, &Screen::Mine(id)),
             }
         });
     };
@@ -1259,13 +1389,37 @@ mod tests {
     }
 
     #[test]
-    fn a_retry_reuses_the_pending_creation_id() {
-        let first = CreationId::new_v7();
-        let pending = ("doc".to_owned(), first);
-        assert_eq!(creation_id_for(Some(&pending), &"doc".to_owned()), first);
-        // Another document, or nothing pending: a new id.
-        assert_ne!(creation_id_for(Some(&pending), &"other".to_owned()), first);
-        assert_ne!(creation_id_for::<String>(None, &"doc".to_owned()), first);
+    fn a_create_keeps_its_id_until_it_is_done() {
+        let mut copies = Intents::<String>::default();
+        let first = copies.begin(&"a".to_owned()).unwrap();
+        assert!(copies.in_flight(&"a".to_owned()));
+        assert!(copies.any_in_flight());
+        // Tapping again (after leaving and coming back) while in flight sends nothing.
+        assert_eq!(copies.begin(&"a".to_owned()), None);
+        // Another built-in is its own create.
+        let other = copies.begin(&"b".to_owned()).unwrap();
+        assert_ne!(other, first);
+        // A lost answer: the retry reuses the id.
+        copies.end(&"a".to_owned(), Ended::Retryable);
+        assert!(!copies.in_flight(&"a".to_owned()));
+        assert_eq!(copies.begin(&"a".to_owned()), Some(first));
+        // Done: a deliberate second copy is a new create.
+        copies.end(&"a".to_owned(), Ended::Done);
+        let second = copies.begin(&"a".to_owned()).unwrap();
+        assert_ne!(second, first);
+    }
+
+    #[test]
+    fn failures_end_creates_unless_retryable() {
+        assert_eq!(ended(&server(422, "Bad.", None)), Ended::Done);
+        assert_eq!(ended(&server(403, "Plan.", None)), Ended::Done);
+        assert_eq!(ended(&server(503, "Busy.", None)), Ended::Retryable);
+        assert_eq!(
+            ended(&ServerFnError::Request(
+                dioxus::fullstack::RequestError::Connect("x".into())
+            )),
+            Ended::Retryable
+        );
     }
 
     #[test]

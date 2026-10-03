@@ -61,6 +61,7 @@ pub fn App() -> Element {
     let unit = weight::use_unit_provider();
     let settings = user_settings::use_settings_provider(unit);
     prefs::use_device_prefs_provider(settings);
+    programs::use_program_intents_provider();
 
     rsx! {
         document::Title { "Iron Oxide" }
