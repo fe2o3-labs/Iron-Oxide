@@ -93,7 +93,7 @@ pub fn validate(update: SettingsUpdate) -> Result<Settings, ApiError> {
     })
 }
 
-fn from_stored(stored: UserSettings) -> Result<Settings, ApiError> {
+pub(super) fn from_stored(stored: UserSettings) -> Result<Settings, ApiError> {
     Ok(Settings {
         unit: match stored.unit {
             repo::Unit::Kg => Unit::Kg,
@@ -108,7 +108,7 @@ fn from_stored(stored: UserSettings) -> Result<Settings, ApiError> {
     })
 }
 
-fn to_stored(settings: &Settings) -> Result<UserSettings, ApiError> {
+pub(super) fn to_stored(settings: &Settings) -> Result<UserSettings, ApiError> {
     Ok(UserSettings {
         unit: match settings.unit {
             Unit::Kg => repo::Unit::Kg,

@@ -5,10 +5,8 @@
 //! - `writes`: every session write (start, save a set, finish), queued in the offline outbox (#107).
 //! - `local`: the session in progress kept on the device, and how it is reconciled on load.
 //! - `workout`: the active session screen.
-//! - `plates`: the slot for the plate calculator (#31).
 //! - `rest`: the rest timer between sets (#29).
 //! - `summary`: the end-of-session summary (#32).
-//! - `sheet`: the bottom sheet for confirmations.
 //! - `platform`: the browser clock, `localStorage`, sound, vibration and the screen wake lock.
 //!
 //! The page loads on the client only (like the shell's sign-in check), so the server render shows
@@ -18,10 +16,8 @@
 
 mod flow;
 pub(crate) mod local;
-mod plates;
 pub(crate) mod platform;
 mod rest;
-mod sheet;
 mod summary;
 mod workout;
 pub(crate) mod writes;

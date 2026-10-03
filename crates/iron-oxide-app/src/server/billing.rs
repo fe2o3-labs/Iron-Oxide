@@ -65,6 +65,26 @@ async fn stripe_webhook(headers: HeaderMap, body: Bytes) -> (StatusCode, &'stati
     )
 }
 
+/// The account deletion hook (#22): runs before an account is deleted, outside the deletion's
+/// transaction. An error stops the deletion, so the account is never deleted while its
+/// subscription keeps being charged.
+///
+/// A no-op until billing is implemented: there is no subscription to cancel yet.
+///
+/// TODO(billing): look the user up in `billing_customers`; if they have a customer, cancel every
+/// live subscription of it through the Stripe API, immediately and without refund logic in v1
+/// (`DELETE /v1/subscriptions/{id}`), and fail with a retryable `503` when Stripe cannot be reached.
+/// `billing_customers` then goes with the `users` cascade. Whether to also delete the Stripe
+/// customer (it holds what Stripe needs for accounting) is a maintainer decision, see
+/// `docs/billing.md`.
+pub async fn cancel_before_account_deletion(
+    _db: &sqlx::PgPool,
+    _user: super::db::ids::UserId,
+) -> Result<(), super::api::ApiError> {
+    tracing::debug!("billing not implemented: no subscription to cancel before account deletion");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

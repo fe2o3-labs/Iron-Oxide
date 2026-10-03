@@ -32,7 +32,10 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sqlx::{PgPool, types::Uuid};
 
+use webauthn_rs_proto::RequestChallengeResponse;
+
 use crate::api::error::ApiFailure;
+use crate::auth::types::Me;
 use crate::server::api::errors_layer::tests::client_error;
 pub use crate::server::auth::test_support::CallError;
 use crate::server::{
@@ -55,6 +58,14 @@ impl TestApi {
         }
     }
 
+    /// The app with the test configuration, changed by `change`.
+    pub async fn with_config(db: PgPool, change: impl FnOnce(&mut crate::server::Config)) -> Self {
+        Self {
+            app: TestApp::with_config(db.clone(), change).await,
+            db,
+        }
+    }
+
     /// A new user, signed up with a passkey and signed in, in their own browser.
     pub async fn user(&self, name: &str) -> TestUser {
         let mut browser = self.app.browser();
@@ -65,9 +76,48 @@ impl TestApi {
         }
     }
 
+    /// A new user like [`TestApi::user`], with their passkey and its credential id, to sign in
+    /// again with [`TestApi::sign_in`].
+    pub async fn user_with_passkey(&self, name: &str) -> (TestUser, Passkey, Vec<u8>) {
+        let mut browser = self.app.browser();
+        let mut passkey = Passkey::new();
+        let (me, credential_id) = sign_up(&mut browser, &mut passkey, name).await;
+        let user = TestUser {
+            id: me.user_id.into(),
+            browser,
+        };
+        (user, passkey, credential_id)
+    }
+
+    /// Signs in with `passkey` in a new browser: a new session of the passkey's user.
+    pub async fn sign_in(&self, passkey: &mut Passkey, credential_id: &[u8]) -> TestUser {
+        let mut browser = self.app.browser();
+        let rcr: RequestChallengeResponse = browser
+            .call("/api/auth/passkey/sign-in/begin", serde_json::json!({}))
+            .await
+            .unwrap();
+        let credential = passkey.sign_in(rcr, credential_id);
+        let me: Me = browser
+            .call(
+                "/api/auth/passkey/sign-in/finish",
+                serde_json::json!({ "credential": credential }),
+            )
+            .await
+            .unwrap();
+        TestUser {
+            id: me.user_id.into(),
+            browser,
+        }
+    }
+
     /// A, whose data the test creates, and B, who tries to reach it.
     pub async fn users_a_and_b(&self) -> (TestUser, TestUser) {
         (self.user("A").await, self.user("B").await)
+    }
+
+    /// The app's account-import slots (#22).
+    pub fn account_slots(&self) -> std::sync::Arc<tokio::sync::Semaphore> {
+        self.app.account_slots.clone()
     }
 
     /// A browser with no session.
@@ -122,6 +172,14 @@ impl TestUser {
             .header(header::CONTENT_TYPE, "application/json")
     }
 
+    /// Sends `request` and returns the whole response.
+    pub async fn send_response(
+        &mut self,
+        request: Request<Body>,
+    ) -> dioxus::server::axum::response::Response {
+        self.browser.send(request).await
+    }
+
     /// Sends `request` and returns the status and the body, as JSON when it is JSON (as a JSON
     /// string otherwise).
     pub async fn send(&mut self, request: Request<Body>) -> (StatusCode, Value) {
@@ -131,6 +189,19 @@ impl TestUser {
         let body = serde_json::from_slice(&bytes)
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
         (status, body)
+    }
+
+    /// The same session in a browser on another site: its requests are cross-site.
+    pub fn cross_site(&self) -> Self {
+        let mut other = self.clone();
+        other.browser.origin = Some("https://evil.example".to_owned());
+        other.browser.fetch_site = Some("cross-site".to_owned());
+        other
+    }
+
+    /// Whether this browser still holds a session cookie.
+    pub fn has_cookie(&self) -> bool {
+        self.browser.cookie.is_some()
     }
 
     /// Like [`TestUser::call`], for a call that must fail. Panics with the result if it succeeds.

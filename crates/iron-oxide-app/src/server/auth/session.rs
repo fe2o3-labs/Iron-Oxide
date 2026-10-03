@@ -37,6 +37,10 @@ pub const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 pub const TOUCH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// A signed-out session (holding only an in-flight ceremony) lives this long.
 pub const ANONYMOUS_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// How recent the session's sign-in must be for the sensitive account changes: adding a sign-in
+/// method (a passkey, Google) and deleting the account (#22). Signing in again restarts it.
+pub const STEP_UP_WINDOW: Duration =
+    Duration::from_secs(crate::api::account::DELETE_REAUTH_WINDOW_SECS);
 /// How often expired sessions and ceremonies are deleted. Rare on purpose: each run wakes the
 /// scale-to-zero Neon compute (#41).
 pub const CLEANUP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -298,6 +302,14 @@ pub fn absolute_expired(signed_in_at: i64, now: i64) -> bool {
     signed_in_at > now || now.saturating_sub(signed_in_at) >= max
 }
 
+/// Whether a session signed in at `signed_in_at` (Unix seconds) is within [`STEP_UP_WINDOW`] at
+/// `now`. A sign-in time in the future (clock skew, tampering) is not.
+#[must_use]
+pub fn signed_in_recently(signed_in_at: Option<i64>, now: i64) -> bool {
+    let window = i64::try_from(STEP_UP_WINDOW.as_secs()).unwrap_or(i64::MAX);
+    signed_in_at.is_some_and(|at| at <= now && now.saturating_sub(at) <= window)
+}
+
 /// Whether the idle expiry should be pushed back, given the last refresh.
 #[must_use]
 pub fn needs_touch(last_seen_at: Option<i64>, now: i64) -> bool {
@@ -341,6 +353,17 @@ pub(crate) mod tests {
     #[test]
     fn a_sign_in_time_in_the_future_is_expired() {
         assert!(absolute_expired(101, 100));
+    }
+
+    #[test]
+    fn step_up_needs_a_sign_in_from_the_last_ten_minutes() {
+        let now = 1_000 * DAY;
+        assert!(signed_in_recently(Some(now), now));
+        assert!(signed_in_recently(Some(now - 600), now));
+        assert!(!signed_in_recently(Some(now - 601), now));
+        assert!(!signed_in_recently(Some(now + 1), now), "in the future");
+        assert!(!signed_in_recently(None, now));
+        assert!(!signed_in_recently(Some(i64::MIN), now));
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! - `components`: the reusable components.
 //! - `errors`: the banner every server error is reported to.
 //! - `weight`: weights in the user's unit.
+//! - `plates`: the plate calculator (inline, as a sheet, and the `/tools/plates` page).
 //! - `user_settings`: the user's settings, shared by every screen, loaded and saved there.
 //! - `settings`: the Settings page.
 //! - `prefs`: preferences kept on this device only.
@@ -36,6 +37,7 @@ mod errors;
 mod gallery;
 mod history;
 mod home;
+mod plates;
 mod prefs;
 mod programs;
 mod session;

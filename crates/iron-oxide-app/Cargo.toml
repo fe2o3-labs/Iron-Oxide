@@ -13,7 +13,7 @@ dioxus = { workspace = true, features = ["fullstack", "router"] }
 iron-oxide-domain = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["v5"] }
 webauthn-rs-proto = { workspace = true }
 
 # Browser-only: optional, enabled by the `web` feature (WebAuthn, the Google sign-in popup, the
@@ -61,7 +61,7 @@ sqlx = { workspace = true, optional = true }
 subtle = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { workspace = true, optional = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower-sessions = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
