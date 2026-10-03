@@ -17,11 +17,17 @@ uuid = { workspace = true }
 webauthn-rs-proto = { workspace = true }
 
 # Browser-only: optional, enabled by the `web` feature (WebAuthn, the Google sign-in popup, the
-# session screens' clock and localStorage).
+# session screens' clock, localStorage, rest timer sound and Screen Wake Lock).
 js-sys = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
 web-sys = { workspace = true, optional = true, features = [
+  "AudioContext",
+  "AudioContextState",
+  "AudioDestinationNode",
+  "AudioNode",
+  "AudioParam",
+  "BaseAudioContext",
   "BroadcastChannel",
   "CredentialCreationOptions",
   "CredentialRequestOptions",
@@ -29,12 +35,18 @@ web-sys = { workspace = true, optional = true, features = [
   "Document",
   "DomException",
   "EventTarget",
+  "GainNode",
   "Location",
   "MessageEvent",
   "Navigator",
+  "OscillatorNode",
   "PublicKeyCredential",
   "RequestInit",
   "Storage",
+  "VisibilityState",
+  "WakeLock",
+  "WakeLockSentinel",
+  "WakeLockType",
   "Window",
 ] }
 
