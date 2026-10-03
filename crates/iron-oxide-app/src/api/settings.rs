@@ -56,14 +56,6 @@ fn default_lb_weight_step() -> Weight {
     Settings::defaults().lb_weight_step
 }
 
-fn default_kg_weight_step_kg() -> f64 {
-    default_kg_weight_step().as_kg()
-}
-
-fn default_lb_weight_step_kg() -> f64 {
-    default_lb_weight_step().as_kg()
-}
-
 const fn default_vibration() -> bool {
     true
 }
@@ -129,15 +121,16 @@ pub struct SettingsUpdate {
     pub plate_inventory: Vec<PlateInput>,
     pub default_rest: Seconds,
     pub sound_enabled: bool,
-    /// The kg weight step, in kg. Like the other #103 fields, the default when missing (a client
-    /// from before #103).
-    #[serde(default = "default_kg_weight_step_kg")]
-    pub kg_weight_step: f64,
-    /// The lb weight step, in kg (a [`Weight`]'s JSON, like every weight).
-    #[serde(default = "default_lb_weight_step_kg")]
-    pub lb_weight_step: f64,
-    #[serde(default = "default_vibration")]
-    pub vibration_enabled: bool,
+    /// The kg weight step, in kg. The #103 fields are optional: a client built before #103 does
+    /// not send them, and an absent field keeps the saved value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kg_weight_step: Option<f64>,
+    /// The lb weight step, in kg (a [`Weight`]'s JSON, like every weight); absent = unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lb_weight_step: Option<f64>,
+    /// Absent = unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vibration_enabled: Option<bool>,
 }
 
 /// A plate size (in kg) and how many pairs of it are available: a [`PlateStock`] before
@@ -171,9 +164,9 @@ impl From<Settings> for SettingsUpdate {
                 .collect(),
             default_rest: settings.default_rest,
             sound_enabled: settings.sound_enabled,
-            kg_weight_step: settings.kg_weight_step.as_kg(),
-            lb_weight_step: settings.lb_weight_step.as_kg(),
-            vibration_enabled: settings.vibration_enabled,
+            kg_weight_step: Some(settings.kg_weight_step.as_kg()),
+            lb_weight_step: Some(settings.lb_weight_step.as_kg()),
+            vibration_enabled: Some(settings.vibration_enabled),
         }
     }
 }

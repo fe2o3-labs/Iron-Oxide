@@ -32,13 +32,17 @@ pub async fn update(
     owner: UserId,
     update: SettingsUpdate,
 ) -> Result<Settings, ApiError> {
-    let settings = validate(update)?;
+    // A client built before #103 sends no weight steps or vibration: those keep their saved
+    // values. Reading first is fine: a concurrent update of the same fields is last-writer-wins
+    // either way.
+    let current = get(pool, owner).await?;
+    let settings = validate(update, &current)?;
     repo::save(pool, owner, &to_stored(&settings)?).await?;
     Ok(settings)
 }
 
-/// Checks an update and turns it into settings.
-pub fn validate(update: SettingsUpdate) -> Result<Settings, ApiError> {
+/// Checks an update and turns it into settings; the fields it leaves out keep `current`'s values.
+pub fn validate(update: SettingsUpdate, current: &Settings) -> Result<Settings, ApiError> {
     // Fixed messages: the domain's would echo the number, which can print as hundreds of digits.
     let bar_weight = Weight::from_kg(update.bar_weight).map_err(|_| {
         ApiError::invalid_field(
@@ -95,8 +99,14 @@ pub fn validate(update: SettingsUpdate) -> Result<Settings, ApiError> {
             _ => Err(ApiError::invalid_field(field, message)),
         }
     };
-    let kg_weight_step = step(update.kg_weight_step, "kg_weight_step")?;
-    let lb_weight_step = step(update.lb_weight_step, "lb_weight_step")?;
+    let kg_weight_step = match update.kg_weight_step {
+        Some(kg) => step(kg, "kg_weight_step")?,
+        None => current.kg_weight_step,
+    };
+    let lb_weight_step = match update.lb_weight_step {
+        Some(kg) => step(kg, "lb_weight_step")?,
+        None => current.lb_weight_step,
+    };
     Ok(Settings {
         unit: update.unit,
         bar_weight,
@@ -105,7 +115,9 @@ pub fn validate(update: SettingsUpdate) -> Result<Settings, ApiError> {
         sound_enabled: update.sound_enabled,
         kg_weight_step,
         lb_weight_step,
-        vibration_enabled: update.vibration_enabled,
+        vibration_enabled: update
+            .vibration_enabled
+            .unwrap_or(current.vibration_enabled),
     })
 }
 
@@ -248,15 +260,15 @@ mod tests {
             plate_inventory: vec![plate(5.0, 1), plate(20.0, 4)],
             default_rest: Seconds::new(90),
             sound_enabled: false,
-            kg_weight_step: 1.25,
-            lb_weight_step: Weight::from_lb(2.5).unwrap().as_kg(),
-            vibration_enabled: false,
+            kg_weight_step: Some(1.25),
+            lb_weight_step: Some(Weight::from_lb(2.5).unwrap().as_kg()),
+            vibration_enabled: Some(false),
         }
     }
 
     #[test]
     fn validate_sorts_plates_and_rejects_bad_inventories_and_rests() {
-        let settings = validate(custom()).unwrap();
+        let settings = validate(custom(), &Settings::defaults()).unwrap();
         assert_eq!(
             settings.plate_inventory.stock(),
             &[stock(20.0, 4), stock(5.0, 1)]
@@ -269,12 +281,12 @@ mod tests {
             serde_json::to_value(&update).unwrap(),
             serde_json::to_value(&settings).unwrap()
         );
-        assert_eq!(validate(update).unwrap(), settings);
+        assert_eq!(validate(update, &Settings::defaults()).unwrap(), settings);
         let rest = SettingsUpdate {
             default_rest: MAX_DEFAULT_REST,
             ..custom()
         };
-        assert!(validate(rest).is_ok());
+        assert!(validate(rest, &Settings::defaults()).is_ok());
 
         for (update, message) in [
             (
@@ -349,26 +361,31 @@ mod tests {
             ),
             (
                 SettingsUpdate {
-                    kg_weight_step: 0.0,
+                    kg_weight_step: Some(0.0),
                     ..custom()
                 },
                 "A weight step must be more than 0 and at most 25 kg.",
             ),
             (
                 SettingsUpdate {
-                    lb_weight_step: 25.5,
+                    lb_weight_step: Some(25.5),
                     ..custom()
                 },
                 "A weight step must be more than 0 and at most 25 kg.",
             ),
         ] {
-            assert_eq!(validate(update).unwrap_err().public(), (422, message));
+            assert_eq!(
+                validate(update, &Settings::defaults())
+                    .unwrap_err()
+                    .public(),
+                (422, message)
+            );
         }
     }
 
     #[test]
     fn stored_settings_round_trip_and_corrupt_ones_are_internal_errors() {
-        let settings = validate(custom()).unwrap();
+        let settings = validate(custom(), &Settings::defaults()).unwrap();
         assert_eq!(
             from_stored(to_stored(&settings).unwrap()).unwrap(),
             settings
@@ -388,6 +405,29 @@ mod tests {
             ..to_stored(&settings).unwrap()
         };
         assert_eq!(from_stored(corrupt_bar).unwrap_err().public().0, 500);
+    }
+
+    #[test]
+    fn fields_an_update_leaves_out_keep_their_current_values() {
+        let current = Settings {
+            kg_weight_step: kg(1.0),
+            lb_weight_step: Weight::from_lb(10.0).unwrap(),
+            vibration_enabled: false,
+            ..Settings::defaults()
+        };
+        let old_client = SettingsUpdate {
+            kg_weight_step: None,
+            lb_weight_step: None,
+            vibration_enabled: None,
+            ..custom()
+        };
+        let settings = validate(old_client, &current).unwrap();
+        assert_eq!(settings.kg_weight_step, current.kg_weight_step);
+        assert_eq!(settings.lb_weight_step, current.lb_weight_step);
+        assert!(!settings.vibration_enabled);
+        // What is sent replaces it.
+        let settings = validate(custom(), &current).unwrap();
+        assert_eq!(settings.kg_weight_step, kg(1.25));
     }
 
     #[test]
@@ -427,7 +467,7 @@ mod tests {
             .call(UPDATE, json!({ "settings": custom() }))
             .await
             .unwrap();
-        assert_eq!(saved, validate(custom()).unwrap());
+        assert_eq!(saved, validate(custom(), &Settings::defaults()).unwrap());
         assert_eq!(settings_of(&mut a).await, saved);
         // Saving the same again is harmless.
         let again: Settings = a
@@ -476,18 +516,45 @@ mod tests {
             (error.status.as_u16(), error.message.as_str()),
             (422, "The bar weight must be between 0 and 2000 kg.")
         );
+        // A client built before #103 sends no weight steps or vibration: the saved ones stay.
+        let saved_before: Settings = a
+            .call(UPDATE, json!({ "settings": custom() }))
+            .await
+            .unwrap();
+        assert!(!saved_before.vibration_enabled);
+        let mut old_shape = serde_json::to_value(SettingsUpdate {
+            default_rest: Seconds::new(150),
+            ..custom()
+        })
+        .unwrap();
+        for field in ["kg_weight_step", "lb_weight_step", "vibration_enabled"] {
+            old_shape.as_object_mut().unwrap().remove(field);
+        }
+        let saved: Settings = a
+            .call(UPDATE, json!({ "settings": old_shape }))
+            .await
+            .unwrap();
+        assert_eq!(saved.default_rest, Seconds::new(150));
+        assert_eq!(saved.kg_weight_step, saved_before.kg_weight_step);
+        assert_eq!(saved.lb_weight_step, saved_before.lb_weight_step);
+        assert_eq!(saved.vibration_enabled, saved_before.vibration_enabled);
+        assert_eq!(settings_of(&mut a).await, saved);
+        let _: Settings = a
+            .call(UPDATE, json!({ "settings": custom() }))
+            .await
+            .unwrap();
         // Weight steps are refused out of range, naming their field (#103).
         for (update, field) in [
             (
                 SettingsUpdate {
-                    kg_weight_step: 0.0,
+                    kg_weight_step: Some(0.0),
                     ..custom()
                 },
                 "kg_weight_step",
             ),
             (
                 SettingsUpdate {
-                    lb_weight_step: 30.0,
+                    lb_weight_step: Some(30.0),
                     ..custom()
                 },
                 "lb_weight_step",

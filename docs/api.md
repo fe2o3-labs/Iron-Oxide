@@ -392,8 +392,9 @@ Sign-in keeps its own module and `AuthError` (see [Layout](#layout)); these two 
 - **Weight step and vibration (#103)** used to be kept on the device. On the first load after
   #103, the app carries a value still on the device over into a setting the server has at its
   default, saves it, and removes the device's copy.
-  The three fields default when missing, in `Settings` and `SettingsUpdate`, so an export made
-  before #103 still imports (decision log #41) and an older client can still save. Weights out of range get a fixed message ("… must be between 0 and 2000 kg."), never the number echoed back. A typed `Weight` or `PlateInventory` argument would
+  In `Settings` the three fields default when missing, so an export made before #103 still
+  imports (decision log #41). In `SettingsUpdate` they are optional: a client built before #103
+  leaves them out, and they keep their saved values. Weights out of range get a fixed message ("… must be between 0 and 2000 kg."), never the number echoed back. A typed `Weight` or `PlateInventory` argument would
   fail while the body is decoded, before the function runs, and only give the generic
   `422 Invalid request.` without saying which value is wrong.
 - **Defaults only when nothing was saved.** The defaults apply only while there is no
