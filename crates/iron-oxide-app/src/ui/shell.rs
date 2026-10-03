@@ -17,6 +17,7 @@ use super::components::icons::{HistoryIcon, HomeIcon, ProgramsIcon, SettingsIcon
 use super::components::{EmptyState, LoadingState};
 use super::errors::{BannerKind, use_errors};
 use super::history::{ExerciseProgress, History, HistoryLayout, HistorySession};
+use super::home::Home;
 use crate::api::error::{ApiFailure, FailureKind};
 use crate::auth::api::{is_unauthorized, me};
 use crate::auth::browser;
@@ -275,17 +276,6 @@ fn PageHeader(#[props(into)] title: String, #[props(into)] subtitle: Option<Stri
             if let Some(subtitle) = subtitle {
                 p { class: "io-muted", "{subtitle}" }
             }
-        }
-    }
-}
-
-#[component]
-fn Home() -> Element {
-    rsx! {
-        PageHeader { title: "Today" }
-        EmptyState {
-            title: "Nothing planned",
-            message: "Your program's next workout will show up here.",
         }
     }
 }

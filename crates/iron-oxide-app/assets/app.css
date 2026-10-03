@@ -1377,6 +1377,26 @@ a.io-chip {
   overflow-wrap: anywhere;
 }
 
+/* --- Home ------------------------------------------------------------------------------------- */
+
+/* The next day's name, as big as an exercise title on the session screen. */
+.io-home-day {
+  font-size: 64px;
+}
+
+.io-home-exercises .io-row:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.io-home-exercises .io-row:last-child {
+  padding-bottom: 0;
+}
+
+.io-home-last {
+  text-align: center;
+}
+
 /* --- Rest timer (#29) ------------------------------------------------------------------------- */
 
 .io-rest {

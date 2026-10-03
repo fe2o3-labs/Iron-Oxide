@@ -17,12 +17,12 @@
 
 mod flow;
 mod plates;
-mod platform;
+pub(crate) mod platform;
 mod rest;
 mod sheet;
 mod summary;
 mod workout;
-mod writes;
+pub(crate) mod writes;
 
 use std::collections::BTreeSet;
 
