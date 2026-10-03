@@ -36,12 +36,36 @@ pub struct Settings {
     /// The rest between sets when the program does not say.
     pub default_rest: Seconds,
     pub sound_enabled: bool,
-    /// How far the weight steppers move in kg mode.
+    /// How far the weight steppers move in kg mode. Defaults when missing, so that an export
+    /// made before #103 still imports.
+    #[serde(default = "default_kg_weight_step")]
     pub kg_weight_step: Weight,
-    /// How far the weight steppers move in lb mode.
+    /// How far the weight steppers move in lb mode (default when missing, as above).
+    #[serde(default = "default_lb_weight_step")]
     pub lb_weight_step: Weight,
-    /// Whether the rest timer vibrates the phone (where the browser can).
+    /// Whether the rest timer vibrates the phone (where the browser can); on when missing.
+    #[serde(default = "default_vibration")]
     pub vibration_enabled: bool,
+}
+
+fn default_kg_weight_step() -> Weight {
+    Settings::defaults().kg_weight_step
+}
+
+fn default_lb_weight_step() -> Weight {
+    Settings::defaults().lb_weight_step
+}
+
+fn default_kg_weight_step_kg() -> f64 {
+    default_kg_weight_step().as_kg()
+}
+
+fn default_lb_weight_step_kg() -> f64 {
+    default_lb_weight_step().as_kg()
+}
+
+const fn default_vibration() -> bool {
+    true
 }
 
 impl Settings {
@@ -105,10 +129,14 @@ pub struct SettingsUpdate {
     pub plate_inventory: Vec<PlateInput>,
     pub default_rest: Seconds,
     pub sound_enabled: bool,
-    /// The kg weight step, in kg.
+    /// The kg weight step, in kg. Like the other #103 fields, the default when missing (a client
+    /// from before #103).
+    #[serde(default = "default_kg_weight_step_kg")]
     pub kg_weight_step: f64,
     /// The lb weight step, in kg (a [`Weight`]'s JSON, like every weight).
+    #[serde(default = "default_lb_weight_step_kg")]
     pub lb_weight_step: f64,
+    #[serde(default = "default_vibration")]
     pub vibration_enabled: bool,
 }
 
@@ -204,4 +232,35 @@ pub async fn set_training_max(
 #[post("/api/settings/training-max/delete", state: Extension<AppState>, user: AuthUser)]
 pub async fn delete_training_max(exercise_id: String) -> Result<(), ServerFnError> {
     Ok(logic::delete_training_max(&state.db, user.owner(), &exercise_id).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_saved_before_the_weight_steps_still_read() {
+        // An export made before #103 has no weight steps or vibration.
+        let mut json = serde_json::to_value(Settings::defaults()).unwrap();
+        let object = json.as_object_mut().unwrap();
+        object.remove("kg_weight_step");
+        object.remove("lb_weight_step");
+        object.remove("vibration_enabled");
+        let read: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(read, Settings::defaults());
+    }
+
+    #[test]
+    fn the_weight_step_follows_the_unit() {
+        let settings =
+            Settings::defaults().with_weight_step(Unit::Lb, Weight::from_lb(2.5).unwrap());
+        assert_eq!(
+            settings.weight_step(Unit::Kg),
+            Weight::from_kg(2.5).unwrap()
+        );
+        assert_eq!(
+            settings.weight_step(Unit::Lb),
+            Weight::from_lb(2.5).unwrap()
+        );
+    }
 }

@@ -85,6 +85,15 @@ Touch ID, device PIN).
 credentials go in `excludeCredentials`, so the same authenticator is not registered twice. There
 are at most 20 passkeys per user.
 
+**Step-up (#22).** Adding a sign-in method (a passkey: begin and finish; Google: begin of a link and
+its callback) and deleting the account need a sign-in from the last 10 minutes
+(`session::STEP_UP_WINDOW`, the session's `auth.signed_in_at`). Otherwise `403 For your security,
+sign in again first, then try again.` Only a sign-in sets that time, never adding a method, so a
+stale session cannot add its own credential and sign in afresh with it. Tests:
+`adding_a_passkey_needs_a_recent_sign_in`, `linking_google_needs_a_recent_sign_in`,
+`a_method_added_in_a_session_does_not_refresh_its_sign_in`,
+`a_stale_session_cannot_add_a_passkey_to_delete_the_account`.
+
 The `webauthn-rs` feature flags used are:
 
 - `danger-allow-state-serialisation`: the ceremony state is serialized into `auth_ceremonies`, on

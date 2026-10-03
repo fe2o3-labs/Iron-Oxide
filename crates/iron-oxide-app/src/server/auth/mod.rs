@@ -259,6 +259,26 @@ impl AuthContext {
         Ok(())
     }
 
+    /// Fails with [`AuthError::ReauthenticationRequired`] unless this session signed in within
+    /// [`session::STEP_UP_WINDOW`]: the step-up of adding a sign-in method and of deleting the
+    /// account (#22).
+    ///
+    /// The time is the session's `SIGNED_IN_AT`, which only [`AuthContext::sign_in`] writes, when a
+    /// passkey sign-in, a Google sign-in or a sign-up has just verified a credential. Every
+    /// sign-in starts a new session, so that credential belonged to the account before the
+    /// session started. Adding a passkey or linking Google never signs in again, so a credential
+    /// added in this session never refreshes it; and since adding one needs this same step-up, a
+    /// stale session (a stolen cookie, a forgotten tab) cannot add its own credential to sign in
+    /// afresh with it.
+    pub async fn require_recent_sign_in(&self) -> Result<(), AuthError> {
+        let signed_in_at = self.session.get::<i64>(keys::SIGNED_IN_AT).await?;
+        if session::signed_in_recently(signed_in_at, session::now_unix()) {
+            Ok(())
+        } else {
+            Err(AuthError::ReauthenticationRequired)
+        }
+    }
+
     /// Signs out: deletes the session row and clears the cookie.
     pub async fn sign_out(&self) -> Result<(), AuthError> {
         Ok(self.session.flush().await?)

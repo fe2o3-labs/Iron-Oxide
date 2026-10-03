@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO program_versions (program_id, user_id, version, document, created_at)\n         SELECT p.id, p.user_id, $3, $4, $5 FROM programs p WHERE p.id = $2 AND p.user_id = $1\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4",
+        "Jsonb",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "211e58319a50d8498c819137b64ad908c87b33f7c1d2c94aa988038bb28cc857"
+}
