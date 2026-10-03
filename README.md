@@ -471,12 +471,16 @@ License files) and optimised screenshots. No framework, no build step and no thi
 - `make landing` assembles the site into `dist/landing` and serves it on <http://localhost:8000>
   (`LANDING_PORT` changes the port). `make landing-build` only assembles it.
 - **The prompt has one source: `programs/ai-prompt.md`** (#108), which the app shows too.
-  `make landing-build` puts it into the page (`scripts/landing-prompt.py`, between the
+  `make landing-build` puts it into the page (`scripts/landing-build.py`, between the
   `prompt:begin`/`prompt:end` markers of `landing/index.html`) and fails if the file is missing.
   Edit the prompt in `programs/ai-prompt.md`, never in the page.
 - The site also publishes `schemas/program.schema.json` at `/program.schema.json`.
+- The build (`scripts/landing-build.py`) also strips HTML and CSS comments from the shipped files
+  and fails if the page mentions GitHub, open source or a licence (the fonts' OFL files and the
+  JSON Schema are exempt). `LANDING_OUT` must be a plain directory strictly under `dist/`.
 - `.github/workflows/landing.yml` deploys it to GitHub Pages on every push to `main` that touches
-  `landing/`, the schema or the workflow; pull requests only build it. `landing/CNAME` holds the
+  `landing/`, the schema, the prompt, the build script, the `Makefile` or the workflow; pull
+  requests only build it. `landing/CNAME` holds the
   domain.
 - Colours and fonts follow the app's Forge tokens (`crates/iron-oxide-app/assets/app.css`), copied
   at the top of `landing/styles.css`: change both together.

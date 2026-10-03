@@ -435,24 +435,17 @@ LANDING_OUT ?= dist/landing
 # Port of the local preview (`make landing`).
 LANDING_PORT ?= 8000
 
-# LANDING_OUT is deleted and recreated, so it must be a directory under dist/.
+# LANDING_OUT reaches the recipes through the environment only (never pasted into a shell line):
+# scripts/landing-build.py refuses anything but a plain directory strictly under dist/.
+landing-build landing: export LANDING_OUT := $(LANDING_OUT)
+
 landing-build: ## Assemble the landing page into LANDING_OUT (dist/landing)
-	$(Q)case "$(LANDING_OUT)" in \
-		dist/?*) case "$(LANDING_OUT)" in *..*) echo "make $@: LANDING_OUT must be a directory under dist/ (got '$(LANDING_OUT)')." >&2; exit 1 ;; esac ;; \
-		*) echo "make $@: LANDING_OUT must be a directory under dist/ (got '$(LANDING_OUT)')." >&2; exit 1 ;; \
-	esac
-	$(Q)rm -rf $(LANDING_OUT)
-	$(Q)mkdir -p $(LANDING_OUT)
-	$(Q)cp -R landing/. $(LANDING_OUT)/
-	$(Q)cp schemas/program.schema.json $(LANDING_OUT)/program.schema.json
 	$(Q)$(call need-cmd,python3,Install Python 3: brew install python)
-	$(Q)python3 scripts/landing-prompt.py $(LANDING_OUT)/index.html programs/ai-prompt.md
-	$(Q)echo "Landing page: $(LANDING_OUT)"
+	$(Q)python3 scripts/landing-build.py
 
 landing: landing-build ## Preview the landing page on http://localhost:LANDING_PORT (8000)
-	$(Q)$(call need-cmd,python3,Install Python 3: brew install python)
 	$(Q)$(call step,landing page on http://localhost:$(LANDING_PORT) (Ctrl-C stops it))
-	$(Q)python3 -m http.server $(LANDING_PORT) --bind 127.0.0.1 --directory $(LANDING_OUT)
+	$(Q)python3 -m http.server $(LANDING_PORT) --bind 127.0.0.1 --directory "$$LANDING_OUT"
 
 ##@ Misc
 

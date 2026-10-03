@@ -11,7 +11,7 @@ on:
       - "landing/**"
       - "schemas/program.schema.json"
       - "programs/ai-prompt.md"
-      - "scripts/landing-prompt.py"
+      - "scripts/landing-build.py"
       - "Makefile"
       - ".github/workflows/landing.yml"
   # Pull requests touching the site only build it (no deploy), so a broken build shows up early.
@@ -20,7 +20,7 @@ on:
       - "landing/**"
       - "schemas/program.schema.json"
       - "programs/ai-prompt.md"
-      - "scripts/landing-prompt.py"
+      - "scripts/landing-build.py"
       - "Makefile"
       - ".github/workflows/landing.yml"
   workflow_dispatch:
