@@ -18,12 +18,12 @@
 // deletes the previous build's cache. Bump CACHE_VERSION when only this file or an
 // unhashed file in public/ (icons, manifest) changes.
 
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const BUILD_ID = new URLSearchParams(self.location.search).get("build") || "unknown";
 const CACHE_NAME = `iron-oxide-${CACHE_VERSION}-${BUILD_ID}`;
 const SHELL_URL = "/";
 
-// Unhashed files from public/ that the app shell needs.
+// Unhashed files from public/ that the app shell needs: the icons and the self-hosted fonts.
 const PRECACHE_URLS = [
   "/manifest.webmanifest",
   "/icons/icon-192.png",
@@ -33,6 +33,9 @@ const PRECACHE_URLS = [
   "/icons/icon.svg",
   "/icons/favicon.svg",
   "/favicon.ico",
+  "/fonts/big-shoulders-display-latin-wght.woff2",
+  "/fonts/ibm-plex-sans-latin-wght.woff2",
+  "/fonts/jetbrains-mono-latin-wght.woff2",
 ];
 
 // Paths that must always hit the network, even for GET.

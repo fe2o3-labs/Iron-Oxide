@@ -9,9 +9,12 @@ use dioxus::prelude::*;
 #[cfg(feature = "server")]
 pub mod missing_assets;
 
-/// Colour of the browser UI around the app. Keep in sync with `--io-bg` in `assets/tokens.css`
-/// and with `theme_color` / `background_color` in `public/manifest.webmanifest`.
-pub const THEME_COLOR: &str = "#141619";
+/// Colour of the browser UI around the app: the dark theme's ground. Keep in sync with
+/// `--io-ground` in `assets/app.css` and with `theme_color` / `background_color` in
+/// `public/manifest.webmanifest`.
+pub const THEME_COLOR: &str = "#121416";
+/// The same for the light theme (`--io-ground` of the light theme), when the system is light.
+pub const THEME_COLOR_LIGHT: &str = "#f1ede6";
 
 /// Files in `public/` linked from `<head>`. The service worker must precache every one of them.
 const MANIFEST_URL: &str = "/manifest.webmanifest";
@@ -54,7 +57,16 @@ const REGISTER_IN_THIS_BUILD: bool = !cfg!(debug_assertions);
 pub fn PwaHead() -> Element {
     rsx! {
         document::Link { rel: "manifest", href: MANIFEST_URL }
-        document::Meta { name: "theme-color", content: THEME_COLOR }
+        document::Meta {
+            name: "theme-color",
+            content: THEME_COLOR,
+            "media": "(prefers-color-scheme: dark)",
+        }
+        document::Meta {
+            name: "theme-color",
+            content: THEME_COLOR_LIGHT,
+            "media": "(prefers-color-scheme: light)",
+        }
         document::Link { rel: "icon", href: FAVICON_ICO_URL, sizes: "48x48" }
         document::Link {
             rel: "icon",
@@ -130,8 +142,10 @@ mod tests {
         let manifest = manifest();
         assert_eq!(manifest["theme_color"], THEME_COLOR);
         assert_eq!(manifest["background_color"], THEME_COLOR);
-        let tokens = std::fs::read_to_string(crate_file("assets/tokens.css")).unwrap();
-        assert!(tokens.contains(&format!("--io-bg: {THEME_COLOR};")));
+        let css = std::fs::read_to_string(crate_file("assets/app.css")).unwrap();
+        let ground = |colour: &str| format!("--io-ground: {};", colour.to_ascii_lowercase());
+        assert!(css.contains(&ground(THEME_COLOR)));
+        assert!(css.contains(&ground(THEME_COLOR_LIGHT)));
     }
 
     #[test]
@@ -230,6 +244,24 @@ mod tests {
             let url = format!("/icons/{name}");
             assert!(urls.contains(&url), "{url} is not precached");
         }
+    }
+
+    #[test]
+    fn every_font_is_precached_and_preloaded() {
+        let urls = precache_urls();
+        let mut fonts = Vec::new();
+        for entry in std::fs::read_dir(crate_file("public/fonts")).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            if name.ends_with(".woff2") {
+                let url = format!("/fonts/{name}");
+                assert!(urls.contains(&url), "{url} is not precached");
+                fonts.push(url);
+            }
+        }
+        fonts.sort();
+        let mut preloaded = crate::ui::theme::FONT_URLS.map(str::to_owned).to_vec();
+        preloaded.sort();
+        assert_eq!(fonts, preloaded, "every font is preloaded, and only those");
     }
 
     #[test]
