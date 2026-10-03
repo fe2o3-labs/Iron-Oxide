@@ -7,7 +7,7 @@
 //! - `workout`: the active session screen.
 //! - `rest`: the rest timer between sets (#29).
 //! - `summary`: the end-of-session summary (#32).
-//! - `platform`: the browser clock, `localStorage`, sound, vibration and the screen wake lock.
+//! - `platform`: the browser clock, sound, vibration and the screen wake lock.
 //!
 //! The page loads on the client only (like the shell's sign-in check), so the server render shows
 //! the loading state and hydration matches. It waits until the outbox knows the user, then
