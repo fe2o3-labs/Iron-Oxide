@@ -249,6 +249,7 @@ p {
 }
 
 .io-shell-bare {
+  padding-top: calc(env(safe-area-inset-top) + 40px);
   padding-bottom: calc(env(safe-area-inset-bottom) + 24px);
 }
 
@@ -563,8 +564,9 @@ p {
   line-height: 1.3;
 }
 
+/* A chip you can pick is a tap target: 56 px, like every control but the header icon buttons. */
 button.io-chip {
-  min-height: var(--io-tap-small);
+  min-height: var(--io-tap);
   padding: 0 14px;
   cursor: pointer;
   touch-action: manipulation;
@@ -714,7 +716,7 @@ button.io-chip {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 8px 8px 16px;
+  padding: 4px 4px 4px 16px;
   border: 1px solid var(--io-line);
   border-left: 4px solid var(--io-danger);
   border-radius: var(--io-radius-control);
@@ -734,7 +736,13 @@ button.io-chip {
   border-left-color: var(--io-success);
 }
 
+.io-banner-warning {
+  border-left-color: var(--io-warning);
+}
+
 .io-banner .io-icon-button {
+  width: var(--io-tap);
+  height: var(--io-tap);
   border: none;
   background: transparent;
 }
