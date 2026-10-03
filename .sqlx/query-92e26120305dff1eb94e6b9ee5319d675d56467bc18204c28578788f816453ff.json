@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO workout_sessions\n             (id, user_id, program_version_id, day_id, status, started_at, finished_at)\n         SELECT u.id, $1, u.program_version_id, u.day_id, u.status, u.started_at, u.finished_at\n         FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::text[], $6::timestamptz[],\n                     $7::timestamptz[])\n             AS u (id, program_version_id, day_id, status, started_at, finished_at)\n         ON CONFLICT DO NOTHING\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "UuidArray",
+        "TextArray",
+        "TextArray",
+        "TimestamptzArray",
+        "TimestamptzArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "92e26120305dff1eb94e6b9ee5319d675d56467bc18204c28578788f816453ff"
+}

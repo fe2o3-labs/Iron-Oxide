@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO training_maxes (user_id, exercise_id, weight_ng, set_at)\n         SELECT $1, u.exercise_id, u.weight_ng, u.set_at\n         FROM UNNEST($2::text[], $3::bigint[], $4::timestamptz[])\n             AS u (exercise_id, weight_ng, set_at)\n         ON CONFLICT (user_id, exercise_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "Int8Array",
+        "TimestamptzArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7b02ee3c9ffeef4bd1c3bb066ff8c0a6eccbedae5bfc31571cd036ae88282976"
+}

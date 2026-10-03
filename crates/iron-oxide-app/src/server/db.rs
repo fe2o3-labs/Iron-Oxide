@@ -15,6 +15,7 @@ use sqlx::{
 
 use super::config::DatabaseUrl;
 
+pub mod account;
 // The repository: typed queries over the training tables. Every function that reads or writes a
 // user's data takes the caller's `UserId` and scopes every query by it (docs/database.md).
 #[allow(dead_code, reason = "called by the server functions of #18-#22")]
@@ -375,7 +376,7 @@ pub(crate) mod tests {
     }
 
     /// A pool with the app's settings (deadlines included) on the test's database.
-    async fn app_pool(options: sqlx::postgres::PgConnectOptions) -> PgPool {
+    pub(crate) async fn app_pool(options: sqlx::postgres::PgConnectOptions) -> PgPool {
         let pool = pool_options().connect_with(options).await.unwrap();
         sqlx::query("CREATE TABLE IF NOT EXISTS deadline_probe (id int)")
             .execute(&pool)

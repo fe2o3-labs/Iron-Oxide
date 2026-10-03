@@ -280,7 +280,11 @@ Stripe also publishes its webhook source IP addresses. An IP allowlist is option
 Deleting an account must first cancel its Stripe subscription through the API (immediately, no
 refund logic in v1). Otherwise the user keeps being charged. `billing_customers` then goes with the
 `users` cascade. Whether to also delete the Stripe customer (it holds the email and billing details
-Stripe needs for accounting) is a maintainer decision to make with #22.
+Stripe needs for accounting) is still a maintainer decision.
+
+The hook is in place: `delete_account` (#22) calls `server::billing::cancel_before_account_deletion`
+before it deletes anything, and an error from it stops the deletion. Today it is a no-op, since
+there is no subscription yet. Its TODO says what to implement.
 
 ## Tests
 
