@@ -7,6 +7,7 @@
 //! - `weight`: weights in the user's unit.
 //! - `settings`: the user's settings, shared by every screen, and the Settings page.
 //! - `prefs`: preferences kept on this device only.
+//! - `programs`: the Programs page.
 
 mod account;
 #[cfg_attr(
@@ -30,6 +31,7 @@ mod errors;
 #[cfg(debug_assertions)]
 mod gallery;
 mod prefs;
+mod programs;
 mod settings;
 mod shell;
 pub(crate) mod theme;
