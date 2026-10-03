@@ -909,6 +909,10 @@ button.io-chip {
   font-size: 30px;
   font-weight: 900;
   letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--io-accent-text);
+}
+
 /* --- History (#33) --------------------------------------------------------------------------- */
 
 .io-back {
@@ -1301,6 +1305,8 @@ a.io-chip {
   font-family: var(--io-font-mono);
   font-size: 13px;
   font-weight: 700;
+}
+
 /* --- Workout session (#28) -------------------------------------------------------------------- */
 
 .io-session {
