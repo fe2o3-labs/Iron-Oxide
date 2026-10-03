@@ -178,6 +178,10 @@ pub const UPLOAD_BODY_LIMIT: usize = 2 * MAX_DOCUMENT_BYTES + 16 * 1024;
 
 /// The path of [`upload_program`]. Its body is exempt from the server's default body cap
 /// (`server::limits`): it reads its own, up to [`UPLOAD_BODY_LIMIT`].
+#[cfg_attr(
+    not(feature = "server"),
+    allow(dead_code, reason = "used by the server's body limits only")
+)]
 pub const UPLOAD_PATH: &str = "/api/programs/upload";
 
 // Server functions read their body with axum's default limit (2 MiB) and panic past it, so the
