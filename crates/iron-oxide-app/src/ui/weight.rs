@@ -6,7 +6,7 @@
 //! The arithmetic is the domain's integer arithmetic, never floats.
 
 use dioxus::prelude::*;
-use iron_oxide_domain::{Unit, Weight};
+use iron_oxide_domain::{Rounding, Unit, Weight};
 
 /// Decimals shown for a weight.
 pub const WEIGHT_DECIMALS: u8 = 2;
@@ -21,6 +21,37 @@ pub fn weight_number(weight: Weight, unit: Unit) -> String {
 #[must_use]
 pub fn weight_text(weight: Weight, unit: Unit) -> String {
     format!("{} {}", weight_number(weight, unit), unit.symbol())
+}
+
+/// What an estimate (an e1RM) is rounded to for display: 0.5 kg or 1 lb. An estimate is not a
+/// load on the bar, so `169.17 kg` would be false precision.
+#[must_use]
+pub fn estimate_increment(unit: Unit) -> Weight {
+    let nanograms = match unit {
+        Unit::Kg => 500_000_000_000,
+        Unit::Lb => 453_592_370_000,
+    };
+    Weight::from_nanograms(nanograms).unwrap_or(Weight::ZERO)
+}
+
+/// An estimate rounded to the nearest [`estimate_increment`] of `unit` (exact, integer).
+#[must_use]
+pub fn rounded_estimate(weight: Weight, unit: Unit) -> Weight {
+    weight
+        .round_to(estimate_increment(unit), Rounding::Nearest)
+        .unwrap_or(weight)
+}
+
+/// An estimate's number alone, rounded: `"169"`, `"93.5"`, `"373"`.
+#[must_use]
+pub fn estimate_number(weight: Weight, unit: Unit) -> String {
+    weight_number(rounded_estimate(weight, unit), unit)
+}
+
+/// An estimate with its unit symbol, rounded: `"169 kg"`.
+#[must_use]
+pub fn estimate_text(weight: Weight, unit: Unit) -> String {
+    weight_text(rounded_estimate(weight, unit), unit)
 }
 
 /// The unit's name for screen readers: `"kilograms"`, `"pounds"`.
@@ -55,8 +86,8 @@ pub fn step_weight(
     moved.clamp(min, max.max(min))
 }
 
-/// The user's display unit, provided by the app root. Kilograms until the settings screen (#34)
-/// loads the user's choice into it.
+/// The user's display unit, provided by the app root. Kilograms until the user's settings are
+/// loaded (`crate::ui::settings`, as soon as the session is signed in), then theirs.
 #[derive(Clone, Copy, PartialEq)]
 pub struct UnitSetting(pub Signal<Unit>);
 
@@ -120,6 +151,20 @@ mod tests {
         assert_eq!(weight_text(lb(225.0), Unit::Lb), "225 lb");
         assert_eq!(unit_name(Unit::Kg), "kilograms");
         assert_eq!(unit_name(Unit::Lb), "pounds");
+    }
+
+    #[test]
+    fn estimates_round_to_half_a_kilo_or_a_pound() {
+        assert_eq!(estimate_text(kg(169.17), Unit::Kg), "169 kg");
+        assert_eq!(estimate_text(kg(93.33), Unit::Kg), "93.5 kg");
+        assert_eq!(estimate_text(kg(116.25), Unit::Kg), "116.5 kg");
+        assert_eq!(estimate_number(kg(100.0), Unit::Kg), "100");
+        // 169.17 kg = 372.95 lb.
+        assert_eq!(estimate_text(kg(169.17), Unit::Lb), "373 lb");
+        assert_eq!(estimate_number(lb(225.4), Unit::Lb), "225");
+        assert_eq!(rounded_estimate(Weight::ZERO, Unit::Kg), Weight::ZERO);
+        // Set weights keep their exact display.
+        assert_eq!(weight_text(kg(102.25), Unit::Kg), "102.25 kg");
     }
 
     #[test]

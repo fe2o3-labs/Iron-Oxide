@@ -5,6 +5,13 @@
 //! - `components`: the reusable components.
 //! - `errors`: the banner every server error is reported to.
 //! - `weight`: weights in the user's unit.
+//! - `user_settings`: the user's settings, shared by every screen, loaded and saved there.
+//! - `settings`: the Settings page.
+//! - `prefs`: preferences kept on this device only.
+//! - `programs`: the Programs page.
+//! - `history`: the history screens (#33).
+//! - `home`: the home screen (#27).
+//! - `session`: the workout session screens (#28).
 
 mod account;
 #[cfg_attr(
@@ -27,8 +34,16 @@ mod components;
 mod errors;
 #[cfg(debug_assertions)]
 mod gallery;
+mod history;
+mod home;
+mod prefs;
+mod programs;
+mod session;
+mod settings;
 mod shell;
 pub(crate) mod theme;
+pub mod unsaved;
+mod user_settings;
 #[cfg_attr(
     not(debug_assertions),
     allow(
@@ -50,7 +65,11 @@ use shell::Route;
 pub fn App() -> Element {
     shell::use_session_provider();
     errors::use_errors_provider();
-    weight::use_unit_provider();
+    let unit = weight::use_unit_provider();
+    let settings = user_settings::use_settings_provider(unit);
+    prefs::use_device_prefs_provider(settings);
+    programs::use_program_intents_provider();
+    crate::offline::use_outbox_provider();
 
     rsx! {
         document::Title { "Iron Oxide" }
@@ -71,5 +90,6 @@ pub fn App() -> Element {
         document::Stylesheet { href: theme::APP_CSS }
         Router::<Route> {}
         BannerHost {}
+        unsaved::Unsaved {}
     }
 }

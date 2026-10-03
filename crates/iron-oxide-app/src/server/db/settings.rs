@@ -53,7 +53,12 @@ impl UserSettings {
         Self {
             unit: Unit::Kg,
             bar_weight_ng: 20_000_000_000_000,
-            plate_inventory: JsonValue::Array(Vec::new()),
+            // The domain's default kg plates, as the column default since
+            // `20261003120000_settings_need_a_bar_and_plates`.
+            plate_inventory: serde_json::to_value(iron_oxide_domain::PlateInventory::default_for(
+                iron_oxide_domain::Unit::Kg,
+            ))
+            .unwrap_or(JsonValue::Null),
             default_rest_s: 120,
             sound_enabled: true,
         }
@@ -209,6 +214,15 @@ mod tests {
                 plate_inventory: JsonValue::Array(vec![json!({}); 17]),
                 ..UserSettings::defaults()
             },
+            // No bar, no plates (#34).
+            UserSettings {
+                bar_weight_ng: 0,
+                ..UserSettings::defaults()
+            },
+            UserSettings {
+                plate_inventory: JsonValue::Array(Vec::new()),
+                ..UserSettings::defaults()
+            },
         ] {
             let error = save(&pool, user, &bad).await.unwrap_err();
             assert!(matches!(error, RepoError::Invalid { .. }), "{error:?}");
@@ -226,5 +240,71 @@ mod tests {
         // B saving creates B's row and leaves A's alone.
         save(&pool, b, &UserSettings::defaults()).await.unwrap();
         assert_eq!(find(&pool, a).await.unwrap(), Some(custom()));
+    }
+
+    /// The migration that requires a bar and plates fixes the rows saved before it: a row
+    /// violating the new rule before the migration is valid after it, and others are untouched.
+    #[sqlx::test(migrations = false)]
+    #[ignore = "needs Postgres"]
+    async fn the_bar_and_plates_migration_fixes_stored_rows(pool: PgPool) {
+        const FIX: i64 = 20_261_003_120_000;
+        for migration in MIGRATOR.iter().filter(|migration| migration.version < FIX) {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        let (broken, fine) = testing::users_a_and_b(&pool).await;
+        sqlx::query(
+            "INSERT INTO user_settings (user_id, unit, bar_weight_ng, plate_inventory) \
+             VALUES ($1, 'lb', 0, '[]'), ($2, 'lb', 15000000000000, '[{\"plate\": 20.0, \"pairs\": 4}]')",
+        )
+        .bind(broken.as_uuid())
+        .bind(fine.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let fix = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == FIX)
+            .expect("the migration exists");
+        sqlx::raw_sql(&fix.sql).execute(&pool).await.unwrap();
+        for migration in MIGRATOR.iter().filter(|migration| migration.version > FIX) {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+
+        let fixed = find(&pool, broken).await.unwrap().unwrap();
+        assert_eq!(fixed.bar_weight_ng, UserSettings::defaults().bar_weight_ng);
+        assert_eq!(
+            fixed.plate_inventory,
+            UserSettings::defaults().plate_inventory
+        );
+        assert_eq!(fixed.unit, Unit::Lb);
+        // It parses as the domain's inventory, and the rest of the row is kept.
+        let inventory: iron_oxide_domain::PlateInventory =
+            serde_json::from_value(fixed.plate_inventory).unwrap();
+        assert_eq!(
+            inventory,
+            iron_oxide_domain::PlateInventory::default_for(iron_oxide_domain::Unit::Kg)
+        );
+        assert_eq!(
+            find(&pool, fine).await.unwrap(),
+            Some(UserSettings {
+                unit: Unit::Lb,
+                bar_weight_ng: 15_000_000_000_000,
+                plate_inventory: json!([{"plate": 20.0, "pairs": 4}]),
+                ..UserSettings::defaults()
+            })
+        );
+        // And the rule now holds in the database.
+        let error = save(
+            &pool,
+            fine,
+            &UserSettings {
+                bar_weight_ng: 0,
+                ..UserSettings::defaults()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, RepoError::Invalid { .. }), "{error:?}");
     }
 }

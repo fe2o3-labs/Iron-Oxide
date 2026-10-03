@@ -317,11 +317,36 @@ impl<S: Send + Sync> FromRequestParts<S> for AuthUser {
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let ctx = AuthContext::from_request_parts(parts, state).await?;
-        match ctx.require_user().await {
-            Ok(user_id) => Ok(Self { user_id }),
-            Err(error) => Err(ServerFnError::from(error).into_response()),
+        let user_id = match ctx.require_user().await {
+            Ok(user_id) => user_id,
+            Err(error) => return Err(ServerFnError::from(error).into_response()),
+        };
+        if !expected_user_matches(&parts.headers, user_id) {
+            let refused =
+                crate::server::api::ApiError::conflict(crate::auth::types::ACCOUNT_CHANGED_MESSAGE);
+            return Err(ServerFnError::from(refused).into_response());
         }
+        Ok(Self { user_id })
     }
+}
+
+/// Whether the request's [`EXPECTED_USER_HEADER`] (if any) names `user`. A header that is not
+/// one valid id, or several headers, never match: the outbox always sends exactly one.
+///
+/// [`EXPECTED_USER_HEADER`]: crate::auth::types::EXPECTED_USER_HEADER
+fn expected_user_matches(headers: &dioxus::server::axum::http::HeaderMap, user: UserId) -> bool {
+    let mut values = headers
+        .get_all(crate::auth::types::EXPECTED_USER_HEADER)
+        .iter();
+    let Some(value) = values.next() else {
+        return true;
+    };
+    values.next().is_none()
+        && value
+            .to_str()
+            .ok()
+            .and_then(|text| uuid::Uuid::parse_str(text.trim()).ok())
+            .is_some_and(|expected| expected == user.as_uuid())
 }
 
 #[cfg(test)]
@@ -335,6 +360,27 @@ pub(crate) mod tests {
             .unwrap()
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn the_expected_user_header_must_name_the_session_user_when_present() {
+        use crate::auth::types::EXPECTED_USER_HEADER;
+        use dioxus::server::axum::http::{HeaderMap, HeaderValue};
+        let user = UserId::from_uuid(uuid::Uuid::from_u128(1));
+        let with = |values: &[&str]| {
+            let mut headers = HeaderMap::new();
+            for value in values {
+                headers.append(EXPECTED_USER_HEADER, HeaderValue::from_str(value).unwrap());
+            }
+            headers
+        };
+        let mine = user.as_uuid().to_string();
+        let other = uuid::Uuid::from_u128(2).to_string();
+        assert!(expected_user_matches(&HeaderMap::new(), user));
+        assert!(expected_user_matches(&with(&[&mine]), user));
+        assert!(!expected_user_matches(&with(&[&other]), user));
+        assert!(!expected_user_matches(&with(&["not-a-uuid"]), user));
+        assert!(!expected_user_matches(&with(&[&mine, &other]), user));
     }
 
     #[test]

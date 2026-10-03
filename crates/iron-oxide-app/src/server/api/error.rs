@@ -41,6 +41,13 @@ pub enum ApiError {
     /// user did not send.
     #[error("invalid: {0}")]
     Invalid(Cow<'static, str>),
+    /// `422`: one invalid field of the input. The message is shown to the user; the error's
+    /// `details` are `{"field": path}` (e.g. `bar_weight`), for the UI to point at it.
+    #[error("invalid {field}: {message}")]
+    InvalidField {
+        field: &'static str,
+        message: Cow<'static, str>,
+    },
     /// `422`: an invalid program document. The error's `details` carry the problems, each with its
     /// JSON path ([`ProgramProblems`]), for the UI to list.
     #[error("invalid program: {} problem(s)", .0.errors.len() + .0.omitted)]
@@ -89,6 +96,16 @@ impl ApiError {
         Self::Invalid(message.into())
     }
 
+    /// A `422` about one field (`field` is its path in the request, such as `bar_weight`), with a
+    /// message for the user.
+    #[must_use]
+    pub fn invalid_field(field: &'static str, message: impl Into<Cow<'static, str>>) -> Self {
+        Self::InvalidField {
+            field,
+            message: message.into(),
+        }
+    }
+
     /// A `500`; `detail` is logged, never returned.
     #[must_use]
     pub fn internal(detail: impl std::fmt::Display) -> Self {
@@ -101,7 +118,7 @@ impl ApiError {
         match self {
             Self::NotFound => (404, NOT_FOUND),
             Self::Conflict(message) => (409, message),
-            Self::Invalid(message) => (422, message),
+            Self::Invalid(message) | Self::InvalidField { message, .. } => (422, message),
             Self::InvalidProgram(_) => (422, INVALID_PROGRAM),
             Self::InvalidProgramIn(message, _) => (422, message),
             Self::TooLarge(message) => (413, message),
@@ -135,6 +152,7 @@ impl From<ApiError> for ServerFnError {
                 serde_json::to_value(problems).ok()
             }
             ApiError::Busy(secs) => Some(serde_json::json!({ "retry_after_secs": secs })),
+            ApiError::InvalidField { field, .. } => Some(serde_json::json!({ "field": field })),
             _ => None,
         };
         ServerFnError::ServerError {
@@ -281,6 +299,21 @@ mod tests {
             } => (code, message),
             other => panic!("not a server error without details: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_field_error_names_its_field_in_the_details() {
+        let error = ServerFnError::from(ApiError::invalid_field("bar_weight", "Too light."));
+        let ServerFnError::ServerError {
+            code,
+            message,
+            details,
+        } = error
+        else {
+            panic!("{error:?}");
+        };
+        assert_eq!((code, message.as_str()), (422, "Too light."));
+        assert_eq!(details, Some(serde_json::json!({ "field": "bar_weight" })));
     }
 
     #[test]

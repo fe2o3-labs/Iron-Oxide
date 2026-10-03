@@ -10,28 +10,40 @@
 //! backoff until the server answers; a `401` then shows the sign-in screen.
 
 use dioxus::prelude::*;
+use iron_oxide_domain::{ExerciseId, SessionId};
 
 use super::account::Account;
 use super::components::icons::{HistoryIcon, HomeIcon, ProgramsIcon, SettingsIcon};
-use super::components::{Card, EmptyState, LoadingState};
+use super::components::{EmptyState, LoadingState};
 use super::errors::{BannerKind, use_errors};
+use super::history::{ExerciseProgress, History, HistoryLayout, HistorySession};
+use super::home::Home;
 use crate::api::error::{ApiFailure, FailureKind};
 use crate::auth::api::{is_unauthorized, me};
 use crate::auth::browser;
 
-/// The app's pages. Home, History, Programs and Settings are filled by their own tickets.
+/// The app's pages. Home, History, Programs and Settings are filled by their own tickets; Workout
+/// is the session in progress (#28), full screen: no bottom navigation.
 #[derive(Routable, Clone, PartialEq, Debug)]
 #[rustfmt::skip]
 pub enum Route {
     #[layout(Shell)]
         #[route("/")]
         Home {},
-        #[route("/history")]
-        History {},
+        #[layout(HistoryLayout)]
+            #[route("/history")]
+            History {},
+            #[route("/history/session/:id")]
+            HistorySession { id: SessionId },
+            #[route("/history/exercise/:exercise")]
+            ExerciseProgress { exercise: ExerciseId },
+        #[end_layout]
         #[route("/programs")]
         Programs {},
         #[route("/settings")]
         Settings {},
+        #[route("/session")]
+        Workout {},
         #[route("/:..segments")]
         NotFound { segments: Vec<String> },
     #[end_layout]
@@ -97,6 +109,9 @@ pub fn set_session(mut session: Signal<SessionStatus>, status: SessionStatus) {
 fn Shell() -> Element {
     let session = use_session();
     let errors = use_errors();
+    let route = use_route::<Route>();
+    // The workout keeps the whole screen for the set: no bottom navigation.
+    let focused = matches!(route, Route::Workout {});
 
     // Client only: on the server the shell stays "Checking", so hydration matches.
     use_effect(move || {
@@ -123,11 +138,13 @@ fn Shell() -> Element {
             }
         },
         SessionStatus::SignedIn | SessionStatus::Unverified => rsx! {
-            div { class: "io-shell",
+            div { class: if focused { "io-shell io-shell-bare" } else { "io-shell" },
                 TopBar {}
                 main { class: "io-page", Outlet::<Route> {} }
             }
-            BottomNav {}
+            if !focused {
+                BottomNav {}
+            }
         },
     }
 }
@@ -216,6 +233,15 @@ fn nav_items() -> [NavItem; 4] {
     ]
 }
 
+/// Whether `current` is in the section of the tab `tab` (the history tab covers a session's
+/// details and an exercise's charts).
+fn in_section(tab: &Route, current: &Route) -> bool {
+    match (tab, current) {
+        (Route::History {}, Route::HistorySession { .. } | Route::ExerciseProgress { .. }) => true,
+        _ => tab == current,
+    }
+}
+
 /// The bottom navigation: four 64 px tabs, above the home indicator.
 #[component]
 fn BottomNav() -> Element {
@@ -227,7 +253,10 @@ fn BottomNav() -> Element {
                     li { key: "{item.label}",
                         Link {
                             to: item.route.clone(),
-                            aria_current: if item.route == current { "page" } else { "false" },
+                            // `Link` sets `aria-current="page"` itself on an exact match (and drops
+                            // any other value on navigation); the tab's highlight follows the
+                            // section, so a session's details still light History.
+                            "data-section": in_section(&item.route, &current),
                             {(item.icon)()}
                             span { "{item.label}" }
                         }
@@ -252,47 +281,18 @@ fn PageHeader(#[props(into)] title: String, #[props(into)] subtitle: Option<Stri
 }
 
 #[component]
-fn Home() -> Element {
-    rsx! {
-        PageHeader { title: "Today" }
-        EmptyState {
-            title: "Nothing planned",
-            message: "Your program's next workout will show up here.",
-        }
-    }
-}
-
-#[component]
-fn History() -> Element {
-    rsx! {
-        PageHeader { title: "History" }
-        EmptyState {
-            title: "No workouts yet",
-            message: "Finished workouts and your records will show up here.",
-        }
-    }
-}
-
-#[component]
 fn Programs() -> Element {
-    rsx! {
-        PageHeader { title: "Programs" }
-        EmptyState {
-            title: "No program yet",
-            message: "Pick a built-in program or upload your own here.",
-        }
-    }
+    rsx! { super::programs::ProgramsPage {} }
 }
 
 #[component]
 fn Settings() -> Element {
-    rsx! {
-        PageHeader { title: "Settings" }
-        Account {}
-        Card { title: "Units",
-            p { class: "io-muted", "Weights are shown in kilograms." }
-        }
-    }
+    rsx! { super::settings::SettingsPage {} }
+}
+
+#[component]
+fn Workout() -> Element {
+    rsx! { super::session::SessionPage {} }
 }
 
 #[component]
@@ -334,7 +334,27 @@ mod tests {
         assert_eq!(Route::History {}.to_string(), "/history");
         assert_eq!(Route::Programs {}.to_string(), "/programs");
         assert_eq!(Route::Settings {}.to_string(), "/settings");
+        assert_eq!(Route::Workout {}.to_string(), "/session");
         assert_eq!(Route::Gallery {}.to_string(), "/dev/components");
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(7));
+        let path = format!("/history/session/{session}");
+        assert_eq!(Route::HistorySession { id: session }.to_string(), path);
+        assert_eq!(
+            path.parse::<Route>().unwrap(),
+            Route::HistorySession { id: session }
+        );
+        let exercise = ExerciseId::new("back-squat").unwrap();
+        assert_eq!(
+            Route::ExerciseProgress {
+                exercise: exercise.clone()
+            }
+            .to_string(),
+            "/history/exercise/back-squat"
+        );
+        assert_eq!(
+            "/history/exercise/back-squat".parse::<Route>().unwrap(),
+            Route::ExerciseProgress { exercise }
+        );
         assert_eq!("/history".parse::<Route>().unwrap(), Route::History {});
         assert_eq!(
             "/nope/x".parse::<Route>().unwrap(),
@@ -342,6 +362,18 @@ mod tests {
                 segments: vec!["nope".to_owned(), "x".to_owned()]
             }
         );
+    }
+
+    #[test]
+    fn the_history_tab_covers_its_screens() {
+        let history = Route::History {};
+        let session = Route::HistorySession {
+            id: SessionId::from_uuid(uuid::Uuid::from_u128(7)),
+        };
+        assert!(in_section(&history, &history));
+        assert!(in_section(&history, &session));
+        assert!(!in_section(&Route::Home {}, &session));
+        assert!(!in_section(&Route::Home {}, &history));
     }
 
     #[test]
