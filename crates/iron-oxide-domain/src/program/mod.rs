@@ -56,7 +56,14 @@ pub use values::{
 use crate::{DayId, ExerciseId};
 
 /// Where the program JSON Schema is published, for the `$schema` field of a program document.
-pub const PROGRAM_SCHEMA_URL: &str = "https://raw.githubusercontent.com/guizmaii-opensource/Iron-Oxide/main/schemas/program.schema.json";
+pub const PROGRAM_SCHEMA_URL: &str =
+    "https://raw.githubusercontent.com/fe2o3-labs/Iron-Oxide/main/schemas/program.schema.json";
+
+/// The schema URL from before the repository moved to `fe2o3-labs`. Documents stored or saved
+/// earlier may still carry it, so it is accepted when reading a `$schema` field. It is never
+/// written: a document always serialises with [`PROGRAM_SCHEMA_URL`]. This is the only place the
+/// old owner's name may appear.
+pub const LEGACY_PROGRAM_SCHEMA_URL: &str = "https://raw.githubusercontent.com/guizmaii-opensource/Iron-Oxide/main/schemas/program.schema.json";
 
 /// The program JSON Schema, as committed in `schemas/program.schema.json`.
 pub const PROGRAM_SCHEMA_JSON: &str = include_str!("../../../../schemas/program.schema.json");

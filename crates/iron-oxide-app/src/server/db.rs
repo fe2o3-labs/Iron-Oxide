@@ -50,6 +50,28 @@ const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_LIFETIME: Duration = Duration::from_secs(5 * 60);
 /// Idle connections are closed after this long (Neon: under 5 minutes).
 const IDLE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+/// Server-side deadlines set on every pooled connection (#74): what bounds a server function's
+/// database work (there is no HTTP timeout on `/api/` calls, see `server::limits`). Each one aborts
+/// the statement or ends the session, and the open transaction is rolled back: `503`.
+/// - `statement_timeout`: one statement.
+/// - `idle_in_transaction_session_timeout`: a transaction left open while the app does something
+///   else (or is stuck).
+/// - `transaction_timeout` (Postgres 17+; we run 18): a whole transaction.
+pub const STATEMENT_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The `SET`s applied to every new connection: see [`STATEMENT_DEADLINE`].
+const SESSION_DEADLINES: &str = "SET statement_timeout = '5s'; \
+     SET idle_in_transaction_session_timeout = '5s'; \
+     SET transaction_timeout = '5s'";
+// The `SET`s above spell out `STATEMENT_DEADLINE`: keep them in step.
+const _: () = assert!(STATEMENT_DEADLINE.as_secs() == 5);
+
+/// Turns the deadlines off again, for the migrations: they may wait for another instance's
+/// migration lock or rebuild an index for longer.
+const NO_SESSION_DEADLINES: &str = "SET statement_timeout = 0; \
+     SET idle_in_transaction_session_timeout = 0; \
+     SET transaction_timeout = 0";
+
 /// How long `/readyz` waits for `SELECT 1`.
 pub const PING_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -114,6 +136,12 @@ fn pool_options() -> PgPoolOptions {
         .idle_timeout(IDLE_TIMEOUT)
         // Neon closes connections of a suspended compute: check before handing one out.
         .test_before_acquire(true)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::Executor::execute(&mut *connection, SESSION_DEADLINES).await?;
+                Ok(())
+            })
+        })
 }
 
 /// Creates the pool and checks that a first connection can be opened, retrying with exponential
@@ -158,8 +186,18 @@ pub async fn connect(url: &DatabaseUrl, retry: RetryPolicy) -> Result<PgPool, Db
 /// Applies the pending embedded migrations. Safe to run on every start: applied ones are skipped,
 /// and a Postgres advisory lock serialises concurrent runs (which is why the Neon endpoint must be
 /// the direct one, not the transaction pooler).
+///
+/// They run on a connection of their own, without the [`STATEMENT_DEADLINE`]s, which is then
+/// closed rather than returned to the pool.
 pub async fn migrate(pool: &PgPool) -> Result<(), DbError> {
-    MIGRATOR.run(pool).await?;
+    let mut connection = pool.acquire().await.map_err(MigrateError::from)?.detach();
+    sqlx::Executor::execute(&mut connection, NO_SESSION_DEADLINES)
+        .await
+        .map_err(MigrateError::from)?;
+    MIGRATOR.run(&mut connection).await?;
+    if let Err(error) = sqlx::Connection::close(connection).await {
+        tracing::warn!(%error, "could not close the migration connection");
+    }
     tracing::info!("database migrations are up to date");
     Ok(())
 }
@@ -334,5 +372,107 @@ pub(crate) mod tests {
         let url = DatabaseUrl::parse(&std::env::var("DATABASE_URL").unwrap()).unwrap();
         let pool = connect(&url, RetryPolicy::STARTUP).await.unwrap();
         ping(&pool, PING_TIMEOUT).await.unwrap();
+    }
+
+    /// A pool with the app's settings (deadlines included) on the test's database.
+    async fn app_pool(options: sqlx::postgres::PgConnectOptions) -> PgPool {
+        let pool = pool_options().connect_with(options).await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS deadline_probe (id int)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    async fn probe_rows(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM deadline_probe")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    fn code(error: &sqlx::Error) -> Option<String> {
+        error
+            .as_database_error()
+            .and_then(|e| e.code())
+            .map(|c| c.into_owned())
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "needs Postgres"]
+    async fn every_pooled_connection_has_the_deadlines(
+        _: PgPoolOptions,
+        options: sqlx::postgres::PgConnectOptions,
+    ) {
+        let pool = app_pool(options).await;
+        for setting in [
+            "statement_timeout",
+            "idle_in_transaction_session_timeout",
+            "transaction_timeout",
+        ] {
+            let value: String = sqlx::query_scalar(&format!("SHOW {setting}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(value, "5s", "{setting}");
+        }
+        // The migrations run without them, on a connection that is not returned to the pool.
+        migrate(&pool).await.unwrap();
+        let value: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(value, "5s");
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "needs Postgres"]
+    async fn a_slow_statement_in_a_write_transaction_is_aborted_and_nothing_commits(
+        _: PgPoolOptions,
+        options: sqlx::postgres::PgConnectOptions,
+    ) {
+        let pool = app_pool(options).await;
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("INSERT INTO deadline_probe VALUES (1)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let error = sqlx::query("SELECT pg_sleep(30)")
+            .execute(&mut *tx)
+            .await
+            .unwrap_err();
+        // The statement's or the transaction's deadline, whichever comes first (both are 5 s, and
+        // the transaction started earlier).
+        assert!(
+            matches!(code(&error).as_deref(), Some("57014" | "25P04")),
+            "{error}"
+        );
+        assert!(crate::server::api::error::is_transient(&error));
+        // The transaction is aborted: committing it rolls it back.
+        let _ = tx.commit().await;
+        assert_eq!(probe_rows(&pool).await, 0);
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "needs Postgres"]
+    async fn a_transaction_left_open_is_rolled_back_by_postgres(
+        _: PgPoolOptions,
+        options: sqlx::postgres::PgConnectOptions,
+    ) {
+        let pool = app_pool(options).await;
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("INSERT INTO deadline_probe VALUES (1)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        // The app is stuck elsewhere while its transaction is open.
+        tokio::time::sleep(STATEMENT_DEADLINE + Duration::from_secs(1)).await;
+        let error = tx.commit().await.unwrap_err();
+        assert!(
+            crate::server::api::error::is_transient(&error),
+            "{error} ({:?})",
+            code(&error)
+        );
+        assert_eq!(probe_rows(&pool).await, 0);
     }
 }

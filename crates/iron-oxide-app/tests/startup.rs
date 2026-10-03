@@ -308,23 +308,39 @@ fn a_stuck_client_cannot_hold_shutdown_past_the_grace_period() {
     assert!(logs.contains("shut down"), "{logs}");
 }
 
+/// Waits until nothing accepts connections on `port`: once draining starts, the server drops its
+/// listener, so this is how the test knows the first shutdown signal has been handled.
+fn wait_until_not_listening(port: u16) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        assert!(Instant::now() < deadline, "still listening after SIGTERM");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The grace period is 120 s and `Server::wait` kills the process after 60 s, so a server that
+/// exits with status 1 and logs the second signal was stopped by that signal, not by a timer.
+/// The test never compares wall-clock times, so machine load cannot make it fail (#80).
 #[cfg(unix)]
 #[test]
 #[ignore = "needs Postgres"]
 fn a_second_signal_stops_the_server_at_once() {
     let mut server = Server::start("second-signal", None, &[("SHUTDOWN_GRACE_SECS", "120")]);
     let _stuck = partial_request(server.port);
-    std::thread::sleep(Duration::from_millis(300));
+    // The listener accepts connections in order, so once this probe is answered the stuck
+    // connection before it has been accepted and is in flight.
+    let healthz = http_get(server.port, "/healthz").unwrap();
+    assert!(healthz.0.contains("200"), "{healthz:?}");
 
-    let started = Instant::now();
     server.signal("-TERM");
-    std::thread::sleep(Duration::from_millis(500));
+    // Draining has started (the listener is gone) and the stuck request keeps it from finishing.
+    wait_until_not_listening(server.port);
     server.signal("-INT");
     let output = server.wait();
     let logs = all_output(&output);
     assert_eq!(output.status.code(), Some(1), "{logs}");
-    assert!(started.elapsed() < Duration::from_secs(8), "{logs}");
     assert!(logs.contains("second shutdown signal"), "{logs}");
+    assert!(!logs.contains("after the grace period"), "{logs}");
 }
 
 /// Starts the server as a role whose password is full of URL-breaking characters
