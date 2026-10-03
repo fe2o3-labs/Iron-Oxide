@@ -239,7 +239,7 @@ mod tests {
     }
 
     /// Tap targets are 56 px; 44 px is only for the header's icon buttons (and the header rows:
-    /// the top bar and the workout's header).
+    /// the top bar and the workout's header, and the unsaved indicator's buttons in the top bar).
     #[test]
     fn only_header_icon_buttons_use_the_small_tap_size() {
         let css = css();
@@ -260,7 +260,12 @@ mod tests {
         selectors.dedup();
         assert_eq!(
             selectors,
-            [".io-icon-button", ".io-session-header", ".io-topbar"]
+            [
+                ".io-icon-button",
+                ".io-session-header",
+                ".io-topbar",
+                ".io-unsaved__button"
+            ]
         );
         assert!(block(&css, "button.io-chip {").contains("min-height: var(--io-tap);"));
         assert!(block(&css, ".io-banner .io-icon-button {").contains("height: var(--io-tap);"));
