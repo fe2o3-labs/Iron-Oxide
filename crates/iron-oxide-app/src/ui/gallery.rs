@@ -12,7 +12,9 @@ use super::components::{
     Stepper, WeightStepper,
 };
 use super::errors::{BannerKind, use_errors};
+use super::shell::unverified_message;
 use super::weight::{use_unit, weight_text};
+use crate::api::error::FailureKind;
 
 #[component]
 pub fn Gallery() -> Element {
@@ -110,7 +112,8 @@ fn Showcase() -> Element {
                 variant: ButtonVariant::Secondary,
                 onclick: move |_| {
                     errors.report(&ServerFnError::ServerError {
-                        message: "Too many requests.".to_owned(),
+                        // As our rate limiter sends it (server/rate_limit.rs).
+                        message: "Too many requests. Please try again in 42 seconds.".to_owned(),
                         code: 429,
                         details: Some(serde_json::json!({ "retry_after_secs": 42 })),
                     });
@@ -128,8 +131,20 @@ fn Showcase() -> Element {
             }
             Button {
                 variant: ButtonVariant::Secondary,
-                onclick: move |_| errors.show(BannerKind::Info, "Passkey added."),
+                onclick: move |_| {
+                    errors.show(BannerKind::Info, "Passkey added.");
+                },
                 "Show a note"
+            }
+            Button {
+                variant: ButtonVariant::Secondary,
+                onclick: move |_| {
+                    errors.show(
+                        BannerKind::Warning,
+                        unverified_message(FailureKind::Network),
+                    );
+                },
+                "Show offline"
             }
         }
         div { class: "io-banner", role: "presentation",

@@ -17,6 +17,7 @@ pub fn BannerHost() -> Element {
     let (class, role) = match banner.kind {
         BannerKind::Error => ("io-banner", "alert"),
         BannerKind::Info => ("io-banner io-banner-info", "status"),
+        BannerKind::Warning => ("io-banner io-banner-warning", "status"),
     };
     rsx! {
         div { class: "io-banners",
