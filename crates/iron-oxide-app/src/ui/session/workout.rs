@@ -70,7 +70,8 @@ pub fn Workout(initial: Active, on_reload: EventHandler<()>) -> Element {
     let remaining = flow::remaining(&steps, plan, &state.sets, &state.skipped);
 
     let mut finish = move |outcome: SessionOutcome| {
-        if *busy.peek() {
+        // A set waiting for "Retry save" would be lost: it must be saved first.
+        if *busy.peek() || pending.peek().is_some() {
             return;
         }
         let (outcome, at) = match *finishing.peek() {
@@ -233,7 +234,7 @@ pub fn Workout(initial: Active, on_reload: EventHandler<()>) -> Element {
     let target = flow::target_line(&step, &exercise, unit);
     let next = flow::next_line(&steps, index, next, plan, unit);
     let needs_training_max = matches!(planned.targets, NextTargets::NeedsTrainingMax { .. });
-    let prefill = flow::prefill(&step, &exercise.id, &state.sets);
+    let prefill = flow::prefill(&steps, &step, &exercise.id, &state.sets);
     let weight_step = flow::weight_step(&state.settings.plate_inventory, unit);
     let current_edit = edit().filter(|edit| edit.step == step).unwrap_or(Edit {
         step,
@@ -440,7 +441,7 @@ fn SetCard(
                     WeightStepper {
                         value,
                         step: weight_step,
-                                                disabled: locked,
+                        disabled: locked,
                         on_change: move |value| on_edit.call(Edit { weight: Some(value), ..edit }),
                     }
                 }
@@ -450,7 +451,12 @@ fn SetCard(
                 p { class: "io-session-next", "{next}" }
                 div { class: "io-session-more",
                     Button { variant: ButtonVariant::Ghost, disabled: locked || busy, onclick: move |_| on_skip.call(()), "Skip exercise" }
-                    Button { variant: ButtonVariant::Ghost, disabled: busy, onclick: move |_| on_finish.call(()), "Finish workout" }
+                    Button { variant: ButtonVariant::Ghost, disabled: locked || busy, onclick: move |_| on_finish.call(()), "Finish workout" }
+                }
+                if locked {
+                    p { class: "io-session-next", role: "status",
+                        "This set isn't saved yet: retry the save before finishing, or it would be lost."
+                    }
                 }
             }
         }
