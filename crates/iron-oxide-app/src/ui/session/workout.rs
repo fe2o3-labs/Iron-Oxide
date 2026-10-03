@@ -66,6 +66,8 @@ pub fn Workout(
     });
     // The screen stays on for the whole workout.
     use_hook(|| Rc::new(platform::ScreenAwake::keep()));
+    // Any tap, or the page coming back, resumes a suspended or interrupted audio context.
+    use_hook(|| Rc::new(platform::KeepAudioReady::new()));
 
     let state = active.read();
     let plan = &state.plan;
@@ -76,7 +78,8 @@ pub fn Workout(
     let remaining = flow::remaining(&steps, plan, &state.sets, &state.skipped);
 
     let mut finish = move |outcome: SessionOutcome| {
-        if *busy.peek() {
+        // A set waiting for "Retry save" would be lost: it must be saved first.
+        if *busy.peek() || pending.peek().is_some() {
             return;
         }
         let (outcome, at) = match *finishing.peek() {
@@ -243,7 +246,7 @@ pub fn Workout(
     let target = flow::target_line(&step, &exercise, unit);
     let next = flow::next_line(&steps, index, next, plan, unit);
     let needs_training_max = matches!(planned.targets, NextTargets::NeedsTrainingMax { .. });
-    let prefill = flow::prefill(&step, &exercise.id, &state.sets);
+    let prefill = flow::prefill(&steps, &step, &exercise.id, &state.sets);
     let weight_step = flow::weight_step(&state.settings.plate_inventory, unit);
     let current_edit = edit().filter(|edit| edit.step == step).unwrap_or(Edit {
         step,
@@ -343,12 +346,12 @@ struct Edit {
 fn rest_length(state: &Active, done: Step) -> Option<iron_oxide_domain::Seconds> {
     let steps = flow::steps(&state.plan, state.settings.bar_weight);
     let index = steps.iter().position(|step| *step == done)?;
-    let has_next = flow::current_step(&steps, &state.plan, &state.sets, &state.skipped).is_some();
+    let next = flow::current_step(&steps, &state.plan, &state.sets, &state.skipped);
     flow::rest_after(
         &state.plan,
         &steps,
         index,
-        has_next,
+        next,
         state.settings.default_rest,
     )
 }
@@ -450,7 +453,7 @@ fn SetCard(
                     WeightStepper {
                         value,
                         step: weight_step,
-                                                disabled: locked,
+                        disabled: locked,
                         on_change: move |value| on_edit.call(Edit { weight: Some(value), ..edit }),
                     }
                 }
@@ -460,7 +463,12 @@ fn SetCard(
                 p { class: "io-session-next", "{next}" }
                 div { class: "io-session-more",
                     Button { variant: ButtonVariant::Ghost, disabled: locked || busy, onclick: move |_| on_skip.call(()), "Skip exercise" }
-                    Button { variant: ButtonVariant::Ghost, disabled: busy, onclick: move |_| on_finish.call(()), "Finish workout" }
+                    Button { variant: ButtonVariant::Ghost, disabled: locked || busy, onclick: move |_| on_finish.call(()), "Finish workout" }
+                }
+                if locked {
+                    p { class: "io-session-next", role: "status",
+                        "This set isn't saved yet: retry the save before finishing, or it would be lost."
+                    }
                 }
             }
         }

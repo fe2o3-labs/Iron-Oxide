@@ -84,8 +84,31 @@ pub fn unlock_audio() {
     web::unlock_audio();
 }
 
+/// Keeps the audio ready while it is alive: the next tap or key anywhere on the page, and the page
+/// becoming visible again, resume an audio context the browser suspended or iOS "interrupted"
+/// (a lock screen, a call). Dropping it stops listening.
+pub struct KeepAudioReady {
+    #[cfg(feature = "web")]
+    _inner: Vec<web::DocumentListener>,
+}
+
+impl KeepAudioReady {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            #[cfg(feature = "web")]
+            _inner: ["click", "touchend", "keydown", "visibilitychange"]
+                .into_iter()
+                .map(|event| web::DocumentListener::new(event, web::unlock_audio))
+                .collect(),
+        }
+    }
+}
+
 /// Plays `cue`'s beeps when `sound` is on, and vibrates where the device can. Best effort: a
-/// browser without Web Audio or vibration just skips that part.
+/// browser without Web Audio or vibration just skips that part. Beeps are only scheduled on a
+/// running audio context: one that is suspended would play them late, at the next tap, so they
+/// are dropped instead.
 pub fn announce(cue: Cue, sound: bool) {
     #[cfg(feature = "web")]
     web::announce(cue, sound);
@@ -164,8 +187,17 @@ mod web {
                     let _ = beep(context, 0.0, 0.01, 0.0001);
                 }
             }
+            // A closed context cannot come back: start a new one.
+            if audio
+                .as_ref()
+                .is_some_and(|context| context.state() == AudioContextState::Closed)
+            {
+                *audio = AudioContext::new().ok();
+            }
+            // Suspended, or WebKit's non-standard "interrupted" (which web-sys does not name):
+            // anything but running is resumed.
             if let Some(context) = audio.as_ref()
-                && context.state() == AudioContextState::Suspended
+                && context.state() != AudioContextState::Running
             {
                 let _ = context.resume();
             }
@@ -178,7 +210,9 @@ mod web {
             // browser allows it (not on iOS, which stays silent until the next tap).
             unlock_audio();
             AUDIO.with(|audio| {
-                if let Some(context) = audio.borrow().as_ref() {
+                if let Some(context) = audio.borrow().as_ref()
+                    && context.state() == AudioContextState::Running
+                {
                     let beeps: &[f64] = match cue {
                         Cue::Warning => &[0.0],
                         Cue::Finished => &[0.0, 0.3, 0.6],
@@ -233,6 +267,38 @@ mod web {
 
     fn visible() -> bool {
         document().is_some_and(|document| document.visibility_state() == VisibilityState::Visible)
+    }
+
+    /// A listener for `event` on the document, removed on drop.
+    pub struct DocumentListener {
+        event: &'static str,
+        listener: Option<Closure<dyn FnMut()>>,
+    }
+
+    impl DocumentListener {
+        pub fn new(event: &'static str, callback: impl FnMut() + 'static) -> Self {
+            let listener = Closure::<dyn FnMut()>::new(callback);
+            let added = document().is_some_and(|document| {
+                document
+                    .add_event_listener_with_callback(event, listener.as_ref().unchecked_ref())
+                    .is_ok()
+            });
+            Self {
+                event,
+                listener: added.then_some(listener),
+            }
+        }
+    }
+
+    impl Drop for DocumentListener {
+        fn drop(&mut self) {
+            if let (Some(listener), Some(document)) = (self.listener.take(), document()) {
+                let _ = document.remove_event_listener_with_callback(
+                    self.event,
+                    listener.as_ref().unchecked_ref(),
+                );
+            }
+        }
     }
 
     pub struct OnVisible {
