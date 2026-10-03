@@ -6,14 +6,14 @@
 
 use dioxus::prelude::*;
 use iron_oxide_domain::time::Timestamp;
-use iron_oxide_domain::{ExerciseId, LoggedSet, PrKind, Seconds, Unit};
+use iron_oxide_domain::{ExerciseId, LoggedSet, PrKind, Seconds, Unit, Volume};
 
 use super::flow;
 use crate::api::sessions::{SessionPlan, SessionSummary, get_next_session_plan};
 use crate::ui::components::{Button, Card};
 use crate::ui::errors::use_errors;
 use crate::ui::shell::Route;
-use crate::ui::weight::{use_unit, weight_text};
+use crate::ui::weight::{WEIGHT_DECIMALS, use_unit, weight_text};
 
 /// A finished workout, as the summary shows it.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +31,23 @@ pub fn duration_text(started_at: Timestamp, finished_at: Option<Timestamp>) -> S
         u64::try_from(end.epoch_millis().saturating_sub(started_at.epoch_millis())).unwrap_or(0)
     });
     Seconds::new(u32::try_from(millis / 1_000).unwrap_or(u32::MAX)).to_string()
+}
+
+/// A volume as a number in `unit`, formatted like every weight of the app (up to two decimals,
+/// no trailing zeros): `1937.5`, `3500`.
+#[must_use]
+pub fn volume_number(volume: Volume, unit: Unit) -> String {
+    volume.format_value(unit, WEIGHT_DECIMALS)
+}
+
+/// The size of a stat's number, in px: smaller for long values so they fit a third of the screen.
+#[must_use]
+pub fn stat_size(text: &str) -> u32 {
+    match text.chars().count() {
+        0..=5 => 32,
+        6 | 7 => 26,
+        _ => 22,
+    }
 }
 
 /// The working sets logged (warm-ups left out, as in the volume).
@@ -100,7 +117,8 @@ pub fn SummaryScreen(finished: Finished) -> Element {
     } = finished;
     let duration = duration_text(summary.session.started_at, summary.session.finished_at);
     // The number alone fits a third of the screen; the unit goes in the label.
-    let volume = summary.volume.format_value(unit, 0);
+    let volume = volume_number(summary.volume, unit);
+    let volume_size = stat_size(&volume);
     let volume_label = format!("{} volume", unit.symbol());
     let set_count = working_sets(&sets);
     let records: Vec<(String, String)> = summary
@@ -151,7 +169,7 @@ pub fn SummaryScreen(finished: Finished) -> Element {
                 }
                 div { class: "io-summary-stat",
                     dt { "{volume_label}" }
-                    dd { "{volume}" }
+                    dd { style: "font-size: {volume_size}px", "{volume}" }
                 }
                 div { class: "io-summary-stat",
                     dt { "Sets" }
@@ -240,6 +258,21 @@ mod tests {
         assert_eq!(duration_text(start, at(3_725_000)), "1:02:05");
         assert_eq!(duration_text(start, None), "0:00");
         assert_eq!(duration_text(start, at(-5_000)), "0:00");
+    }
+
+    /// Review of #102: the volume keeps its decimals, like every weight.
+    #[test]
+    fn volumes_are_formatted_like_weights() {
+        let volume = Volume::of(kg(193.75), Reps::new(10));
+        assert_eq!(volume_number(volume, Unit::Kg), "1937.5");
+        assert_eq!(
+            volume_number(Volume::of(kg(100.0), Reps::new(35)), Unit::Kg),
+            "3500"
+        );
+        assert_eq!(volume_number(Volume::ZERO, Unit::Kg), "0");
+        assert_eq!(stat_size("1937.5"), 26);
+        assert_eq!(stat_size("3500"), 32);
+        assert_eq!(stat_size("12345.75"), 22);
     }
 
     #[test]
