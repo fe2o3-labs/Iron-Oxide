@@ -51,6 +51,45 @@ mod tests {
         &css[start..end]
     }
 
+    /// Every rule is closed before the next comment header or rule starts. A missing `}` (lost
+    /// in a merge) silently nests every later rule under the open one, so none of them applies.
+    #[test]
+    fn every_block_is_closed() {
+        let css = css();
+        let mut depth = 0_usize;
+        let mut open_at = Vec::new();
+        let mut rest = css.as_str();
+        let mut line = 1;
+        while let Some(ch) = rest.chars().next() {
+            if let Some(after) = rest.strip_prefix("/*") {
+                let end = after.find("*/").expect("unclosed comment") + 2;
+                line += after[..end].matches('\n').count();
+                // A section header inside a block means the block above it was never closed.
+                assert!(
+                    depth == 0 || !after.starts_with(" ---"),
+                    "app.css: the block opened at line {:?} is still open at the header on line {line}",
+                    open_at.last()
+                );
+                rest = &after[end..];
+                continue;
+            }
+            match ch {
+                '\n' => line += 1,
+                '{' => {
+                    depth += 1;
+                    open_at.push(line);
+                }
+                '}' => {
+                    depth = depth.checked_sub(1).expect("app.css: unbalanced }");
+                    open_at.pop();
+                }
+                _ => {}
+            }
+            rest = &rest[ch.len_utf8()..];
+        }
+        assert_eq!(open_at, Vec::<usize>::new(), "app.css: blocks left open");
+    }
+
     fn dark() -> BTreeMap<String, String> {
         colours(block(&css(), ":root,\n[data-theme=\"dark\"] {"))
     }
