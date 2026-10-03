@@ -163,15 +163,19 @@ impl From<RepoError> for ApiError {
 }
 
 /// Database failures that a retry can fix: the pool or the connection was unavailable (a Neon
-/// compute waking up, a restart), or Postgres aborted the statement because of a concurrent one.
+/// compute waking up, a restart), Postgres aborted the statement because of a concurrent one, or
+/// a server-side deadline cut it short (`db::STATEMENT_DEADLINE`: the work was rolled back, like
+/// the `/api/` timeout's `503`).
 pub(crate) fn is_transient(error: &sqlx::Error) -> bool {
     match error {
         sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_) => true,
         sqlx::Error::Database(db_error) => {
-            // 40001 serialization_failure, 40P01 deadlock_detected, 57P01 admin_shutdown.
+            // 40001 serialization_failure, 40P01 deadlock_detected, 57P01 admin_shutdown,
+            // 57014 query_canceled (statement_timeout), 25P03
+            // idle_in_transaction_session_timeout, 25P04 transaction_timeout.
             matches!(
                 db_error.code().as_deref(),
-                Some("40001" | "40P01" | "57P01")
+                Some("40001" | "40P01" | "57P01" | "57014" | "25P03" | "25P04")
             )
         }
         _ => false,

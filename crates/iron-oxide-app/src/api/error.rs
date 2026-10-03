@@ -34,7 +34,8 @@ pub enum FailureKind {
     Transient,
     /// `429`: too many requests. Retry later, honouring `Retry-After`.
     RateLimited,
-    /// The request never got an answer (offline, timeout, connection dropped). Retry.
+    /// The request never got an answer (offline, timeout, connection dropped), or the server
+    /// gave up waiting for its body (`408`, a slow connection). Retry.
     Network,
     /// Anything else: a server bug (`500`) or a client-side encoding problem.
     Other,
@@ -53,6 +54,7 @@ impl FailureKind {
             401 => Self::Unauthorized,
             403 => Self::Forbidden,
             404 => Self::NotFound,
+            408 => Self::Network,
             409 => Self::Conflict,
             400 | 413 | 422 => Self::Invalid,
             429 => Self::RateLimited,
@@ -194,6 +196,7 @@ mod tests {
             (401, FailureKind::Unauthorized, false),
             (403, FailureKind::Forbidden, false),
             (404, FailureKind::NotFound, false),
+            (408, FailureKind::Network, true),
             (409, FailureKind::Conflict, false),
             (400, FailureKind::Invalid, false),
             (413, FailureKind::Invalid, false),
