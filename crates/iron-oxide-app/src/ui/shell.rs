@@ -10,12 +10,14 @@
 //! backoff until the server answers; a `401` then shows the sign-in screen.
 
 use dioxus::prelude::*;
+use iron_oxide_domain::{ExerciseId, SessionId};
 
 use super::account::Account;
 use super::components::icons::{HistoryIcon, HomeIcon, ProgramsIcon, SettingsIcon};
 use super::components::{Card, EmptyState, LoadingState};
 use super::errors::{BannerKind, use_errors};
 use super::home::Home;
+use super::history::{ExerciseProgress, History, HistoryLayout, HistorySession};
 use crate::api::error::{ApiFailure, FailureKind};
 use crate::auth::api::{is_unauthorized, me};
 use crate::auth::browser;
@@ -27,8 +29,14 @@ pub enum Route {
     #[layout(Shell)]
         #[route("/")]
         Home {},
-        #[route("/history")]
-        History {},
+        #[layout(HistoryLayout)]
+            #[route("/history")]
+            History {},
+            #[route("/history/session/:id")]
+            HistorySession { id: SessionId },
+            #[route("/history/exercise/:exercise")]
+            ExerciseProgress { exercise: ExerciseId },
+        #[end_layout]
         #[route("/programs")]
         Programs {},
         #[route("/settings")]
@@ -219,6 +227,15 @@ fn nav_items() -> [NavItem; 4] {
     ]
 }
 
+/// Whether `current` is in the section of the tab `tab` (the history tab covers a session's
+/// details and an exercise's charts).
+fn in_section(tab: &Route, current: &Route) -> bool {
+    match (tab, current) {
+        (Route::History {}, Route::HistorySession { .. } | Route::ExerciseProgress { .. }) => true,
+        _ => tab == current,
+    }
+}
+
 /// The bottom navigation: four 64 px tabs, above the home indicator.
 #[component]
 fn BottomNav() -> Element {
@@ -230,7 +247,10 @@ fn BottomNav() -> Element {
                     li { key: "{item.label}",
                         Link {
                             to: item.route.clone(),
-                            aria_current: if item.route == current { "page" } else { "false" },
+                            // `Link` sets `aria-current="page"` itself on an exact match (and drops
+                            // any other value on navigation); the tab's highlight follows the
+                            // section, so a session's details still light History.
+                            "data-section": in_section(&item.route, &current),
                             {(item.icon)()}
                             span { "{item.label}" }
                         }
@@ -263,17 +283,6 @@ fn Session() -> Element {
             title: "Session started",
             message: "Logging sets is coming soon.",
             Link { class: "io-button io-button-secondary", to: Route::Home {}, "Go home" }
-        }
-    }
-}
-
-#[component]
-fn History() -> Element {
-    rsx! {
-        PageHeader { title: "History" }
-        EmptyState {
-            title: "No workouts yet",
-            message: "Finished workouts and your records will show up here.",
         }
     }
 }
@@ -341,6 +350,25 @@ mod tests {
         assert_eq!(Route::Settings {}.to_string(), "/settings");
         assert_eq!(Route::Session {}.to_string(), "/session");
         assert_eq!(Route::Gallery {}.to_string(), "/dev/components");
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(7));
+        let path = format!("/history/session/{session}");
+        assert_eq!(Route::HistorySession { id: session }.to_string(), path);
+        assert_eq!(
+            path.parse::<Route>().unwrap(),
+            Route::HistorySession { id: session }
+        );
+        let exercise = ExerciseId::new("back-squat").unwrap();
+        assert_eq!(
+            Route::ExerciseProgress {
+                exercise: exercise.clone()
+            }
+            .to_string(),
+            "/history/exercise/back-squat"
+        );
+        assert_eq!(
+            "/history/exercise/back-squat".parse::<Route>().unwrap(),
+            Route::ExerciseProgress { exercise }
+        );
         assert_eq!("/history".parse::<Route>().unwrap(), Route::History {});
         assert_eq!(
             "/nope/x".parse::<Route>().unwrap(),
@@ -348,6 +376,18 @@ mod tests {
                 segments: vec!["nope".to_owned(), "x".to_owned()]
             }
         );
+    }
+
+    #[test]
+    fn the_history_tab_covers_its_screens() {
+        let history = Route::History {};
+        let session = Route::HistorySession {
+            id: SessionId::from_uuid(uuid::Uuid::from_u128(7)),
+        };
+        assert!(in_section(&history, &history));
+        assert!(in_section(&history, &session));
+        assert!(!in_section(&Route::Home {}, &session));
+        assert!(!in_section(&Route::Home {}, &history));
     }
 
     #[test]
