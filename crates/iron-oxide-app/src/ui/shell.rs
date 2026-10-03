@@ -282,13 +282,7 @@ fn PageHeader(#[props(into)] title: String, #[props(into)] subtitle: Option<Stri
 
 #[component]
 fn Programs() -> Element {
-    rsx! {
-        PageHeader { title: "Programs" }
-        EmptyState {
-            title: "No program yet",
-            message: "Pick a built-in program or upload your own here.",
-        }
-    }
+    rsx! { super::programs::ProgramsPage {} }
 }
 
 #[component]

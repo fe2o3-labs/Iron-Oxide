@@ -1222,6 +1222,70 @@ a.io-chip {
   color: var(--io-accent-text);
 }
 
+/* --- Programs (#35) -------------------------------------------------------------------------- */
+
+.io-badge-muted {
+  border-color: var(--io-line-strong);
+  color: var(--io-muted);
+}
+
+.io-back {
+  display: flex;
+}
+
+.io-active h2 {
+  overflow-wrap: anywhere;
+}
+
+.io-program-description {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.io-exercise-work {
+  font-family: var(--io-font-mono);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+/* The file picker's label looks like a button; its input is visually hidden. */
+.io-file-button {
+  width: 100%;
+}
+
+.io-file-button-busy {
+  cursor: progress;
+  opacity: 0.5;
+}
+
+.io-file-button:has(+ input[type="file"]:focus-visible) {
+  outline: 3px solid var(--io-accent-text);
+  outline-offset: 2px;
+}
+
+.io-plan-notice,
+.io-problems {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.io-problems ul {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.io-problems li {
+  overflow-wrap: anywhere;
+}
+
+.io-problem-place {
+  font-family: var(--io-font-mono);
+  font-size: 13px;
+  font-weight: 700;
 /* --- Workout session (#28) -------------------------------------------------------------------- */
 
 .io-session {

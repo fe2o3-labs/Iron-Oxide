@@ -8,6 +8,7 @@
 //! - `user_settings`: the user's settings, shared by every screen, loaded and saved there.
 //! - `settings`: the Settings page.
 //! - `prefs`: preferences kept on this device only.
+//! - `programs`: the Programs page.
 //! - `history`: the history screens (#33).
 //! - `home`: the home screen (#27).
 //! - `session`: the workout session screens (#28).
@@ -36,6 +37,7 @@ mod gallery;
 mod history;
 mod home;
 mod prefs;
+mod programs;
 mod session;
 mod settings;
 mod shell;
@@ -66,6 +68,7 @@ pub fn App() -> Element {
     let unit = weight::use_unit_provider();
     let settings = user_settings::use_settings_provider(unit);
     prefs::use_device_prefs_provider(settings);
+    programs::use_program_intents_provider();
     crate::offline::use_outbox_provider();
 
     rsx! {
