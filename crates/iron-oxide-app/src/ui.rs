@@ -29,8 +29,8 @@ mod components;
 mod errors;
 #[cfg(debug_assertions)]
 mod gallery;
-mod plates;
 mod history;
+mod plates;
 mod shell;
 pub(crate) mod theme;
 pub mod unsaved;
