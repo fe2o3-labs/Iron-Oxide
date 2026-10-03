@@ -17,6 +17,13 @@
 //!   queued (same content) does nothing; a write is identified by the ids it carries
 //!   ([`WriteKey`]), which the client generates with `new_v7()`, so the server recognises a
 //!   resent write and answers it unchanged.
+//! - **Merging copies** ([`Queue::merge`]): tabs keep their own copy and merge it with the stored
+//!   one at every step. Every change is stamped with a revision from a Lamport clock: each
+//!   entry has its own (enqueue, payload edit, refusal), the retry state has one (backoff,
+//!   `Retry-After`, sign-in pause), and delivered or discarded writes leave a tombstone. Per
+//!   key the higher revision wins, a tombstone wins over the copies it saw, and entries keep
+//!   their original enqueue order (`seq`). A stale copy (a tab that could not save) therefore
+//!   never undoes a wait, a refusal, an edit, a delivery or a discard.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -97,6 +104,12 @@ pub struct Entry {
     pub write: Write,
     /// When it was enqueued (the client's clock).
     pub enqueued_at: Timestamp,
+    /// Its place in the queue: the clock when it was first enqueued. Kept through edits.
+    #[serde(default)]
+    pub seq: u64,
+    /// The clock at its last change (enqueue, payload edit, refusal, retry).
+    #[serde(default)]
+    pub rev: u64,
     /// Set when the server rejected it (`409`, `422`, …): the message to show. The queue stops
     /// at a failed entry until it is retried or discarded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +180,20 @@ impl OutboxStatus {
     }
 }
 
+/// A write that left the queue: delivered (`2xx`) or discarded by the user. Kept (up to
+/// [`MAX_TOMBSTONES`]) so that merging a stale copy that still holds it never brings it back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tombstone {
+    pub write: Write,
+    /// The clock when it left.
+    pub rev: u64,
+    /// Delivered (`true`) or discarded.
+    pub delivered: bool,
+}
+
+/// How many tombstones a queue keeps (the newest).
+pub const MAX_TOMBSTONES: usize = 256;
+
 /// The queue and its retry state, as persisted per user.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Queue {
@@ -187,6 +214,15 @@ pub struct Queue {
     /// The last retryable error, cleared by the next success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
+    /// The clock at the retry state's last change (the five fields above).
+    #[serde(default)]
+    state_rev: u64,
+    /// The Lamport clock: every change takes the next value, a merge the larger of both.
+    #[serde(default)]
+    clock: u64,
+    /// Delivered and discarded writes, newest last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tombstones: Vec<Tombstone>,
 }
 
 impl Queue {
@@ -200,14 +236,50 @@ impl Queue {
         self.entries.is_empty()
     }
 
+    /// Whether there is nothing to keep at all: no entries and no tombstones.
+    #[must_use]
+    pub fn is_blank(&self) -> bool {
+        self.entries.is_empty() && self.tombstones.is_empty()
+    }
+
+    /// The next clock value.
+    fn tick(&mut self) -> u64 {
+        self.clock = self.clock.saturating_add(1);
+        self.clock
+    }
+
+    /// Stamps a change of the retry state.
+    fn touch_state(&mut self) {
+        self.state_rev = self.tick();
+    }
+
+    fn bury(&mut self, write: Write, delivered: bool) {
+        let rev = self.tick();
+        self.tombstones
+            .retain(|tomb| tomb.write.key() != write.key());
+        self.tombstones.push(Tombstone {
+            write,
+            rev,
+            delivered,
+        });
+        let excess = self.tombstones.len().saturating_sub(MAX_TOMBSTONES);
+        self.tombstones.drain(..excess);
+    }
+
     /// Appends `write`. The same write already queued is not added twice, and a queued write
     /// with the same key (the same `SetId` with edited values) gets the new payload in place:
     /// two versions of one id would make the second a certain `409`.
+    ///
+    /// A write identical to one already delivered is a [`Enqueued::Duplicate`] too.
     pub fn enqueue(&mut self, write: Write, now: Timestamp) -> Enqueued {
-        if self.entries.iter().any(|entry| entry.write == write) {
+        let delivered = |tomb: &Tombstone| tomb.delivered && tomb.write == write;
+        if self.entries.iter().any(|entry| entry.write == write)
+            || self.tombstones.iter().any(delivered)
+        {
             return Enqueued::Duplicate;
         }
         let key = write.key();
+        let rev = self.tick();
         if let Some(entry) = self
             .entries
             .iter_mut()
@@ -215,11 +287,14 @@ impl Queue {
         {
             entry.write = write;
             entry.failed = None;
+            entry.rev = rev;
             return Enqueued::Replaced;
         }
         self.entries.push_back(Entry {
             write,
             enqueued_at: now,
+            seq: rev,
+            rev,
             failed: None,
         });
         Enqueued::Added
@@ -256,17 +331,23 @@ impl Queue {
     pub fn on_success(&mut self, write: &Write) {
         if let Some(index) = self.position(write) {
             self.entries.remove(index);
-        } else if let Some(edited) = self
-            .entries
-            .iter_mut()
-            .find(|entry| entry.write.key() == write.key())
-        {
-            edited.failed = Some(EDITED_AFTER_SAVE_MESSAGE.to_owned());
+        } else {
+            let rev = self.tick();
+            if let Some(edited) = self
+                .entries
+                .iter_mut()
+                .find(|entry| entry.write.key() == write.key())
+            {
+                edited.failed = Some(EDITED_AFTER_SAVE_MESSAGE.to_owned());
+                edited.rev = rev;
+            }
         }
+        self.bury(write.clone(), true);
         self.failures = 0;
         self.retry_at = None;
         self.not_before = None;
         self.last_error = None;
+        self.touch_state();
     }
 
     /// Sending `write` failed. `random` is a uniform draw in `[0, 1)` for the jitter.
@@ -294,8 +375,10 @@ impl Queue {
             }
             Failure::SignedOut { message } => self.signed_out = Some(message),
             Failure::Rejected { message } => {
+                let rev = self.tick();
                 if let Some(entry) = self.entries.get_mut(index) {
                     entry.failed = Some(message);
+                    entry.rev = rev;
                 }
                 self.failures = 0;
                 self.retry_at = None;
@@ -303,19 +386,26 @@ impl Queue {
                 self.last_error = None;
             }
         }
+        self.touch_state();
     }
 
     /// Try again now: the browser is back online, the app started, the user signed in. Skips the
     /// backoff and the sign-in pause, never a `429`'s `Retry-After`. Failed writes stay failed.
     pub fn nudge(&mut self) {
-        self.retry_at = None;
-        self.signed_out = None;
+        if self.retry_at.is_some() || self.signed_out.is_some() {
+            self.retry_at = None;
+            self.signed_out = None;
+            self.touch_state();
+        }
     }
 
     /// Sends the failed writes again (the user asked to).
     pub fn retry_failed(&mut self) {
+        let rev = self.tick();
         for entry in &mut self.entries {
-            entry.failed = None;
+            if entry.failed.take().is_some() {
+                entry.rev = rev;
+            }
         }
         self.nudge();
     }
@@ -347,28 +437,97 @@ impl Queue {
             }
         }
         self.entries = kept;
+        for write in &doomed {
+            self.bury(write.clone(), false);
+        }
         if !self.entries.iter().any(|entry| entry.failed.is_some()) {
             self.nudge();
         }
         doomed
     }
 
-    /// Merges this copy into `stored` (what another tab stored meanwhile): every write of both,
-    /// once, in the order they were enqueued on this device (stable, so equal times keep the
-    /// stored order). Retry state is the stored one. Used when this tab could not save for a
-    /// while, so neither side's writes are lost.
+    /// Merges two copies of the queue: `local` (this tab's) and `stored` (just read, possibly
+    /// written by another tab, or stale because this tab could not save). Per key, the entry
+    /// with the higher revision wins (`local` on a tie); an entry is dropped when a tombstone of
+    /// the same write is at least as recent; the retry state with the higher revision wins
+    /// (`local` on a tie); entries keep their original enqueue order. An edit made elsewhere of
+    /// a write this copy delivered is marked refused ([`EDITED_AFTER_SAVE_MESSAGE`]).
     #[must_use]
-    pub fn merged_into(self, mut stored: Self) -> Self {
-        for entry in self.entries {
-            if !stored.entries.iter().any(|kept| kept.write == entry.write) {
-                stored.entries.push_back(entry);
+    pub fn merge(local: Self, stored: Self) -> Self {
+        let clock = local.clock.max(stored.clock);
+        let Self {
+            entries: local_entries,
+            tombstones: local_tombstones,
+            ..
+        } = local.clone();
+        let Self {
+            entries: stored_entries,
+            tombstones: stored_tombstones,
+            ..
+        } = stored.clone();
+        let state = if stored.state_rev > local.state_rev {
+            stored
+        } else {
+            local
+        };
+        let mut merged = Self {
+            entries: VecDeque::new(),
+            tombstones: Vec::new(),
+            clock,
+            ..state
+        };
+
+        // Tombstones: one per key, the newest.
+        for tomb in local_tombstones.iter().chain(&stored_tombstones) {
+            match merged
+                .tombstones
+                .iter_mut()
+                .find(|kept| kept.write.key() == tomb.write.key())
+            {
+                Some(kept) if kept.rev >= tomb.rev => {}
+                Some(kept) => *kept = tomb.clone(),
+                None => merged.tombstones.push(tomb.clone()),
             }
         }
-        stored
+        merged.tombstones.sort_by_key(|tomb| tomb.rev);
+        let excess = merged.tombstones.len().saturating_sub(MAX_TOMBSTONES);
+        merged.tombstones.drain(..excess);
+
+        // Entries: one per key, the newest; `local` wins ties.
+        let mut entries: Vec<Entry> = Vec::new();
+        for entry in local_entries.into_iter().chain(stored_entries) {
+            match entries
+                .iter_mut()
+                .find(|kept| kept.write.key() == entry.write.key())
+            {
+                Some(kept) if kept.rev >= entry.rev => {}
+                Some(kept) => *kept = entry,
+                None => entries.push(entry),
+            }
+        }
+        for mut entry in entries {
+            let tomb = merged
+                .tombstones
+                .iter()
+                .find(|tomb| tomb.write.key() == entry.write.key());
+            match tomb {
+                // Delivered or discarded since this copy last changed it: gone.
+                Some(tomb) if tomb.write == entry.write && tomb.rev >= entry.rev => continue,
+                // Other values for a write the server already has: a certain `409`.
+                Some(tomb)
+                    if tomb.delivered && tomb.write != entry.write && entry.failed.is_none() =>
+                {
+                    entry.failed = Some(EDITED_AFTER_SAVE_MESSAGE.to_owned());
+                }
+                _ => {}
+            }
+            merged.entries.push_back(entry);
+        }
+        merged
             .entries
             .make_contiguous()
-            .sort_by_key(|entry| entry.enqueued_at);
-        stored
+            .sort_by_key(|entry| (entry.seq, entry.enqueued_at));
+        merged
     }
 
     /// Whether `key` is still waiting to be delivered.
@@ -726,10 +885,10 @@ pub(crate) mod tests {
         let (first, last) = (start(session), finish(session));
         let mut json = serde_json::json!({
             "entries": [
-                serde_json::to_value(Entry { write: first.clone(), enqueued_at: at(0), failed: None }).unwrap(),
+                serde_json::to_value(Entry { write: first.clone(), enqueued_at: at(0), seq: 1, rev: 1, failed: None }).unwrap(),
                 { "write": { "kind": "teleport" }, "enqueued_at": 1 },
                 42,
-                serde_json::to_value(Entry { write: last.clone(), enqueued_at: at(2), failed: None }).unwrap(),
+                serde_json::to_value(Entry { write: last.clone(), enqueued_at: at(2), seq: 2, rev: 2, failed: None }).unwrap(),
             ],
             "failures": "many",
         });
@@ -847,7 +1006,7 @@ pub(crate) mod tests {
         let mut memory = Queue::default();
         memory.enqueue(start(session), at(0));
         memory.enqueue(mine.clone(), at(2));
-        let merged = memory.merged_into(stored);
+        let merged = Queue::merge(memory, stored);
         assert_eq!(
             merged
                 .entries()

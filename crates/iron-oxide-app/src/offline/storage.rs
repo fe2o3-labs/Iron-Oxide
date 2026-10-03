@@ -197,9 +197,9 @@ pub const NOT_PERSISTED_MESSAGE: &str =
 /// When storage fails (blocked, full, or only the memory fallback is there), the queue lives on
 /// in memory: changes keep working for as long as the page is open, and
 /// [`OutboxStatus::last_error`] says they are not on the device. Storage is still read before
-/// every change, and the memory copy is merged into what is stored (another tab's writes), so
-/// neither side's writes are overwritten once saving works again. A write delivered meanwhile
-/// may come back from storage: it is sent again, and the server answers the replay unchanged.
+/// every change and merged with the memory copy by revision ([`Queue::merge`]), so neither
+/// another tab's writes nor this tab's own progress (waits, refusals, edits, deliveries,
+/// discards) are lost or undone, whichever copy is stale.
 #[derive(Debug)]
 pub struct QueueStore {
     key: String,
@@ -233,11 +233,9 @@ impl QueueStore {
         match read(storage, &self.key, Self::VERSION) {
             Ok(stored) => {
                 let (queue, unreadable) = stored.map(Queue::from_json).unwrap_or_default();
-                self.mirror = if self.not_persisted {
-                    std::mem::take(&mut self.mirror).merged_into(queue)
-                } else {
-                    queue
-                };
+                // Always merged: the stored copy may be newer (another tab) or older (this tab
+                // could not save); revisions and tombstones decide (`Queue::merge`).
+                self.mirror = Queue::merge(std::mem::take(&mut self.mirror), queue);
                 if !unreadable.is_empty() {
                     tracing::warn!(
                         key = self.key,
@@ -281,7 +279,7 @@ impl QueueStore {
     }
 
     fn save(&mut self, storage: &dyn Storage) {
-        let saved = if self.mirror.is_empty() {
+        let saved = if self.mirror.is_blank() {
             storage.remove(&self.key)
         } else {
             self.mirror
@@ -304,8 +302,12 @@ impl QueueStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::offline::queue::tests::{at, set, start};
-    use iron_oxide_domain::SessionId;
+    use std::time::Duration;
+
+    use crate::offline::backoff::Backoff;
+    use crate::offline::queue::tests::{at, finish, set, start};
+    use crate::offline::queue::{Enqueued, Failure, Wake, Write};
+    use iron_oxide_domain::{LoggedSet, SessionId};
 
     fn user() -> UserId {
         UserId::from_uuid(uuid::Uuid::from_u128(7))
@@ -464,12 +466,171 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_outbox_leaves_nothing_in_storage() {
+    fn a_delivered_outbox_keeps_only_tombstones() {
         let storage = MemoryStorage::default();
         let mut store = QueueStore::new(user());
         let session = SessionId::new_v7();
         store.update(&storage, |queue| queue.enqueue(start(session), at(0)));
         store.update(&storage, |queue| queue.on_success(&start(session)));
-        assert_eq!(storage.get(store.key()), Ok(None));
+        let mut fresh = QueueStore::new(user());
+        assert!(fresh.load(&storage).is_empty());
+        assert_eq!(fresh.status(), OutboxStatus::default());
+    }
+
+    // --- While saving fails, a stale stored record never undoes this tab's work (#90 re-check)
+
+    /// A store whose storage holds `writes` (saved), then becomes full.
+    fn stale_after(writes: &[Write]) -> (MemoryStorage, QueueStore) {
+        let storage = MemoryStorage::default();
+        let mut store = QueueStore::new(user());
+        store.update(&storage, |queue| {
+            for write in writes {
+                queue.enqueue(write.clone(), at(0));
+            }
+        });
+        storage.set_full(true);
+        (storage, store)
+    }
+
+    fn writes(store: &mut QueueStore, storage: &MemoryStorage) -> Vec<Write> {
+        store
+            .load(storage)
+            .entries()
+            .map(|entry| entry.write.clone())
+            .collect()
+    }
+
+    #[test]
+    fn retry_after_holds_while_storage_is_full() {
+        let session = SessionId::new_v7();
+        let (storage, mut tab) = stale_after(&[start(session)]);
+        let head = tab
+            .update(&storage, |queue| queue.next_ready(at(0)).cloned())
+            .unwrap();
+        let limited = Failure::Retry {
+            message: "429".to_owned(),
+            retry_after: Some(Duration::from_secs(60)),
+        };
+        tab.update(&storage, |queue| {
+            queue.on_failure(&head, limited, at(0), 0.5, &Backoff::DEFAULT);
+        });
+        assert_eq!(
+            tab.update(&storage, |queue| queue.next_ready(at(2_000)).cloned()),
+            None
+        );
+        assert_eq!(
+            tab.update(&storage, |queue| queue.next_ready(at(60_000)).cloned()),
+            Some(head)
+        );
+    }
+
+    #[test]
+    fn the_backoff_grows_while_storage_is_full() {
+        let session = SessionId::new_v7();
+        let (storage, mut tab) = stale_after(&[start(session)]);
+        let offline = || Failure::Retry {
+            message: "offline".to_owned(),
+            retry_after: None,
+        };
+        for _ in 0..4 {
+            tab.update(&storage, |queue| {
+                queue.on_failure(&start(session), offline(), at(0), 1.0, &Backoff::DEFAULT);
+            });
+        }
+        // Four failures: an 8 s ceiling, drawn at the top.
+        assert_eq!(tab.load(&storage).wake(at(0)), Wake::At(at(8_000)));
+    }
+
+    #[test]
+    fn a_refusal_holds_while_storage_is_full() {
+        let session = SessionId::new_v7();
+        let (storage, mut tab) = stale_after(&[start(session), set(session, 0)]);
+        let refused = Failure::Rejected {
+            message: "Another session is in progress.".to_owned(),
+        };
+        tab.update(&storage, |queue| {
+            queue.on_failure(&start(session), refused, at(0), 0.5, &Backoff::DEFAULT);
+        });
+        let status = tab.load(&storage).status();
+        assert_eq!(status.failed_count, 1);
+        assert_eq!(tab.load(&storage).next_ready(at(0)), None);
+    }
+
+    #[test]
+    fn a_delivered_write_does_not_come_back_while_storage_is_full() {
+        let session = SessionId::new_v7();
+        let (storage, mut tab) = stale_after(&[start(session), finish(session)]);
+        tab.update(&storage, |queue| queue.on_success(&start(session)));
+        for _ in 0..3 {
+            assert_eq!(writes(&mut tab, &storage), vec![finish(session)]);
+        }
+        // Saving works again: the stored record catches up, nothing is resent.
+        storage.set_full(false);
+        tab.update(&storage, |queue| queue.nudge());
+        assert_eq!(
+            writes(&mut QueueStore::new(user()), &storage),
+            vec![finish(session)]
+        );
+    }
+
+    #[test]
+    fn discarded_writes_do_not_come_back_while_storage_is_full() {
+        let (a, b) = (SessionId::new_v7(), SessionId::new_v7());
+        let (storage, mut tab) = stale_after(&[start(a), set(a, 0), finish(a), start(b)]);
+        let refused = Failure::Rejected {
+            message: "409".to_owned(),
+        };
+        tab.update(&storage, |queue| {
+            queue.on_failure(&start(a), refused, at(0), 0.5, &Backoff::DEFAULT);
+        });
+        let discarded = tab.update(&storage, Queue::discard_failed);
+        assert_eq!(discarded.len(), 3);
+        assert_eq!(writes(&mut tab, &storage), vec![start(b)]);
+        assert_eq!(writes(&mut tab, &storage), vec![start(b)]);
+    }
+
+    #[test]
+    fn a_stale_set_never_resurfaces_next_to_its_edit_while_storage_is_full() {
+        let session = SessionId::new_v7();
+        let original = set(session, 0);
+        let (storage, mut tab) = stale_after(&[start(session), original.clone()]);
+        let Write::SaveSet { set: logged, .. } = &original else {
+            unreachable!()
+        };
+        let edit = Write::SaveSet {
+            session_id: session,
+            set: LoggedSet {
+                warm_up: true,
+                ..logged.clone()
+            },
+        };
+        assert_eq!(
+            tab.update(&storage, |queue| queue.enqueue(edit.clone(), at(1))),
+            Enqueued::Replaced
+        );
+        assert_eq!(writes(&mut tab, &storage), vec![start(session), edit]);
+    }
+
+    #[test]
+    fn another_tabs_stale_copy_never_brings_back_what_this_tab_delivered() {
+        let storage = MemoryStorage::default();
+        let session = SessionId::new_v7();
+        let (mut tab_a, mut tab_b) = (QueueStore::new(user()), QueueStore::new(user()));
+        tab_a.update(&storage, |queue| {
+            queue.enqueue(start(session), at(0));
+            queue.enqueue(finish(session), at(0));
+        });
+        // Tab B loads, then cannot save while it works.
+        tab_b.load(&storage);
+        tab_a.update(&storage, |queue| queue.on_success(&start(session)));
+        storage.set_full(true);
+        tab_b.update(&storage, |queue| queue.nudge());
+        storage.set_full(false);
+        let extra = set(session, 0);
+        tab_b.update(&storage, |queue| queue.enqueue(extra.clone(), at(5)));
+        assert_eq!(
+            writes(&mut QueueStore::new(user()), &storage),
+            vec![finish(session), extra]
+        );
     }
 }

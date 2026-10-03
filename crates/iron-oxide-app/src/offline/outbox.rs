@@ -12,7 +12,7 @@ use super::storage::QueueStore;
 use crate::api::error::{ApiFailure, FailureKind};
 use crate::api::sessions::{finish_session, save_set, start_session};
 use crate::auth::api::me;
-use crate::auth::types::UserId;
+use crate::auth::types::{ACCOUNT_CHANGED_MESSAGE, EXPECTED_USER_HEADER, UserId};
 use crate::rate_limit::{self, DEFAULT_RETRY_AFTER};
 
 use super::backoff::Backoff;
@@ -24,9 +24,9 @@ const LAST_USER_KEY: &str = "iron-oxide:last-user";
 /// How long to wait before checking again when another tab holds the drain lock.
 const LOCKED_RECHECK: Duration = Duration::from_secs(3);
 
-/// Shown when the browser's session belongs to another account than the queued writes.
-pub const OTHER_ACCOUNT_MESSAGE: &str =
-    "Signed in with another account. Sign in again to send your unsaved changes.";
+/// Shown when the browser's session belongs to another account than the queued writes (the
+/// same text as the server's expected-user refusal).
+pub const OTHER_ACCOUNT_MESSAGE: &str = ACCOUNT_CHANGED_MESSAGE;
 
 /// The enqueue was refused: nobody is signed in on this device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,7 +325,7 @@ impl Outbox {
             if *self.user.peek() != Some(user) {
                 return;
             }
-            let result = send(&write).await;
+            let result = send(user, &write).await;
             let now = platform::now();
             if *self.user.peek() != Some(user) {
                 return;
@@ -378,9 +378,15 @@ impl Outbox {
     }
 }
 
-/// Calls the server function behind `write`, with its exact arguments.
-async fn send(write: &Write) -> Result<(), ServerFnError> {
-    match write.clone() {
+/// Calls the server function behind `write`, with its exact arguments, asserting with
+/// [`EXPECTED_USER_HEADER`] that it is for `user`: the server refuses it (`409`
+/// [`ACCOUNT_CHANGED_MESSAGE`]) if the browser's session is another account's by then.
+async fn send(user: UserId, write: &Write) -> Result<(), ServerFnError> {
+    ExpectingUser::new(user, call(write.clone())).await
+}
+
+async fn call(write: Write) -> Result<(), ServerFnError> {
+    match write {
         Write::StartSession {
             session_id,
             started_at,
@@ -396,12 +402,56 @@ async fn send(write: &Write) -> Result<(), ServerFnError> {
     }
 }
 
+/// Runs a server-function call with [`EXPECTED_USER_HEADER`] among the client's request
+/// headers, during its own polls only. The client reads those headers (Dioxus's
+/// `get_request_headers`) when it builds the request, inside the first poll; the browser runs
+/// one task at a time, so no other call ever sees the header.
+struct ExpectingUser<F> {
+    call: std::pin::Pin<Box<F>>,
+    user: String,
+}
+
+impl<F> ExpectingUser<F> {
+    fn new(user: UserId, call: F) -> Self {
+        Self {
+            call: Box::pin(call),
+            user: user.as_uuid().to_string(),
+        }
+    }
+}
+
+impl<F: std::future::Future> std::future::Future for ExpectingUser<F> {
+    type Output = F::Output;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        use dioxus::fullstack::{HeaderValue, get_request_headers, set_request_headers};
+        let this = self.get_mut();
+        let saved = get_request_headers();
+        let mut headers = saved.clone();
+        if let Ok(value) = HeaderValue::from_str(&this.user) {
+            headers.insert(EXPECTED_USER_HEADER, value);
+        }
+        set_request_headers(headers);
+        let polled = this.call.as_mut().poll(cx);
+        set_request_headers(saved);
+        polled
+    }
+}
+
 /// What a failed call means for the queue (`docs/api.md`, "On the client"): network, `429`,
 /// `502`-`504` retry (a `429` after its `Retry-After`, 30 s when it is missing); `401` waits for
 /// sign-in; anything else, `500` included, is a rejection the user must see.
 #[must_use]
 pub fn failure_of(error: &ServerFnError) -> Failure {
     let ApiFailure { kind, message, .. } = ApiFailure::classify(error);
+    if kind == FailureKind::Conflict && message == ACCOUNT_CHANGED_MESSAGE {
+        // The server's expected-user check: another account is signed in. Not a refusal of
+        // the write; it waits for its user to sign in again.
+        return Failure::SignedOut { message };
+    }
     if status_of(error) == Some(408) && !kind.is_retryable() {
         // A request timeout (a proxy, or the server's own slow-body limit): retry, whatever
         // `ApiFailure` calls it.
@@ -597,5 +647,45 @@ mod tests {
             account_check(a, &Err(server(500, None))),
             Err(Failure::Retry { .. })
         ));
+    }
+
+    #[test]
+    fn the_servers_account_changed_refusal_pauses_instead_of_refusing() {
+        let error = ServerFnError::ServerError {
+            message: ACCOUNT_CHANGED_MESSAGE.to_owned(),
+            code: 409,
+            details: None,
+        };
+        assert_eq!(
+            failure_of(&error),
+            Failure::SignedOut {
+                message: ACCOUNT_CHANGED_MESSAGE.to_owned()
+            }
+        );
+        // Any other 409 is still a refusal.
+        assert!(matches!(
+            failure_of(&server(409, None)),
+            Failure::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn calls_carry_the_expected_user_only_while_they_are_polled() {
+        use dioxus::fullstack::{HeaderMap, get_request_headers, set_request_headers};
+        set_request_headers(HeaderMap::new());
+        let user = UserId::from_uuid(uuid::Uuid::from_u128(7));
+        let seen = ExpectingUser::new(user, async {
+            get_request_headers()
+                .get(EXPECTED_USER_HEADER)
+                .and_then(|value| value.to_str().ok().map(str::to_owned))
+        });
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        let mut seen = std::pin::pin!(seen);
+        assert_eq!(
+            seen.as_mut().poll(&mut cx),
+            std::task::Poll::Ready(Some(user.as_uuid().to_string()))
+        );
+        assert!(get_request_headers().get(EXPECTED_USER_HEADER).is_none());
     }
 }

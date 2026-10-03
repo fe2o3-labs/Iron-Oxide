@@ -37,6 +37,11 @@ pub async fn get_session(session_id: SessionId) -> Result<SessionView, ServerFnE
 - **The user always comes from the session.** `user.owner()` is the repository's owner key. Never
   accept a user id from the client. Every repository call takes it and scopes every query by it
   (see `docs/database.md`).
+- **Expected user (#30).** A request may carry `X-Io-Expected-User: <user id>`. The retry queue
+  sends it with every write. `AuthUser` then refuses the request with `409` "Signed in with
+  another account. …" (`auth::types::ACCOUNT_CHANGED_MESSAGE`) unless it names the session's
+  user, before the body runs. Without the header nothing changes. The header never selects a
+  user; it can only refuse.
 - Arguments and results use the domain types: the typed ids (`SessionId`, …), `DayId`, `Weight`,
   and so on. Times are `iron_oxide_domain::time::Timestamp`, milliseconds since the Unix epoch in
   UTC, serialized as a JSON integer. `server::api::timestamp` and `server::api::offset_date_time`

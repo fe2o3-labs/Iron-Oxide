@@ -54,9 +54,11 @@
 //!   retry at once, but never before a `429`'s delay.
 //! - `401` pauses the queue until the user signs in again. Before **each** send, the drain
 //!   checks with `me()` that the browser's session is still the queue's user (another tab may
-//!   have switched accounts), so writes never land in another account: a mismatch stops the
-//!   drain and pauses the queue until the user signs in again. A failed check is retried later
-//!   and never refuses the write.
+//!   have switched accounts): a mismatch stops the drain and pauses the queue until the user
+//!   signs in again. A failed check is retried later and never refuses the write. Each write
+//!   also carries `X-Io-Expected-User` (`auth::types::EXPECTED_USER_HEADER`), so the server
+//!   itself refuses it (`409` account changed) if the cookie changed after the check; the outbox
+//!   treats that `409` as the same pause, not as a refusal.
 //! - Everything else, `500` included (`docs/api.md` classifies it as not retryable), is a
 //!   rejection.
 //! - Single flight. In one tab a single task sends. Across tabs, a Web Lock
@@ -65,8 +67,10 @@
 //!   server answers the second copy unchanged, so the only cost is a request.
 //! - Every change to the queue re-reads it from storage, applies the change and writes it back
 //!   in one synchronous step, and the `storage` event refreshes the other tabs. This way tabs
-//!   do not overwrite each other's writes. A tab that could not save for a while merges its
-//!   memory copy into what is stored (in enqueue order) instead of writing over it.
+//!   do not overwrite each other's writes. The memory copy and the stored one are merged by
+//!   revision (`queue::Queue::merge`: per-entry and retry-state revisions from a Lamport clock,
+//!   tombstones for delivered and discarded writes), so a stale copy, such as a tab that could
+//!   not save for a while, never undoes a wait, a refusal, an edit, a delivery or a discard.
 //!
 //! # Storage
 //!
