@@ -31,7 +31,7 @@ pub fn numeral_size(text: &str) -> u32 {
 
 /// A stepper over whole numbers (reps, seconds). `label` is shown under the value (`REPS`) and
 /// names the group; `less_label` and `more_label` name the buttons for screen readers. `text`
-/// replaces the number shown, e.g. `2:30` for 150 seconds.
+/// replaces the number shown, e.g. `2:30` for 150 seconds. While `disabled`, both buttons are.
 #[component]
 pub fn Stepper(
     #[props(into)] label: String,
@@ -43,6 +43,7 @@ pub fn Stepper(
     #[props(into)] less_label: Option<String>,
     #[props(into)] more_label: Option<String>,
     #[props(into)] text: Option<String>,
+    #[props(default)] disabled: bool,
 ) -> Element {
     let less_label = less_label.unwrap_or_else(|| format!("{step} less"));
     let more_label = more_label.unwrap_or_else(|| format!("{step} more"));
@@ -52,8 +53,8 @@ pub fn Stepper(
             text: text.unwrap_or_else(|| value.to_string()),
             less_label,
             more_label,
-            can_decrease: value > min,
-            can_increase: value < max,
+            can_decrease: !disabled && value > min,
+            can_increase: !disabled && value < max,
             on_decrease: move |()| on_change.call(step_count(value, step, Direction::Down, min, max)),
             on_increase: move |()| on_change.call(step_count(value, step, Direction::Up, min, max)),
         }
@@ -61,7 +62,7 @@ pub fn Stepper(
 }
 
 /// A stepper over a weight, shown in the user's unit. The steps are exact (see
-/// [`step_weight`]); the label is the unit symbol (`KG`).
+/// [`step_weight`]); the label is the unit symbol (`KG`). While `disabled`, both buttons are.
 #[component]
 pub fn WeightStepper(
     value: Weight,
@@ -69,6 +70,7 @@ pub fn WeightStepper(
     #[props(default = Weight::ZERO)] min: Weight,
     #[props(default = Weight::MAX)] max: Weight,
     on_change: EventHandler<Weight>,
+    #[props(default)] disabled: bool,
 ) -> Element {
     let unit = use_unit();
     let amount = format!("{} {}", weight_number(step, unit), unit_name(unit));
@@ -78,8 +80,8 @@ pub fn WeightStepper(
             text: weight_number(value, unit),
             less_label: "{amount} less",
             more_label: "{amount} more",
-            can_decrease: value > min,
-            can_increase: value < max,
+            can_decrease: !disabled && value > min,
+            can_increase: !disabled && value < max,
             on_decrease: move |()| on_change.call(step_weight(value, step, Direction::Down, min, max)),
             on_increase: move |()| on_change.call(step_weight(value, step, Direction::Up, min, max)),
         }

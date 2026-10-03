@@ -10,6 +10,7 @@
 //! - `prefs`: preferences kept on this device only.
 //! - `programs`: the Programs page.
 //! - `history`: the history screens (#33).
+//! - `session`: the workout session screens (#28).
 
 mod account;
 #[cfg_attr(
@@ -35,6 +36,7 @@ mod gallery;
 mod history;
 mod prefs;
 mod programs;
+mod session;
 mod settings;
 mod shell;
 pub(crate) mod theme;
