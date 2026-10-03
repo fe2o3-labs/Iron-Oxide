@@ -70,7 +70,11 @@ The conversions:
   - `Invalid` → 422
   - `Corrupt` → 500
   - `Database` → 503 if transient, 500 otherwise
-- `From<AuthError>` keeps sign-in's status.
+- `From<AuthError>` keeps sign-in's status. Session-store errors (#74): a `Backend` error the store
+  marked retryable (the same `sqlx` errors as `Database`'s transient ones: pool timeout or closed,
+  I/O, serialization failure, deadlock, admin shutdown) → 503; any other `Backend` error (a
+  permanent database error, no free session id), `Encode` and `Decode` → 500. The store
+  (`server::auth::session`) marks them, as it is the last place that sees the typed `sqlx::Error`.
 - `From<ValueError>` and `From<ProgramError>` → 422 with the domain's message, which only repeats what
   the user sent.
 - `From<SessionError>`: 409 or 422 with a fixed message. The domain's own text names ids, so it is
@@ -99,8 +103,12 @@ Dioxus produces other shapes on its own. An error returned by a server function 
 `Display` text (`error running server function: …`) as the top `message`. An extractor rejection
 (`AuthUser`'s 401, the CSRF 403) or arguments that do not decode give `{"error": text}`. A body
 with a `data` that is not a `ServerError` (see the 429 below) would not decode on the client.
-`server::api::errors_layer` rewrites all of them into the shape above. Bodies that are not JSON
-(a panic, axum's own 405, 413 or 415) are left alone; the client classifies them by status.
+`server::api::errors_layer` rewrites all of them into the shape above. A **5xx** body that is none
+of these shapes (not JSON: Dioxus's plain-text panic answer, which quotes the panic in debug
+builds; or JSON of another shape) gets the generic message and no details too, keeping its status
+(`503` gets `The server is busy. Please try again.`); its text is logged, never sent. Other 4xx
+bodies that are not JSON (axum's own 405 or 415) are left alone; the client classifies them by
+status.
 
 **Arguments that do not decode** are `422 Invalid request.` They include a malformed id, a wrong
 type or a missing field. Dioxus answers them with a `500` whose text is a serde error.
@@ -131,11 +139,48 @@ show and any structured `details`:
   and unknown statuses, and for answers that are not ours (`message` = `HTTP {code}: {text}`, the
   client's fallback for a body that is not our JSON), it shows a generic message for the kind and
   drops the details.
-- 413 counts as `Invalid`.
+- 413 counts as `Invalid`; 408 (the body did not arrive in time) counts as `Network`, retryable.
 - **Retryable:** `Transient` (503, 502, 504), `RateLimited` (429, honouring `Retry-After`), and
-  `Network` (timeouts, connection failures, the request never answered).
+  `Network` (timeouts, connection failures, the request never answered, 408).
 - **Not retryable:** 400, 401, 403, 404, 409, 413, 422 and 500. Retrying the same request cannot fix
   them. A 401 means going back to sign-in.
+
+### Request limits (#74)
+
+`server::limits` caps every request body and times every `/api/` call:
+
+| Limit | Value | Answer |
+|---|---|---|
+| Request body, default (`DEFAULT_BODY_LIMIT`) | 64 KiB | `413 This request is too large.` |
+| Request body, `/api/programs/upload` (`UPLOAD_BODY_LIMIT`) | 528 KiB (2 × 256 KiB + 16 KiB), see [Programs](#programs-srcapiprogramsrs-19) | `413 The program file is too large (the limit is 256 KiB).` |
+| Request body, `POST /webhooks/stripe` (outside Dioxus, `DefaultBodyLimit`) | 256 KiB | axum's `413` |
+| Body read (`BODY_READ_TIMEOUT`), from the end of the headers | 10 s | `408 The request took too long to arrive. Please try again.` |
+| Whole `/api/` call (`API_TIMEOUT`), body read included | 15 s | `503 The server is busy. Please try again.` |
+
+- **Why a cap of our own.** Dioxus 0.7.10 reads a server function's body with `unwrap`, so a body
+  it cannot read (past axum's 2 MiB default, a dropped connection) panics into a `500`. The cap
+  layer reads the whole body first, at most the limit, and hands Dioxus a complete one. It refuses
+  a body at once when `Content-Length` announces more, and otherwise as soon as more has arrived:
+  a chunked body or a lying `Content-Length` does not get past it.
+- **Where.** The cap wraps everything Dioxus serves (server functions and pages; outside `/api/`
+  the `413` is plain text), inside the CSRF check, the per-IP rate limit, the session and the
+  per-user rate limit, so refused requests never get their body read. It runs before the
+  function's extractors: **an oversize body gets `413` whether the client is signed in or not.**
+  The upload is the exception: it checks the session first (`401` signed out) and reads its own
+  body with the same helper and timeout (`limits::OWN_BODY_LIMIT`).
+- **The 64 KiB default.** The largest legitimate bodies, measured by
+  `the_default_body_limit_covers_every_server_function`: a passkey registration 863 bytes (from a
+  software authenticator sending a `packed` attestation with its certificate; browsers send
+  `none`, as the server asks), a settings update with a full plate inventory 751 bytes, a logged
+  set 297 bytes. The test fails if one grows past an eighth of the cap. A new function whose
+  arguments can be larger gets its own limit like the upload.
+- **The timeouts.** 15 s is longer than the pool's acquire timeout (10 s), so a call waiting for a
+  connection still gets that error's own `503`, and shorter than the shutdown grace period (20 s).
+  At the deadline the call is dropped, like a dropped connection; every write is idempotent, so the
+  client's retry is safe. `/healthz`, `/readyz` and pages are not timed.
+- **Not covered yet.** Nothing bounds how long a client takes to send its *headers*: hyper's
+  header-read timeout (30 s by default) needs a timer, which `axum::serve` (0.8) does not set and
+  does not let us set. It would take our own hyper-util accept loop.
 
 ## Idempotency
 
@@ -351,7 +396,9 @@ not exist.
      without the body being read), then reads the whole body before Dioxus does and refuses it
      with `413` past `UPLOAD_BODY_LIMIT` (2 × `MAX_DOCUMENT_BYTES` + 16 KiB: the document travels as a JSON
      string, where `"`, `\` and line breaks take two bytes). It checks `Content-Length` first and
-     then counts the bytes actually read, so a missing or lying header does not get past it.
+     then counts the bytes actually read, so a missing or lying header does not get past it. A
+     body that takes longer than 10 s to arrive is `408` (see [Request limits](#request-limits-74)).
+     This route is exempt from the 64 KiB default cap.
   2. A document over `MAX_DOCUMENT_BYTES` (256 KiB) is refused with `413`, before parsing.
   3. `Program::from_json` parses and validates it. A failure is `422` with `ProgramProblems`
      (`{errors: [{path, message, line?, column?}], omitted}`) as the error details: a parse error

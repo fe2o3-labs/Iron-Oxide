@@ -19,6 +19,7 @@ use secrecy::{ExposeSecret, SecretSlice, SecretString};
 use sqlx::postgres::PgConnectOptions;
 use url::Url;
 
+use super::limits::RequestLimits;
 use super::rate_limit::{ClientIpSource, RateLimitConfig};
 
 /// Default bind IP, the same as `dioxus::serve` uses when `IP` is unset.
@@ -133,6 +134,8 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     /// Billing settings (#21, see docs/billing.md).
     pub billing: BillingConfig,
+    /// The request body cap and timeouts (#74). Built in, see `docs/api.md`.
+    pub request_limits: RequestLimits,
 }
 
 /// Billing settings (#21). All optional while billing is not implemented.
@@ -406,6 +409,7 @@ impl Config {
                     ..RateLimitConfig::default()
                 },
                 billing,
+                request_limits: RequestLimits::default(),
             }),
             _ => Err(ConfigErrors(env.errors)),
         }
