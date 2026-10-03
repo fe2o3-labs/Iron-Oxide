@@ -24,11 +24,14 @@ use iron_oxide_domain::{
     ExerciseId, LoggedSet, PlateInventory, Reps, Seconds, SetId, Unit, Weight,
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::api::sessions::{PlannedExercise, SessionPlan};
+use crate::offline::WriteKey;
 use crate::ui::weight::weight_text;
 
 /// One set of the day, in the order it is done.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     /// The exercise's position in the plan.
     pub exercise: usize,
@@ -412,7 +415,11 @@ fn group_of(plan: &SessionPlan, exercise: usize) -> std::ops::Range<usize> {
 
 /// The rest screen's header: `REST · BACK SQUAT` and `Set 2 logged ✓` for the set it follows.
 #[must_use]
-pub fn rest_header(plan: &SessionPlan, set: &LoggedSet<Timestamp>) -> (String, String) {
+pub fn rest_header(
+    plan: &SessionPlan,
+    set: &LoggedSet<Timestamp>,
+    state: &SaveState,
+) -> (String, String) {
     let name = plan
         .exercises
         .iter()
@@ -422,10 +429,67 @@ pub fn rest_header(plan: &SessionPlan, set: &LoggedSet<Timestamp>) -> (String, S
             |planned| planned.exercise.name.clone(),
         );
     let kind = if set.warm_up { "Warm-up" } else { "Set" };
+    let done = match state {
+        SaveState::Saved => "logged ✓",
+        SaveState::Saving => "saving…",
+        SaveState::NotSaved(_) => "not saved",
+    };
     (
         format!("REST · {}", name.to_uppercase()),
-        format!("{kind} {} logged ✓", set.set_index + 1),
+        format!("{kind} {} {done}", set.set_index + 1),
     )
+}
+
+/// Where a logged set stands with the server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveState {
+    /// Delivered.
+    Saved,
+    /// Queued, on its way.
+    Saving,
+    /// Refused by the server: its message.
+    NotSaved(String),
+}
+
+/// The state of the set `id`, from the outbox's queued writes.
+#[must_use]
+pub fn save_state(id: SetId, queued: &[(WriteKey, Option<String>)]) -> SaveState {
+    match queued.iter().find(|(key, _)| *key == WriteKey::SaveSet(id)) {
+        None => SaveState::Saved,
+        Some((_, None)) => SaveState::Saving,
+        Some((_, Some(message))) => SaveState::NotSaved(message.clone()),
+    }
+}
+
+/// The line the set screen shows while some of `sets` are not delivered: `2 sets saving…`, or
+/// `1 set not saved: <the server's message>` once one was refused. `None` when all are saved.
+#[must_use]
+pub fn unsaved_line(
+    sets: &[LoggedSet<Timestamp>],
+    queued: &[(WriteKey, Option<String>)],
+) -> Option<String> {
+    let states: Vec<_> = sets.iter().map(|set| save_state(set.id, queued)).collect();
+    let refused: Vec<_> = states
+        .iter()
+        .filter_map(|state| match state {
+            SaveState::NotSaved(message) => Some(message),
+            _ => None,
+        })
+        .collect();
+    if let Some(first) = refused.first() {
+        let count = u32::try_from(refused.len()).unwrap_or(u32::MAX);
+        return Some(format!("{} not saved: {first}", plural(count, "set")));
+    }
+    let saving = states
+        .iter()
+        .filter(|state| **state == SaveState::Saving)
+        .count();
+    (saving > 0).then(|| {
+        format!(
+            "{} saving…",
+            plural(u32::try_from(saving).unwrap_or(u32::MAX), "set")
+        )
+    })
 }
 
 /// The "up next" card of the rest screen: `UP NEXT · SET 3 / 5` and `5 × 100 kg`. The exercise
@@ -1300,6 +1364,41 @@ mod tests {
     }
 
     #[test]
+    fn a_set_shows_saving_until_delivered_and_not_saved_when_refused() {
+        let sets = vec![
+            logged("squat", false, 0, 100.0, 2_000),
+            logged("squat", false, 1, 100.0, 3_000),
+        ];
+        let (first, second) = (sets[0].id, sets[1].id);
+        assert_eq!(save_state(first, &[]), SaveState::Saved);
+        assert_eq!(unsaved_line(&sets, &[]), None);
+        let queued = vec![
+            (WriteKey::SaveSet(first), None),
+            (WriteKey::SaveSet(second), None),
+        ];
+        assert_eq!(save_state(first, &queued), SaveState::Saving);
+        assert_eq!(
+            unsaved_line(&sets, &queued).as_deref(),
+            Some("2 sets saving…")
+        );
+        let refused = vec![
+            (
+                WriteKey::SaveSet(first),
+                Some("This session has already ended.".to_owned()),
+            ),
+            (WriteKey::SaveSet(second), None),
+        ];
+        assert_eq!(
+            save_state(first, &refused),
+            SaveState::NotSaved("This session has already ended.".to_owned())
+        );
+        assert_eq!(
+            unsaved_line(&sets, &refused).as_deref(),
+            Some("1 set not saved: This session has already ended.")
+        );
+    }
+
+    #[test]
     fn the_rest_screen_reads_like_the_board() {
         let plan = plan(vec![
             planned("back-squat", 0, 5, None),
@@ -1308,8 +1407,16 @@ mod tests {
         let steps = steps(&plan, kg(20.0));
         let set = logged("back-squat", false, 1, 100.0, 2_000);
         assert_eq!(
-            rest_header(&plan, &set),
+            rest_header(&plan, &set, &SaveState::Saved),
             ("REST · BACK SQUAT".to_owned(), "Set 2 logged ✓".to_owned())
+        );
+        assert_eq!(
+            rest_header(&plan, &set, &SaveState::Saving).1,
+            "Set 2 saving…"
+        );
+        assert_eq!(
+            rest_header(&plan, &set, &SaveState::NotSaved("No.".to_owned())).1,
+            "Set 2 not saved"
         );
         assert_eq!(
             up_next(&steps, 2, 0, &plan, Unit::Kg),

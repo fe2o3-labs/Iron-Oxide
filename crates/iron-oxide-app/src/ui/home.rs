@@ -2,27 +2,31 @@
 //! exercises, a big Start (or Resume) button, and the last session.
 //!
 //! The next day comes from the server (`get_next_session_plan`, which applies the domain's
-//! rotation); starting a session goes through [`super::session::writes`].
+//! rotation). Starting a session queues it in the offline outbox and opens it at once
+//! ([`super::session::local::start`]). The session kept on the device decides Resume: it is
+//! offered while its start is still queued or the server cannot be reached, and not once the
+//! session ended on this device (even before its finish is delivered).
 
 use dioxus::prelude::*;
 use iron_oxide_domain::program::Day;
 use iron_oxide_domain::progression::{NextTargets, SetGoal};
-use iron_oxide_domain::{
-    DayId, ProgramVersionId, SessionId, SessionStatus, Unit, Weight, time::Timestamp,
-};
+use iron_oxide_domain::{DayId, ProgramVersionId, SessionStatus, Unit, Weight, time::Timestamp};
 
 use super::components::{Button, Card, EmptyState, LoadingState};
-use super::errors::{Errors, use_errors};
-use super::session::{platform, writes};
+use super::errors::{BannerKind, Errors, use_errors};
+use super::session::local::{self, Restore};
+use super::session::{NOT_SIGNED_IN, platform};
 use super::shell::Route;
 use super::weight::{use_unit, weight_number, weight_text};
-use crate::api::error::{ApiFailure, FailureKind};
 use crate::api::history::{SessionSummary, history_page};
 use crate::api::programs::{get_active_program, get_program};
 use crate::api::sessions::{
     NextSessionPlan, PlannedExercise, SessionPlan, get_in_progress_session, get_next_session_plan,
     get_session_plan,
 };
+use crate::api::settings::Settings;
+use crate::offline::{LocalSession, Outbox, use_outbox};
+use crate::ui::user_settings::use_user_settings;
 
 /// What the home screen shows once loaded.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +40,8 @@ enum HomeData {
 struct Today {
     shown: Shown,
     last: LastSession,
+    /// The next day, to start; `None` when only the session kept on the device is known.
+    next: Option<NextSessionPlan>,
 }
 
 /// The session in progress, read from its own program version (never from the active program,
@@ -58,17 +64,23 @@ pub struct Shown {
     pub in_progress: bool,
 }
 
+/// The home screen for a session in progress.
+#[must_use]
+pub fn shown_running(running: &Running) -> Shown {
+    Shown {
+        program_name: running.program_name.clone(),
+        day_name: running.plan.day_name.clone(),
+        exercises: running.plan.exercises.clone(),
+        in_progress: true,
+    }
+}
+
 /// What the home screen shows: the session in progress if there is one (its own program, version
 /// and day), else the next day of the active program.
 #[must_use]
 pub fn shown(active_name: &str, next: &NextSessionPlan, running: Option<&Running>) -> Shown {
     match running {
-        Some(running) => Shown {
-            program_name: running.program_name.clone(),
-            day_name: running.plan.day_name.clone(),
-            exercises: running.plan.exercises.clone(),
-            in_progress: true,
-        },
+        Some(running) => shown_running(running),
         None => Shown {
             program_name: active_name.to_owned(),
             day_name: next.day_name.clone(),
@@ -111,23 +123,73 @@ pub fn day_name_in_version(
         .map(|candidate| candidate.name.clone())
 }
 
-async fn load(errors: Errors) -> Result<HomeData, ServerFnError> {
+/// The session in progress kept on the device, as Home shows it.
+fn running_of(record: &LocalSession, fallback_name: &str) -> Option<Running> {
+    let (active, _, _) = local::active_of(record)?;
+    Some(Running {
+        program_name: active
+            .program_name
+            .unwrap_or_else(|| fallback_name.to_owned()),
+        plan: active.plan,
+    })
+}
+
+/// Loads the home screen. The session kept on the device wins while its start is queued, and
+/// keeps Resume available when the server cannot be reached.
+async fn load(errors: Errors, outbox: Outbox) -> Result<HomeData, ServerFnError> {
+    let user = outbox.user();
+    let record = user.and_then(local::load);
+    let queued = outbox.queued();
+    let kept = match local::reconcile(record.clone(), None, &queued) {
+        Restore::Resume(record) => running_of(&record, "Workout"),
+        _ => None,
+    };
+    match (load_server(errors, outbox, record, &queued).await, kept) {
+        // Offline (or the server failing): the session on the device can still be resumed.
+        (Err(_), Some(kept)) => Ok(HomeData::Ready(Box::new(Today {
+            shown: shown_running(&kept),
+            last: LastSession::Failed,
+            next: None,
+        }))),
+        (loaded, _) => loaded,
+    }
+}
+
+async fn load_server(
+    errors: Errors,
+    outbox: Outbox,
+    record: Option<LocalSession>,
+    queued: &[(crate::offline::WriteKey, Option<String>)],
+) -> Result<HomeData, ServerFnError> {
     // Without an active program the next plan is a 409: ask for it only with one.
     let Some(active) = get_active_program().await? else {
         return Ok(HomeData::NoProgram);
     };
-    let running = match get_in_progress_session().await? {
-        Some(session) => {
-            let session = session.session;
-            let plan = get_session_plan(session.id).await?;
-            let program_name = if session.program_id == active.program.id {
-                active.program.name.clone()
-            } else {
-                get_program(session.program_id).await?.program.name
-            };
-            Some(Running { program_name, plan })
+    let server = get_in_progress_session().await?;
+    let running = match local::reconcile(record, Some(server.as_ref()), queued) {
+        Restore::Resume(record) => running_of(&record, &active.program.name),
+        // Ended on this device: no Resume, even before its finish reaches the server.
+        Restore::Ended(_) => None,
+        decision => {
+            if decision == Restore::Drop
+                && let Some(user) = outbox.user()
+            {
+                local::clear(user);
+            }
+            match server {
+                Some(session) => {
+                    let session = session.session;
+                    let plan = get_session_plan(session.id).await?;
+                    let program_name = if session.program_id == active.program.id {
+                        active.program.name.clone()
+                    } else {
+                        get_program(session.program_id).await?.program.name
+                    };
+                    Some(Running { program_name, plan })
+                }
+                None => None,
+            }
         }
-        None => None,
     };
     let next = get_next_session_plan().await?;
     let last = match history_page(None, Some(1)).await {
@@ -164,15 +226,8 @@ async fn load(errors: Errors) -> Result<HomeData, ServerFnError> {
     Ok(HomeData::Ready(Box::new(Today {
         shown: shown(&active.program.name, &next, running.as_ref()),
         last,
+        next: Some(next),
     })))
-}
-
-/// Whether a failed start keeps its id and time for the next tap: yes when the server may have
-/// started it without the answer arriving (503, 429, network), so the retry replays the same
-/// start instead of making a second one (a false 409).
-#[must_use]
-pub const fn keeps_attempt(kind: FailureKind) -> bool {
-    kind.is_retryable()
 }
 
 /// One exercise of the preview: `"5 × 5 · 100 kg"`, `"3 × 45 s"`, `"Training max needed"`.
@@ -341,8 +396,9 @@ fn local_offset_minutes(at: Timestamp) -> i32 {
 #[component]
 pub fn Home() -> Element {
     let errors = use_errors();
+    let outbox = use_outbox();
     let mut data = use_resource(move || async move {
-        let loaded = load(errors).await;
+        let loaded = load(errors, outbox).await;
         if let Err(error) = &loaded {
             errors.report(error);
         }
@@ -368,22 +424,19 @@ pub fn Home() -> Element {
             }
         },
         Some(Ok(HomeData::Ready(today))) => rsx! {
-            TodayView { today: *today, on_stale: move |()| data.restart() }
+            TodayView { today: *today }
         },
     }
 }
 
-/// The loaded home screen. `on_stale` reloads it (another session turned out to be in progress).
+/// The loaded home screen.
 #[component]
-fn TodayView(today: Today, on_stale: EventHandler<()>) -> Element {
+fn TodayView(today: Today) -> Element {
     let unit = use_unit();
     let errors = use_errors();
     let navigator = use_navigator();
-    let mut busy = use_signal(|| false);
-    // The id and time of a start the server may have received without its answer arriving: the
-    // next tap replays it (idempotent) instead of starting a second session.
-    let mut attempt = use_signal(|| None::<(SessionId, Timestamp)>);
-
+    let outbox = use_outbox();
+    let settings = use_user_settings();
     let Shown {
         program_name,
         day_name,
@@ -397,40 +450,28 @@ fn TodayView(today: Today, on_stale: EventHandler<()>) -> Element {
     };
     let last = last_session_text(&today.last, platform::now(), local_offset_minutes);
 
+    let next = today.next.clone();
+    let name = program_name.clone();
     let start = move |_| {
-        if *busy.peek() {
-            return;
-        }
+        // Inside the tap: lets iOS play the rest timer's beeps later.
+        platform::unlock_audio();
         if in_progress {
             navigator.push(Route::Workout {});
             return;
         }
-        busy.set(true);
-        let (session_id, started_at) = attempt
-            .peek()
-            .unwrap_or_else(|| (SessionId::new_v7(), platform::now()));
-        attempt.set(Some((session_id, started_at)));
-        spawn(async move {
-            match writes::start_session(session_id, started_at).await {
-                Ok(_) => {
-                    attempt.set(None);
-                    navigator.push(Route::Workout {});
-                }
-                Err(error) => {
-                    errors.report(&error);
-                    let kind = ApiFailure::classify(&error).kind;
-                    if !keeps_attempt(kind) {
-                        attempt.set(None);
-                    }
-                    // A 409: a session is already in progress (or the program changed): reload,
-                    // which shows Resume.
-                    if kind == FailureKind::Conflict {
-                        on_stale.call(());
-                    }
-                }
+        let Some(next) = next.as_ref() else {
+            return;
+        };
+        // The settings as loaded (or the defaults until they are): the workout keeps a copy.
+        let snapshot = settings.peek().unwrap_or_else(Settings::defaults);
+        match local::start(outbox, next, snapshot, Some(name.clone())) {
+            Ok(_) => {
+                navigator.push(Route::Workout {});
             }
-            busy.set(false);
-        });
+            Err(_) => {
+                errors.show(BannerKind::Error, NOT_SIGNED_IN);
+            }
+        }
     };
 
     rsx! {
@@ -454,7 +495,7 @@ fn TodayView(today: Today, on_stale: EventHandler<()>) -> Element {
             }
         }
         div { class: "io-actions",
-            Button { xl: true, block: true, busy: busy(), onclick: start,
+            Button { xl: true, block: true, onclick: start,
                 if in_progress { "Resume" } else { "Start" }
             }
             match last {
@@ -473,7 +514,7 @@ fn TodayView(today: Today, on_stale: EventHandler<()>) -> Element {
 #[cfg(test)]
 mod tests {
     use iron_oxide_domain::progression::{ExerciseTargets, SetTarget, TargetSource};
-    use iron_oxide_domain::{ExerciseId, ProgramId, Reps, Seconds};
+    use iron_oxide_domain::{ExerciseId, ProgramId, Reps, Seconds, SessionId};
 
     use crate::api::sessions::SessionView;
 
@@ -749,15 +790,5 @@ mod tests {
         assert_eq!(shown_next.program_name, "Program Y");
         assert_eq!(shown_next.day_name, "Y day A");
         assert_eq!(shown_next.exercises, next.exercises);
-    }
-
-    #[test]
-    fn only_a_start_that_may_have_landed_is_replayed() {
-        assert!(keeps_attempt(FailureKind::Transient));
-        assert!(keeps_attempt(FailureKind::Network));
-        assert!(keeps_attempt(FailureKind::RateLimited));
-        assert!(!keeps_attempt(FailureKind::Conflict));
-        assert!(!keeps_attempt(FailureKind::Invalid));
-        assert!(!keeps_attempt(FailureKind::Unauthorized));
     }
 }

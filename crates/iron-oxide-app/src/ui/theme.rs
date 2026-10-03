@@ -186,7 +186,7 @@ mod tests {
     }
 
     /// Tap targets are 56 px; 44 px is only for the header's icon buttons (and the header rows:
-    /// the top bar and the workout's header).
+    /// the top bar and the workout's header, and the unsaved indicator's buttons in the top bar).
     #[test]
     fn only_header_icon_buttons_use_the_small_tap_size() {
         let css = css();
@@ -207,10 +207,50 @@ mod tests {
         selectors.dedup();
         assert_eq!(
             selectors,
-            [".io-icon-button", ".io-session-header", ".io-topbar"]
+            [
+                ".io-icon-button",
+                ".io-session-header",
+                ".io-topbar",
+                ".io-unsaved__button"
+            ]
         );
         assert!(block(&css, "button.io-chip {").contains("min-height: var(--io-tap);"));
         assert!(block(&css, ".io-banner .io-icon-button {").contains("height: var(--io-tap);"));
+    }
+
+    /// Every rule is closed before the next one starts: a merge once dropped two closing braces,
+    /// which silently nested the rest of the stylesheet (the session screens lost their styles).
+    /// Only at-rules (`@media`, `@keyframes`, …) may hold rules.
+    #[test]
+    fn every_rule_is_closed_before_the_next_one() {
+        let mut css = css();
+        while let Some(start) = css.find("/*") {
+            let end = start + css[start..].find("*/").expect("unclosed comment") + 2;
+            css.replace_range(start..end, "");
+        }
+        let mut open: Vec<bool> = Vec::new();
+        let mut prelude = String::new();
+        for c in css.chars() {
+            match c {
+                '{' => {
+                    let at_rule = prelude.trim_start().starts_with('@');
+                    assert!(
+                        open.last().is_none_or(|parent| *parent),
+                        "a rule inside a rule: {:?}",
+                        prelude.trim()
+                    );
+                    open.push(at_rule);
+                    prelude.clear();
+                }
+                '}' => {
+                    assert!(open.pop().is_some(), "a closing brace too many");
+                    prelude.clear();
+                }
+                ';' => prelude.clear(),
+                c => prelude.push(c),
+            }
+        }
+        assert!(open.is_empty(), "{} rules left open", open.len());
     }
 
     #[test]
