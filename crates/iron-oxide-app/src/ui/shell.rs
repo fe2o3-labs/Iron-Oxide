@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 
 use super::account::Account;
 use super::components::icons::{HistoryIcon, HomeIcon, ProgramsIcon, SettingsIcon};
-use super::components::{Card, EmptyState, LoadingState};
+use super::components::{EmptyState, LoadingState};
 use super::errors::use_errors;
 use crate::auth::api::{is_unauthorized, me};
 
@@ -229,13 +229,7 @@ fn Programs() -> Element {
 
 #[component]
 fn Settings() -> Element {
-    rsx! {
-        PageHeader { title: "Settings" }
-        Account {}
-        Card { title: "Units",
-            p { class: "io-muted", "Weights are shown in kilograms." }
-        }
-    }
+    rsx! { super::settings::SettingsPage {} }
 }
 
 #[component]

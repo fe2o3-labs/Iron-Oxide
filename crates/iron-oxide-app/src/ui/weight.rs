@@ -55,8 +55,8 @@ pub fn step_weight(
     moved.clamp(min, max.max(min))
 }
 
-/// The user's display unit, provided by the app root. Kilograms until the settings screen (#34)
-/// loads the user's choice into it.
+/// The user's display unit, provided by the app root. Kilograms until the user's settings are
+/// loaded (`crate::ui::settings`, as soon as the session is signed in), then theirs.
 #[derive(Clone, Copy, PartialEq)]
 pub struct UnitSetting(pub Signal<Unit>);
 

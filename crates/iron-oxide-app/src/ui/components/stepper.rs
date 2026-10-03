@@ -30,7 +30,8 @@ pub fn numeral_size(text: &str) -> u32 {
 }
 
 /// A stepper over whole numbers (reps, seconds). `label` is shown under the value (`REPS`) and
-/// names the group; `less_label` and `more_label` name the buttons for screen readers.
+/// names the group; `less_label` and `more_label` name the buttons for screen readers. `text`
+/// replaces the number shown, e.g. `2:30` for 150 seconds.
 #[component]
 pub fn Stepper(
     #[props(into)] label: String,
@@ -41,13 +42,14 @@ pub fn Stepper(
     on_change: EventHandler<i64>,
     #[props(into)] less_label: Option<String>,
     #[props(into)] more_label: Option<String>,
+    #[props(into)] text: Option<String>,
 ) -> Element {
     let less_label = less_label.unwrap_or_else(|| format!("{step} less"));
     let more_label = more_label.unwrap_or_else(|| format!("{step} more"));
     rsx! {
         StepperView {
             label,
-            text: value.to_string(),
+            text: text.unwrap_or_else(|| value.to_string()),
             less_label,
             more_label,
             can_decrease: value > min,

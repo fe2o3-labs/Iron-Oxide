@@ -35,6 +35,13 @@ impl Settings {
     /// The settings of a user who never saved any: kg, a 20 kg bar, the domain's default kg plate
     /// inventory, 2 minutes of rest and sound on.
     #[must_use]
+    #[cfg_attr(
+        not(any(feature = "server", test)),
+        allow(
+            dead_code,
+            reason = "the server's answer for a new user; the client asks for it"
+        )
+    )]
     pub fn defaults() -> Self {
         Self {
             unit: Unit::Kg,
