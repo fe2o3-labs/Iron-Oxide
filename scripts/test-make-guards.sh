@@ -7,7 +7,8 @@
 # run, a successful fetch and a clean `main` at exactly origin/main (not ahead, behind or
 # diverged), both before and after its `make check`, and deploys from a pristine export of the
 # commit; `make clean` and `make clean-all CONFIRM=1` refuse a target dir outside the checkout
-# without CONFIRM_SHARED=1; `make prune` refuses a target dir holding tracked files. And the suite itself passes when its caller sets CONFIRM=1 or
+# without CONFIRM_SHARED=1; `make prune` refuses a target dir holding tracked files; `make
+# landing-build` only deletes and recreates a directory under dist/. And the suite itself passes when its caller sets CONFIRM=1 or
 # SKIP_SECRETS=1.
 set -euo pipefail
 
@@ -260,6 +261,34 @@ run ok "clean-all goes ahead with CONFIRM=1 CONFIRM_SHARED=1" "STUB cargo clean"
   clean-all CARGO="$stubs/cargo" CARGO_TARGET_DIR="$shared" CONFIRM=1 CONFIRM_SHARED=1 COMPOSE=echo
 run ok "clean accepts a relative target dir inside the checkout" "STUB cargo clean" -- \
   clean CARGO="$stubs/cargo" CARGO_TARGET_DIR=target
+
+# `make landing-build` deletes and recreates LANDING_OUT: only a directory under dist/ is accepted.
+mkdir -p "$work/landing" "$work/schemas"
+echo page >"$work/landing/index.html"
+echo '{}' >"$work/schemas/program.schema.json"
+run fail "landing-build refuses LANDING_OUT=landing (the sources)" "must be a directory under dist/" -- \
+  landing-build LANDING_OUT=landing
+run fail "landing-build refuses LANDING_OUT=. (the checkout)" "must be a directory under dist/" -- \
+  landing-build LANDING_OUT=.
+run fail "landing-build refuses an absolute LANDING_OUT" "must be a directory under dist/" -- \
+  landing-build LANDING_OUT="$scratch"
+run fail "landing-build refuses LANDING_OUT=dist/.. (escapes dist/)" "must be a directory under dist/" -- \
+  landing-build LANDING_OUT=dist/..
+run fail "landing-build refuses LANDING_OUT=dist/ itself" "must be a directory under dist/" -- \
+  landing-build LANDING_OUT=dist/
+if [ -f "$work/landing/index.html" ] && [ -d "$scratch/stubs" ]; then
+  echo "  ok    landing-build refusals deleted nothing"
+else
+  echo "  FAIL  landing-build refusals deleted nothing"
+  failures=$((failures + 1))
+fi
+run ok "landing-build assembles dist/landing with the schema" "Landing page: dist/landing" -- landing-build
+if [ -f "$work/dist/landing/index.html" ] && [ -f "$work/dist/landing/program.schema.json" ]; then
+  echo "  ok    landing-build output has the page and the schema"
+else
+  echo "  FAIL  landing-build output has the page and the schema"
+  failures=$((failures + 1))
+fi
 
 # The suite must not depend on its caller: `make test-make` runs inside `make check`, itself inside
 # `make deploy CONFIRM=1`, and `make check SKIP_SECRETS=1` is documented.

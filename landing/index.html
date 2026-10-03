@@ -117,20 +117,20 @@ Before you write it, ask me what you need to know, a few questions at a time:
 
 The document must follow the JSON Schema at https://iron-oxyde.com/program.schema.json. If you can't open it, follow these rules:
 - Top level: "schema_version": 1, "name", "description", "days" and "rotation". Leave out "$schema".
-- "days" is a list of {"id", "name", "exercises"}. "rotation" lists the day ids in the order they repeat, each day once.
-- Ids are lowercase slugs such as "back-squat" or "upper-1". When an exercise comes back on another day, use the same id, name and progression.
+- "days" is a list of {"id", "name", "exercises"}. "rotation" lists the day ids in the order they repeat: every day exactly once.
+- Ids are lowercase slugs such as "back-squat" or "upper-1". An exercise appears at most once per day. When it comes back on another day, use the same id, name, progression and kind of load (for a heavy and a light variant, use two ids).
 - Each exercise has "id", "name", "rest" (seconds after each set) and "work", which is one of:
   {"reps": {"sets": 3, "reps": 5}}
   {"reps": {"sets": 3, "reps": {"min": 8, "max": 12}}}
   {"hold": {"sets": 3, "seconds": 45}}
   {"intervals": {"work": 30, "rest": 90, "rounds": 8}}
 - "load" is {"kg": 60} or {"lb": 135}. Leave it out for bodyweight work.
-- Optional "warmup", lightest first, for example:
+- Optional "warmup", lightest first, only on loaded sets of reps, and lighter than the working weight, for example:
   [{"sets": 2, "reps": 5, "load": {"kg": 20}}, {"reps": 3, "load": {"percent_of_working_weight": 80}}]
 - Optional "progression" for loaded exercises:
   {"add_when_top_of_range": {"increment": {"kg": 2.5}}} for a fixed number of reps,
   {"double_progression": {"increment": {"kg": 2.5}}} for a rep range,
-  each with an optional "deload_after_failures": {"failures": 3, "percent": 10}.
+  each with an optional "deload_after_failures": {"failures": 3, "percent": 10}. Write the increment in the same unit as the load. No progression on holds or intervals.
 - Optional "notes": short coaching cues.
 Choose conservative starting loads from what I tell you.
 
@@ -190,7 +190,7 @@ Once you have my answers, reply with the JSON document only, with nothing before
               <source type="image/avif" srcset="assets/screens/rest-dark.avif">
               <source type="image/webp" srcset="assets/screens/rest-dark.webp">
               <img src="assets/screens/rest-dark.png" width="390" height="844" loading="lazy" decoding="async"
-                alt="The rest timer counting down 2:34 of a 3:00 rest, with minus and plus 15 second buttons and the next set, 5 × 92.5 kg.">
+                alt="The rest timer counting down a 3:00 rest, with minus and plus 15 second buttons and the next set, 5 × 92.5 kg.">
             </picture>
           </figure>
           <div class="feature-copy">
