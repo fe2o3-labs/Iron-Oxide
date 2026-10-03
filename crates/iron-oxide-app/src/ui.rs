@@ -5,6 +5,8 @@
 //! - `components`: the reusable components.
 //! - `errors`: the banner every server error is reported to.
 //! - `weight`: weights in the user's unit.
+//! - `home`: the home screen.
+//! - `session`: the workout session; its writes go through `session::writes`.
 
 mod account;
 #[cfg_attr(
@@ -27,6 +29,8 @@ mod components;
 mod errors;
 #[cfg(debug_assertions)]
 mod gallery;
+mod home;
+mod session;
 mod shell;
 pub(crate) mod theme;
 #[cfg_attr(

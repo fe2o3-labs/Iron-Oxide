@@ -11,6 +11,7 @@ use super::account::Account;
 use super::components::icons::{HistoryIcon, HomeIcon, ProgramsIcon, SettingsIcon};
 use super::components::{Card, EmptyState, LoadingState};
 use super::errors::use_errors;
+use super::home::Home;
 use crate::auth::api::{is_unauthorized, me};
 
 /// The app's pages. Home, History, Programs and Settings are filled by their own tickets.
@@ -26,6 +27,8 @@ pub enum Route {
         Programs {},
         #[route("/settings")]
         Settings {},
+        #[route("/session")]
+        Session {},
         #[route("/:..segments")]
         NotFound { segments: Vec<String> },
     #[end_layout]
@@ -194,13 +197,15 @@ fn PageHeader(#[props(into)] title: String, #[props(into)] subtitle: Option<Stri
     }
 }
 
+/// The session in progress. The session screen (#28) replaces this placeholder.
 #[component]
-fn Home() -> Element {
+fn Session() -> Element {
     rsx! {
-        PageHeader { title: "Today" }
+        PageHeader { title: "Session" }
         EmptyState {
-            title: "Nothing planned",
-            message: "Your program's next workout will show up here.",
+            title: "Session started",
+            message: "Logging sets is coming soon.",
+            Link { class: "io-button io-button-secondary", to: Route::Home {}, "Go home" }
         }
     }
 }
@@ -277,6 +282,7 @@ mod tests {
         assert_eq!(Route::History {}.to_string(), "/history");
         assert_eq!(Route::Programs {}.to_string(), "/programs");
         assert_eq!(Route::Settings {}.to_string(), "/settings");
+        assert_eq!(Route::Session {}.to_string(), "/session");
         assert_eq!(Route::Gallery {}.to_string(), "/dev/components");
         assert_eq!("/history".parse::<Route>().unwrap(), Route::History {});
         assert_eq!(
