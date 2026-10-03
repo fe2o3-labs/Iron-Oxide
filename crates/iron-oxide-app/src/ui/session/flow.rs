@@ -211,25 +211,41 @@ pub struct Prefill {
     pub weight: Option<Weight>,
 }
 
-/// What the steppers start from: the step's target, except that a working set takes the weight
-/// of the exercise's last logged working set, so a weight the lifter changed on set 1 carries to
-/// set 2.
+/// What the steppers start from: each set's own target (the progression's, or last session's set
+/// by set). The one exception is an explicit override: when the latest working set logged before
+/// this one, for the same exercise, was lifted at another weight than its own target, that weight
+/// carries to the following working sets of the exercise. Warm-ups always keep their target.
 #[must_use]
-pub fn prefill(step: &Step, exercise: &ExerciseId, logged: &[LoggedSet<Timestamp>]) -> Prefill {
+pub fn prefill(
+    steps: &[Step],
+    step: &Step,
+    exercise: &ExerciseId,
+    logged: &[LoggedSet<Timestamp>],
+) -> Prefill {
     let reps = match step.target.goal {
         SetGoal::Reps { reps, .. } => reps,
         SetGoal::Hold { .. } | SetGoal::Intervals { .. } => Reps::new(1),
     };
-    let carried = (!step.warm_up)
+    let overridden = (!step.warm_up)
         .then(|| {
-            logged
+            let last = logged.iter().rev().find(|set| {
+                set.exercise == *exercise && !set.warm_up && set.set_index < step.set_index
+            })?;
+            let own_target = steps
                 .iter()
-                .rev()
-                .find(|set| set.exercise == *exercise && !set.warm_up)
-                .and_then(|set| set.weight)
+                .find(|other| {
+                    other.exercise == step.exercise
+                        && !other.warm_up
+                        && other.set_index == last.set_index
+                })
+                .and_then(|other| other.target.weight);
+            last.weight.filter(|weight| Some(*weight) != own_target)
         })
         .flatten();
-    let weight = step.target.weight.map(|target| carried.unwrap_or(target));
+    let weight = step
+        .target
+        .weight
+        .map(|target| overridden.unwrap_or(target));
     Prefill { reps, weight }
 }
 
@@ -463,7 +479,8 @@ pub fn exercise_summary(planned: &PlannedExercise, fallback_weight: Weight, unit
     })
 }
 
-/// The superset position of an exercise, `A1`, `A2`, or `None` outside a superset.
+/// The superset position of an exercise: `A1`, `A2` for a one-letter label, `UPPER-1 · 2` for a
+/// longer one (so its digits never run into the position), `None` outside a superset.
 #[must_use]
 pub fn superset_tag(plan: &SessionPlan, exercise: usize) -> Option<String> {
     let label = plan.exercises[exercise].exercise.superset.as_ref()?;
@@ -472,11 +489,13 @@ pub fn superset_tag(plan: &SessionPlan, exercise: usize) -> Option<String> {
         .take_while(|&index| plan.exercises[index].exercise.superset.as_ref() == Some(label))
         .last()
         .unwrap_or(exercise);
-    Some(format!(
-        "{}{}",
-        label.as_str().to_uppercase(),
-        exercise - first + 1
-    ))
+    let label = label.as_str().to_uppercase();
+    let position = exercise - first + 1;
+    Some(if label.chars().count() == 1 {
+        format!("{label}{position}")
+    } else {
+        format!("{label} · {position}")
+    })
 }
 
 #[cfg(test)]
@@ -697,7 +716,7 @@ mod tests {
         let steps = steps(&plan, kg(20.0));
         let squat = ExerciseId::new("squat").unwrap();
         assert_eq!(
-            prefill(&steps[1], &squat, &[]),
+            prefill(&steps, &steps[1], &squat, &[]),
             Prefill {
                 reps: Reps::new(5),
                 weight: Some(kg(100.0))
@@ -707,8 +726,54 @@ mod tests {
             logged("squat", true, 0, 20.0, 2_000),
             logged("squat", false, 0, 102.5, 3_000),
         ];
-        assert_eq!(prefill(&steps[2], &squat, &sets).weight, Some(kg(102.5)));
-        assert_eq!(prefill(&steps[0], &squat, &sets).weight, Some(kg(20.0)));
+        assert_eq!(
+            prefill(&steps, &steps[2], &squat, &sets).weight,
+            Some(kg(102.5))
+        );
+        assert_eq!(
+            prefill(&steps, &steps[3], &squat, &sets).weight,
+            Some(kg(102.5))
+        );
+        assert_eq!(
+            prefill(&steps, &steps[0], &squat, &sets).weight,
+            Some(kg(20.0))
+        );
+    }
+
+    /// Review of #97: last session's per-set values (or a ramp) come back set by set.
+    #[test]
+    fn prefill_keeps_per_set_targets_when_unchanged() {
+        let mut squat = planned("squat", 0, 3, None);
+        if let NextTargets::Ready(targets) = &mut squat.targets {
+            targets.source = TargetSource::LastPerformance;
+            targets.working = vec![target(60.0, 5), target(70.0, 5), target(80.0, 5)];
+        }
+        let plan = plan(vec![squat]);
+        let steps = steps(&plan, kg(20.0));
+        let id = ExerciseId::new("squat").unwrap();
+        // Set 1 logged at its target: set 2 keeps its own.
+        let sets = vec![logged("squat", false, 0, 60.0, 2_000)];
+        assert_eq!(
+            prefill(&steps, &steps[1], &id, &sets).weight,
+            Some(kg(70.0))
+        );
+        // Set 2 overridden to 72.5: it carries to set 3, but not back to set 1 or 2.
+        let sets = vec![
+            logged("squat", false, 0, 60.0, 2_000),
+            logged("squat", false, 1, 72.5, 3_000),
+        ];
+        assert_eq!(
+            prefill(&steps, &steps[2], &id, &sets).weight,
+            Some(kg(72.5))
+        );
+        assert_eq!(
+            prefill(&steps, &steps[0], &id, &sets).weight,
+            Some(kg(60.0))
+        );
+        assert_eq!(
+            prefill(&steps, &steps[1], &id, &sets).weight,
+            Some(kg(70.0))
+        );
     }
 
     #[test]
@@ -728,7 +793,7 @@ mod tests {
         let plank = ExerciseId::new("plank").unwrap();
         let sets = vec![logged("plank", false, 0, 10.0, 2_000)];
         assert_eq!(
-            prefill(&step, &plank, &sets),
+            prefill(&[step], &step, &plank, &sets),
             Prefill {
                 reps: Reps::new(1),
                 weight: None
@@ -898,6 +963,12 @@ mod tests {
         assert_eq!(superset_tag(&plan, 1).as_deref(), Some("A1"));
         assert_eq!(superset_tag(&plan, 2).as_deref(), Some("A2"));
         assert_eq!(superset_tag(&plan, 3).as_deref(), Some("B1"));
+        let mut long = plan.clone();
+        long.exercises[1].exercise.superset =
+            Some(serde_json::from_value("upper-1".into()).unwrap());
+        long.exercises[2].exercise.superset = long.exercises[1].exercise.superset.clone();
+        assert_eq!(superset_tag(&long, 1).as_deref(), Some("UPPER-1 · 1"));
+        assert_eq!(superset_tag(&long, 2).as_deref(), Some("UPPER-1 · 2"));
     }
 
     #[test]
