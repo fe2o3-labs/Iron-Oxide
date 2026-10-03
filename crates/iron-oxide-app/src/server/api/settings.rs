@@ -38,8 +38,18 @@ pub async fn update(
 /// Checks an update and turns it into settings.
 pub fn validate(update: SettingsUpdate) -> Result<Settings, ApiError> {
     // Fixed messages: the domain's would echo the number, which can print as hundreds of digits.
-    let bar_weight = Weight::from_kg(update.bar_weight)
-        .map_err(|_| ApiError::invalid("The bar weight must be between 0 and 2000 kg."))?;
+    let bar_weight = Weight::from_kg(update.bar_weight).map_err(|_| {
+        ApiError::invalid_field(
+            "bar_weight",
+            "The bar weight must be between 0 and 2000 kg.",
+        )
+    })?;
+    if bar_weight.is_zero() {
+        return Err(ApiError::invalid_field(
+            "bar_weight",
+            "The bar must weigh more than zero.",
+        ));
+    }
     let stock = update
         .plate_inventory
         .into_iter()
@@ -50,14 +60,29 @@ pub fn validate(update: SettingsUpdate) -> Result<Settings, ApiError> {
             })
         })
         .collect::<Result<Vec<_>, ValueError>>()
-        .map_err(|_| ApiError::invalid("Plate weights must be between 0 and 2000 kg."))?;
-    let plate_inventory = PlateInventory::new(stock)
-        .map_err(|error| ApiError::invalid(format!("Plate inventory: {error}.")))?;
+        .map_err(|_| {
+            ApiError::invalid_field(
+                "plate_inventory",
+                "Plate weights must be between 0 and 2000 kg.",
+            )
+        })?;
+    let plate_inventory = PlateInventory::new(stock).map_err(|error| {
+        ApiError::invalid_field("plate_inventory", format!("Plate inventory: {error}."))
+    })?;
+    if plate_inventory.is_empty() {
+        return Err(ApiError::invalid_field(
+            "plate_inventory",
+            "Keep at least one plate size.",
+        ));
+    }
     if update.default_rest > MAX_DEFAULT_REST {
-        return Err(ApiError::invalid(format!(
-            "The default rest must be at most {} seconds.",
-            MAX_DEFAULT_REST.get()
-        )));
+        return Err(ApiError::invalid_field(
+            "default_rest",
+            format!(
+                "The default rest must be at most {} seconds.",
+                MAX_DEFAULT_REST.get()
+            ),
+        ));
     }
     Ok(Settings {
         unit: update.unit,
@@ -281,6 +306,20 @@ mod tests {
                 },
                 "The default rest must be at most 3600 seconds.",
             ),
+            (
+                SettingsUpdate {
+                    bar_weight: 0.0,
+                    ..custom()
+                },
+                "The bar must weigh more than zero.",
+            ),
+            (
+                SettingsUpdate {
+                    plate_inventory: Vec::new(),
+                    ..custom()
+                },
+                "Keep at least one plate size.",
+            ),
         ] {
             assert_eq!(validate(update).unwrap_err().public(), (422, message));
         }
@@ -344,18 +383,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again, saved);
-
-        // An empty inventory is kept as empty (not replaced by the defaults).
-        let empty = SettingsUpdate {
-            plate_inventory: Vec::new(),
-            ..custom()
-        };
-        let saved: Settings = a.call(UPDATE, json!({ "settings": empty })).await.unwrap();
-        assert_eq!(saved.plate_inventory, PlateInventory::empty());
-        assert_eq!(
-            settings_of(&mut a).await.plate_inventory,
-            PlateInventory::empty()
-        );
     }
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
@@ -397,6 +424,34 @@ mod tests {
             (error.status.as_u16(), error.message.as_str()),
             (422, "The bar weight must be between 0 and 2000 kg.")
         );
+        // No bar and no plates are refused, each naming its field.
+        for (update, field, message) in [
+            (
+                SettingsUpdate {
+                    bar_weight: 0.0,
+                    ..custom()
+                },
+                "bar_weight",
+                "The bar must weigh more than zero.",
+            ),
+            (
+                SettingsUpdate {
+                    plate_inventory: Vec::new(),
+                    ..custom()
+                },
+                "plate_inventory",
+                "Keep at least one plate size.",
+            ),
+        ] {
+            let (status, body) = a.call_raw(UPDATE, json!({ "settings": update })).await;
+            assert_eq!(status.as_u16(), 422);
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["message"], message, "{body}");
+            assert_eq!(
+                body["data"]["ServerError"]["details"]["field"], field,
+                "{body}"
+            );
+        }
         // A value that does not even decode (an unknown unit) is the generic 422.
         let mut bad_unit = serde_json::to_value(custom()).unwrap();
         bad_unit["unit"] = json!("stone");

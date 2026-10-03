@@ -14,7 +14,7 @@ use iron_oxide_domain::{ExerciseId, SessionId};
 
 use super::account::Account;
 use super::components::icons::{HistoryIcon, HomeIcon, ProgramsIcon, SettingsIcon};
-use super::components::{Card, EmptyState, LoadingState};
+use super::components::{EmptyState, LoadingState};
 use super::errors::{BannerKind, use_errors};
 use super::history::{ExerciseProgress, History, HistoryLayout, HistorySession};
 use super::home::Home;
@@ -293,13 +293,7 @@ fn Programs() -> Element {
 
 #[component]
 fn Settings() -> Element {
-    rsx! {
-        PageHeader { title: "Settings" }
-        Account {}
-        Card { title: "Units",
-            p { class: "io-muted", "Weights are shown in kilograms." }
-        }
-    }
+    rsx! { super::settings::SettingsPage {} }
 }
 
 #[component]
