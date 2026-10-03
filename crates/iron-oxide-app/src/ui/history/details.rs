@@ -10,7 +10,7 @@ use crate::api::history::{ExerciseLog, SessionDetails, session_details};
 use crate::ui::components::{Card, EmptyState, LoadingState};
 use crate::ui::errors::use_errors;
 use crate::ui::shell::Route;
-use crate::ui::weight::{use_unit, weight_text};
+use crate::ui::weight::{estimate_text, use_unit, weight_text};
 
 /// The details screen of the session `id`.
 #[component]
@@ -131,7 +131,7 @@ fn ExerciseCard(log: ExerciseLog) -> Element {
         ));
     }
     if let Some(e1rm) = log.best_e1rm {
-        facts.push(("e1RM", weight_text(e1rm, unit)));
+        facts.push(("e1RM", estimate_text(e1rm, unit)));
     }
     if !log.volume.is_zero() {
         facts.push(("Volume", volume_text(log.volume, unit)));

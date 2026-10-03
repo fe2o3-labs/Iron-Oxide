@@ -5,8 +5,11 @@ use dioxus::prelude::*;
 use iron_oxide_domain::{ExerciseId, Unit};
 
 use super::chart::{self, VIEW_HEIGHT, VIEW_WIDTH, WeightPoint};
-use super::view::{chart_series, chart_summary, latest_number, series_rows};
+use super::view::{
+    Measure, chart_series, chart_summary, charts_locked_after, latest_number, series_rows,
+};
 use super::{BackToHistory, ChartAccess, local_date, use_history};
+use crate::api::billing::my_entitlements;
 use crate::api::error::{ApiFailure, FailureKind};
 use crate::api::history::{ExerciseSeries, exercise_series};
 use crate::ui::components::{Card, EmptyState, LoadingState};
@@ -17,6 +20,7 @@ use crate::ui::weight::use_unit;
 #[component]
 pub fn ExerciseProgress(exercise: ExerciseId) -> Element {
     let history = use_history();
+    let errors = use_errors();
     let name = history.names.read().exercise(&exercise);
     let content = match *history.charts.read() {
         ChartAccess::Checking => rsx! { LoadingState {} },
@@ -25,6 +29,12 @@ pub fn ExerciseProgress(exercise: ExerciseId) -> Element {
             EmptyState {
                 title: "Couldn't load",
                 message: "Your plan could not be checked. Check your connection and try again.",
+                button {
+                    r#type: "button",
+                    class: "io-button io-button-secondary",
+                    onclick: move |_| history.check_plan(errors),
+                    "Try again"
+                }
             }
         },
         ChartAccess::Included => rsx! { Charts { exercise: exercise.clone() } },
@@ -82,9 +92,20 @@ fn LockIcon() -> Element {
 #[component]
 fn Charts(exercise: ExerciseId) -> Element {
     let errors = use_errors();
+    let history = use_history();
     let mut series = use_resource(use_reactive!(|exercise| async move {
         let result = exercise_series(exercise.as_str().to_owned()).await;
         if let Err(error) = &result {
+            let kind = ApiFailure::classify(error).kind;
+            if kind == FailureKind::Forbidden {
+                // Maybe the plan changed since it was checked: ask again before deciding.
+                let refreshed = my_entitlements().await.ok();
+                if charts_locked_after(kind, refreshed.as_ref()) {
+                    let mut charts = history.charts;
+                    charts.set(ChartAccess::Locked);
+                    return result;
+                }
+            }
             errors.report(error);
         }
         result
@@ -92,10 +113,6 @@ fn Charts(exercise: ExerciseId) -> Element {
 
     match &*series.read() {
         None => rsx! { LoadingState { message: "Loading your progress…" } },
-        // The plan changed since it was checked: the server refused the charts.
-        Some(Err(error)) if ApiFailure::classify(error).kind == FailureKind::Forbidden => {
-            rsx! { LockedCharts {} }
-        }
         Some(Err(_)) => rsx! {
             EmptyState {
                 title: "Couldn't load",
@@ -130,6 +147,7 @@ fn Loaded(series: ExerciseSeries) -> Element {
             id: "e1rm",
             title: "Estimated 1RM",
             points: lines.e1rm,
+            measure: Measure::Estimate,
             unit,
             empty: "No estimate yet: estimates need sets of 10 reps or fewer.",
         }
@@ -137,6 +155,7 @@ fn Loaded(series: ExerciseSeries) -> Element {
             id: "top-set",
             title: "Top set",
             points: lines.top_set,
+            measure: Measure::Load,
             unit,
             empty: "No top set yet.",
         }
@@ -152,7 +171,7 @@ fn Loaded(series: ExerciseSeries) -> Element {
                 }
                 tbody {
                     for row in rows {
-                        tr { key: "{row.at_ms}-{row.top_set}",
+                        tr { key: "{row.session_id}",
                             th { scope: "row", {local_date(row.at_ms).short()} }
                             td { "{row.top_set}" }
                             td { "{row.e1rm}" }
@@ -170,12 +189,13 @@ fn ChartCard(
     id: &'static str,
     title: &'static str,
     points: Vec<WeightPoint>,
+    measure: Measure,
     unit: Unit,
     empty: &'static str,
 ) -> Element {
     let date = |ms: i64| local_date(ms).short();
-    let summary = chart_summary(title, &points, unit, date);
-    let latest = latest_number(&points, unit);
+    let summary = chart_summary(title, &points, measure, unit, date);
+    let latest = latest_number(&points, measure, unit);
     let layout = chart::layout(&points, unit, date);
     let title_id = format!("io-chart-{id}");
 

@@ -71,6 +71,27 @@ impl HistoryContext {
     }
 }
 
+impl HistoryContext {
+    /// Asks the server whether the plan includes the charts (again, after a failure).
+    pub fn check_plan(self, errors: Errors) {
+        let mut charts = self.charts;
+        charts.set(ChartAccess::Checking);
+        spawn(async move {
+            match my_entitlements().await {
+                Ok(entitlements) => charts.set(if entitlements.allows(Feature::ExerciseCharts) {
+                    ChartAccess::Included
+                } else {
+                    ChartAccess::Locked
+                }),
+                Err(error) => {
+                    errors.report(&error);
+                    charts.set(ChartAccess::Unknown);
+                }
+            }
+        });
+    }
+}
+
 /// The history screens' context.
 #[must_use]
 pub fn use_history() -> HistoryContext {
@@ -90,20 +111,7 @@ pub fn HistoryLayout() -> Element {
         if !cfg!(feature = "web") {
             return;
         }
-        spawn(async move {
-            let mut charts = charts;
-            match my_entitlements().await {
-                Ok(entitlements) => charts.set(if entitlements.allows(Feature::ExerciseCharts) {
-                    ChartAccess::Included
-                } else {
-                    ChartAccess::Locked
-                }),
-                Err(error) => {
-                    errors.report(&error);
-                    charts.set(ChartAccess::Unknown);
-                }
-            }
-        });
+        context.check_plan(errors);
         // Weights in the user's unit. The settings screen (#34) keeps it up to date afterwards.
         spawn(async move {
             let mut unit = unit;

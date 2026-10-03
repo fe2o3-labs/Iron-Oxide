@@ -199,7 +199,7 @@ fn ProgressSection() -> Element {
 fn ExerciseLinks() -> Element {
     let errors = use_errors();
     let history = use_history();
-    let exercises = use_resource(move || async move {
+    let mut exercises = use_resource(move || async move {
         let result = logged_exercises().await;
         if let Err(error) = &result {
             errors.report(error);
@@ -213,6 +213,12 @@ fn ExerciseLinks() -> Element {
         },
         Some(Err(_)) => rsx! {
             p { class: "io-muted", "Your exercises could not be loaded." }
+            button {
+                r#type: "button",
+                class: "io-button io-button-secondary",
+                onclick: move |_| exercises.restart(),
+                "Try again"
+            }
         },
         Some(Ok(list)) if list.is_empty() => rsx! {
             p { class: "io-muted", "Charts appear once you have finished a workout." }

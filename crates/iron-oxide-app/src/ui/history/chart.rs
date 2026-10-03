@@ -75,11 +75,36 @@ pub fn nice_step(span: f64, target: usize) -> f64 {
     factor * magnitude
 }
 
-/// The y axis: round tick values covering `min..=max` (values in the user's unit), at most
-/// [`MAX_TICKS`] of them. Equal values (one point, or a flat line) get a range around them, so the
-/// line sits mid-chart instead of on an edge.
+/// The next nice step above `step`: 1 → 2 → 2.5 → 5 → 10 (times a power of ten).
 #[must_use]
-pub fn y_ticks(min: f64, max: f64) -> Vec<f64> {
+pub fn next_nice_step(step: f64) -> f64 {
+    if !step.is_finite() || step <= 0.0 {
+        return 1.0;
+    }
+    let magnitude = 10_f64.powf(step.log10().floor());
+    let normalised = step / magnitude;
+    let factor = [1.0, 2.0, 2.5, 5.0, 10.0]
+        .into_iter()
+        .find(|&factor| factor > normalised + 1e-9)
+        .unwrap_or(20.0);
+    factor * magnitude
+}
+
+/// The smallest y step in `unit`: 0.5 kg or 1 lb, the precision estimates are shown with
+/// ([`crate::ui::weight::estimate_increment`]), so every label names its grid line exactly.
+#[must_use]
+pub const fn min_tick_step(unit: Unit) -> f64 {
+    match unit {
+        Unit::Kg => 0.5,
+        Unit::Lb => 1.0,
+    }
+}
+
+/// The y axis: round tick values covering `min..=max` (values in the user's unit), at most
+/// [`MAX_TICKS`] of them, `min_step` apart at least. Equal values (one point, or a flat line) get a
+/// range around them, so the line sits mid-chart instead of on an edge.
+#[must_use]
+pub fn y_ticks(min: f64, max: f64, min_step: f64) -> Vec<f64> {
     let (mut low, mut high) = if min <= max { (min, max) } else { (max, min) };
     if (high - low).abs() < f64::EPSILON {
         // ±5 % of the value (at least ±1 unit), so 100 kg reads 95 to 105.
@@ -87,7 +112,7 @@ pub fn y_ticks(min: f64, max: f64) -> Vec<f64> {
         low -= pad;
         high += pad;
     }
-    let mut step = nice_step(high - low, MAX_TICKS - 1);
+    let mut step = nice_step(high - low, MAX_TICKS - 1).max(min_step);
     loop {
         let first = (low / step).floor() * step;
         let last = (high / step).ceil() * step;
@@ -99,8 +124,9 @@ pub fn y_ticks(min: f64, max: f64) -> Vec<f64> {
                 .map(|index| clean(first + step * index as f64))
                 .collect();
         }
-        // Rounding the ends out added an interval too many: take the next nice step.
-        step = nice_step(step * MAX_TICKS as f64, MAX_TICKS - 2);
+        // Rounding the ends out added an interval too many: the next nice step (20 → 25, not 50,
+        // so the line fills the plot).
+        step = next_nice_step(step);
     }
 }
 
@@ -166,7 +192,7 @@ pub fn layout(
         .collect();
     let min = values.iter().copied().fold(f64::INFINITY, f64::min);
     let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let ticks = y_ticks(min, max);
+    let ticks = y_ticks(min, max, min_tick_step(unit));
     let (low, high) = (
         ticks.first().copied().unwrap_or(min),
         ticks.last().copied().unwrap_or(max),
@@ -275,9 +301,15 @@ mod tests {
 
     #[test]
     fn ticks_are_round_and_cover_the_values() {
-        assert_eq!(y_ticks(100.0, 140.0), [100.0, 110.0, 120.0, 130.0, 140.0]);
-        assert_eq!(y_ticks(102.5, 117.5), [100.0, 105.0, 110.0, 115.0, 120.0]);
-        let ticks = y_ticks(61.0, 187.0);
+        assert_eq!(
+            y_ticks(100.0, 140.0, 0.5),
+            [100.0, 110.0, 120.0, 130.0, 140.0]
+        );
+        assert_eq!(
+            y_ticks(102.5, 117.5, 0.5),
+            [100.0, 105.0, 110.0, 115.0, 120.0]
+        );
+        let ticks = y_ticks(61.0, 187.0, 0.5);
         assert!(ticks.len() <= MAX_TICKS, "{ticks:?}");
         assert!(
             ticks[0] <= 61.0 && *ticks.last().unwrap() >= 187.0,
@@ -294,7 +326,7 @@ mod tests {
             (1.0, 999.0),
             (44.09, 330.69),
         ] {
-            let ticks = y_ticks(min, max);
+            let ticks = y_ticks(min, max, 0.5);
             assert!(
                 (2..=MAX_TICKS).contains(&ticks.len()),
                 "{min}..{max}: {ticks:?}"
@@ -309,13 +341,55 @@ mod tests {
     #[test]
     fn a_flat_series_gets_a_range_around_it() {
         // 100 ± 5 → 95..105, in 2.5 steps.
-        assert_eq!(y_ticks(100.0, 100.0), [95.0, 97.5, 100.0, 102.5, 105.0]);
+        assert_eq!(
+            y_ticks(100.0, 100.0, 0.5),
+            [95.0, 97.5, 100.0, 102.5, 105.0]
+        );
         // Near zero, at least ±1.
-        let ticks = y_ticks(0.0, 0.0);
+        let ticks = y_ticks(0.0, 0.0, 0.5);
         assert!(
             ticks[0] <= -1.0 && *ticks.last().unwrap() >= 1.0,
             "{ticks:?}"
         );
+    }
+
+    #[test]
+    fn steps_grow_one_nice_value_at_a_time() {
+        let steps: Vec<f64> = [1.0, 2.0, 2.5, 5.0, 10.0, 20.0]
+            .into_iter()
+            .map(next_nice_step)
+            .collect();
+        assert_eq!(steps, [2.0, 2.5, 5.0, 10.0, 20.0, 25.0]);
+        assert!((next_nice_step(0.5) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_wide_range_fills_the_plot() {
+        // An e1RM line from 93.33 to 169.17 kg: 75 to 175 by 25, not 50 to 200 by 50.
+        assert_eq!(
+            y_ticks(93.33, 169.17, 0.5),
+            [75.0, 100.0, 125.0, 150.0, 175.0]
+        );
+    }
+
+    #[test]
+    fn close_values_never_get_a_step_below_the_minimum() {
+        // 100 and 100.08 kg would get a 0.025 step; labels would round and miss their lines.
+        let ticks = y_ticks(100.0, 100.08, 0.5);
+        assert!(
+            ticks.windows(2).all(|pair| pair[1] - pair[0] >= 0.5 - 1e-9),
+            "{ticks:?}"
+        );
+        for tick in &ticks {
+            assert_eq!(tick_label(*tick).parse::<f64>().unwrap(), *tick);
+        }
+        let in_lb = y_ticks(220.0, 220.3, 1.0);
+        assert!(
+            in_lb.windows(2).all(|pair| pair[1] - pair[0] >= 1.0 - 1e-9),
+            "{in_lb:?}"
+        );
+        assert!((min_tick_step(Unit::Kg) - 0.5).abs() < 1e-9);
+        assert!((min_tick_step(Unit::Lb) - 1.0).abs() < 1e-9);
     }
 
     #[test]

@@ -5,13 +5,16 @@
 use std::collections::{HashMap, HashSet};
 
 use iron_oxide_domain::{
-    DayId, ExerciseId, LoggedSet, ProgramId, SessionId, SessionStatus, Unit, Volume,
-    program::Program, time::Timestamp,
+    DayId, ExerciseId, LoggedSet, ProgramId, SessionId, SessionStatus, Unit, Volume, Weight,
+    entitlements::{Entitlements, Feature},
+    program::Program,
+    time::Timestamp,
 };
 
 use super::chart::WeightPoint;
+use crate::api::error::FailureKind;
 use crate::api::history::{ExerciseLog, ExerciseSeries, SessionSummary};
-use crate::ui::weight::{weight_number, weight_text};
+use crate::ui::weight::{estimate_number, estimate_text, weight_number, weight_text};
 
 const MS_PER_MINUTE: i64 = 60_000;
 const MS_PER_DAY: i64 = 86_400_000;
@@ -237,6 +240,15 @@ pub fn set_rows<T>(sets: &[LoggedSet<T>], unit: Unit) -> Vec<SetRow> {
     rows
 }
 
+/// Whether a failed chart request means the charts are locked. Only the plan says so: a `403`
+/// is a plan refusal only if entitlements fetched *after* it (`refreshed`) leave the charts out.
+/// Any other `403` (the cross-site request guard, say) is an ordinary error, shown as such.
+#[must_use]
+pub fn charts_locked_after(failure: FailureKind, refreshed: Option<&Entitlements>) -> bool {
+    failure == FailureKind::Forbidden
+        && refreshed.is_some_and(|entitlements| !entitlements.allows(Feature::ExerciseCharts))
+}
+
 /// A row of the sets of one exercise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetRow {
@@ -302,13 +314,41 @@ pub fn chart_series(series: &ExerciseSeries) -> ChartSeries {
     out
 }
 
+/// What a chart line measures, which decides how its values are written: a load lifted is exact
+/// (`102.25 kg`), an estimate is rounded to 0.5 kg or 1 lb (`169 kg`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Measure {
+    Load,
+    Estimate,
+}
+
+impl Measure {
+    #[must_use]
+    pub fn text(self, weight: Weight, unit: Unit) -> String {
+        match self {
+            Self::Load => weight_text(weight, unit),
+            Self::Estimate => estimate_text(weight, unit),
+        }
+    }
+
+    #[must_use]
+    pub fn number(self, weight: Weight, unit: Unit) -> String {
+        match self {
+            Self::Load => weight_number(weight, unit),
+            Self::Estimate => estimate_number(weight, unit),
+        }
+    }
+}
+
 /// A row of the data table under the charts (their accessible fallback), newest first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeriesRow {
+    /// The session, the row's key.
+    pub session_id: SessionId,
     pub at_ms: i64,
     /// `100 kg × 5`.
     pub top_set: String,
-    /// `117 kg`, or `—` without an estimate.
+    /// `116.5 kg` (rounded like every estimate), or `—` without an estimate.
     pub e1rm: String,
 }
 
@@ -319,6 +359,7 @@ pub fn series_rows(series: &ExerciseSeries, unit: Unit) -> Vec<SeriesRow> {
         .iter()
         .rev()
         .map(|point| SeriesRow {
+            session_id: point.key.session_id,
             at_ms: point.key.started_at.epoch_millis(),
             top_set: format!(
                 "{} × {}",
@@ -327,7 +368,7 @@ pub fn series_rows(series: &ExerciseSeries, unit: Unit) -> Vec<SeriesRow> {
             ),
             e1rm: point
                 .best_e1rm
-                .map_or_else(|| "—".to_owned(), |weight| weight_text(weight, unit)),
+                .map_or_else(|| "—".to_owned(), |weight| estimate_text(weight, unit)),
         })
         .collect()
 }
@@ -338,6 +379,7 @@ pub fn series_rows(series: &ExerciseSeries, unit: Unit) -> Vec<SeriesRow> {
 pub fn chart_summary(
     what: &str,
     points: &[WeightPoint],
+    measure: Measure,
     unit: Unit,
     date: impl Fn(i64) -> String,
 ) -> String {
@@ -355,31 +397,34 @@ pub fn chart_summary(
     if points.len() == 1 {
         return format!(
             "{what}: {} on {}, {sessions}.",
-            weight_text(first.weight, unit),
+            measure.text(first.weight, unit),
             date(first.at_ms)
         );
     }
     format!(
         "{what} over {sessions}, from {} on {} to {} on {}. Best {} on {}.",
-        weight_text(first.weight, unit),
+        measure.text(first.weight, unit),
         date(first.at_ms),
-        weight_text(last.weight, unit),
+        measure.text(last.weight, unit),
         date(last.at_ms),
-        weight_text(best.weight, unit),
+        measure.text(best.weight, unit),
         date(best.at_ms),
     )
 }
 
 /// The latest value of a line, for the big number above its chart.
 #[must_use]
-pub fn latest_number(points: &[WeightPoint], unit: Unit) -> Option<String> {
-    points.last().map(|point| weight_number(point.weight, unit))
+pub fn latest_number(points: &[WeightPoint], measure: Measure, unit: Unit) -> Option<String> {
+    points
+        .last()
+        .map(|point| measure.number(point.weight, unit))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iron_oxide_domain::{Lift, ProgramVersionId, Reps, Seconds, SeriesPoint, SetId, Weight};
+    use iron_oxide_domain::entitlements::{FeatureAccess, Plan};
+    use iron_oxide_domain::{Lift, ProgramVersionId, Reps, Seconds, SeriesPoint, SetId};
 
     use crate::api::history::SeriesKey;
 
@@ -666,7 +711,9 @@ mod tests {
         let rows = series_rows(&series(), Unit::Lb);
         assert_eq!(rows[0].at_ms, 3_000);
         assert_eq!(rows[0].top_set, "231.49 lb × 5");
-        assert_eq!(rows[0].e1rm, "270.07 lb");
+        assert_eq!(rows[0].session_id, SessionId::from_uuid(uuid(3)));
+        // Estimates are rounded: 122.5 kg = 270.07 lb → 270 lb.
+        assert_eq!(rows[0].e1rm, "270 lb");
         assert_eq!(rows[1].e1rm, "—");
         assert_eq!(rows[2].top_set, "220.46 lb × 5");
     }
@@ -676,19 +723,75 @@ mod tests {
         let date = |ms: i64| format!("t{ms}");
         let lines = chart_series(&series());
         assert_eq!(
-            chart_summary("Top set", &lines.top_set, Unit::Kg, date),
+            chart_summary("Top set", &lines.top_set, Measure::Load, Unit::Kg, date),
             "Top set over 3 sessions, from 100 kg on t1000 to 105 kg on t3000. \
              Best 105 kg on t3000."
         );
         assert_eq!(
-            chart_summary("Top set", &lines.top_set[..1], Unit::Kg, date),
+            chart_summary(
+                "Top set",
+                &lines.top_set[..1],
+                Measure::Load,
+                Unit::Kg,
+                date
+            ),
             "Top set: 100 kg on t1000, 1 session."
         );
         assert_eq!(
-            chart_summary("e1RM", &[], Unit::Kg, date),
+            chart_summary("e1RM", &[], Measure::Estimate, Unit::Kg, date),
             "e1RM: no data yet."
         );
-        assert_eq!(latest_number(&lines.e1rm, Unit::Kg).unwrap(), "122.5");
-        assert_eq!(latest_number(&[], Unit::Kg), None);
+        assert_eq!(
+            chart_summary("e1RM", &lines.e1rm, Measure::Estimate, Unit::Kg, date),
+            "e1RM over 2 sessions, from 116.5 kg on t1000 to 122.5 kg on t3000. \
+             Best 122.5 kg on t3000."
+        );
+        assert_eq!(
+            latest_number(&lines.e1rm[..1], Measure::Estimate, Unit::Kg).unwrap(),
+            "116.5"
+        );
+        assert_eq!(
+            latest_number(&lines.e1rm[..1], Measure::Load, Unit::Kg).unwrap(),
+            "116.67"
+        );
+        assert_eq!(latest_number(&[], Measure::Load, Unit::Kg), None);
+    }
+
+    fn entitlements(charts: bool) -> Entitlements {
+        let mut entitlements = Entitlements::of(Plan::Free);
+        entitlements.features = vec![FeatureAccess {
+            feature: Feature::ExerciseCharts,
+            allowed: charts,
+        }];
+        entitlements
+    }
+
+    #[test]
+    fn only_the_plan_locks_the_charts() {
+        // The plan changed meanwhile: the refreshed entitlements leave the charts out.
+        assert!(charts_locked_after(
+            FailureKind::Forbidden,
+            Some(&entitlements(false))
+        ));
+        // A 403 while the plan still includes the charts (the CSRF guard): an ordinary error.
+        assert!(!charts_locked_after(
+            FailureKind::Forbidden,
+            Some(&entitlements(true))
+        ));
+        // The plan could not be read again: not locked, the error is shown.
+        assert!(!charts_locked_after(FailureKind::Forbidden, None));
+        // Other failures never lock, whatever the plan.
+        for kind in [
+            FailureKind::Unauthorized,
+            FailureKind::NotFound,
+            FailureKind::Transient,
+            FailureKind::Network,
+            FailureKind::Other,
+        ] {
+            assert!(
+                !charts_locked_after(kind, Some(&entitlements(false))),
+                "{kind:?}"
+            );
+        }
     }
 }
