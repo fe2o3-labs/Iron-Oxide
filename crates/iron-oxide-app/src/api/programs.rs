@@ -182,6 +182,10 @@ impl ProgramProblems {
 /// is room for the other arguments.
 pub const UPLOAD_BODY_LIMIT: usize = 2 * MAX_DOCUMENT_BYTES + 16 * 1024;
 
+/// The path of [`upload_program`]. Its body is exempt from the server's default body cap
+/// (`server::limits`): it reads its own, up to [`UPLOAD_BODY_LIMIT`].
+pub const UPLOAD_PATH: &str = "/api/programs/upload";
+
 // Server functions read their body with axum's default limit (2 MiB) and panic past it, so the
 // upload limit must stay below it (see `server::api::programs::limit_upload_body`).
 const _: () = assert!(UPLOAD_BODY_LIMIT < 2 * 1024 * 1024);
