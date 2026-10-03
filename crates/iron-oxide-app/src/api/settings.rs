@@ -35,6 +35,13 @@ impl Settings {
     /// The settings of a user who never saved any: kg, a 20 kg bar, the domain's default kg plate
     /// inventory, 2 minutes of rest and sound on.
     #[must_use]
+    #[cfg_attr(
+        not(any(feature = "server", test)),
+        allow(
+            dead_code,
+            reason = "the server's answer for a new user; the client asks for it"
+        )
+    )]
     pub fn defaults() -> Self {
         Self {
             unit: Unit::Kg,
@@ -118,7 +125,8 @@ pub async fn get_settings() -> Result<Settings, ServerFnError> {
 /// heaviest first). Saving the same settings again changes nothing.
 ///
 /// # Errors
-/// 422 for an invalid bar weight or plate inventory (with the reason) or a default rest above
+/// 422 for an invalid bar weight (or none) or plate inventory (or an empty one), with the reason
+/// and the field in the details (`{"field": "bar_weight"}`), or a default rest above
 /// [`MAX_DEFAULT_REST`].
 #[post("/api/settings/update", state: Extension<AppState>, user: AuthUser)]
 pub async fn update_settings(settings: SettingsUpdate) -> Result<Settings, ServerFnError> {

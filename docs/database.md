@@ -34,7 +34,7 @@ erDiagram
         uuid user_id PK "FK users"
         text unit "kg | lb"
         bigint bar_weight_ng
-        jsonb plate_inventory "array, at most 16 sizes"
+        jsonb plate_inventory "array, 1 to 16 sizes"
         bigint default_rest_s
         boolean sound_enabled
         timestamptz updated_at
@@ -113,7 +113,7 @@ types mirror them field for field, and switch to them once they are merged.
 
 | Column | Domain type | Storage |
 |---|---|---|
-| `*_ng` (`bar_weight_ng`, `weight_ng`) | `Weight` (#48) | Exact nanograms, `bigint`, `CHECK` 0 to 2 × 10¹⁵ (2000 kg, `Weight::MAX`). Never floats. |
+| `*_ng` (`bar_weight_ng`, `weight_ng`) | `Weight` (#48) | Exact nanograms, `bigint`, `CHECK` 0 to 2 × 10¹⁵ (2000 kg, `Weight::MAX`); the bar more than 0 (#34). Never floats. |
 | `reps`, `set_index` | `Reps` / `u16` (#48, #54) | `integer` with `CHECK` 0 to 65535 (`smallint` is too small for `u16`). |
 | `duration_s`, `default_rest_s` | `Seconds` / `u32` (#48) | `bigint` with `CHECK` 0 to 4294967295 (`integer` is too small for `u32`). |
 | `exercise_id`, `day_id`, `source_builtin_id` | `ExerciseId`, `DayId`, `BuiltinProgramId` (#48, #56) | `text`, `CHECK (is_slug(...))`: 1 to 64 of `[a-z0-9]` in words split by single hyphens. |
@@ -122,7 +122,7 @@ types mirror them field for field, and switch to them once they are merged.
 | `status` | `SessionStatus` (#54) | `text`, `CHECK` in `in_progress`, `completed`, `skipped`, `abandoned` (the domain's serde names). |
 | `started_at`, `finished_at`, `completed_at` | The session timestamp `T` (#54) | `timestamptz` (microseconds; the domain uses milliseconds, which fit exactly). |
 | `document` | `Program` JSON (#56) | `jsonb`: an object with a numeric `schema_version`, at most 1 MiB. Validated by the domain before it is written. |
-| `plate_inventory` | `PlateInventory` JSON (#53) | `jsonb` array of at most 16 entries. Validated by the domain before it is written. |
+| `plate_inventory` | `PlateInventory` JSON (#53) | `jsonb` array of 1 to 16 entries (default: the domain's kg set). Validated by the domain before it is written. Rows saved empty before the rule (#34) were given the default set by `20261003120000_settings_need_a_bar_and_plates`. |
 
 ## Isolation strategy
 

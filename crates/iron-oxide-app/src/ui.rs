@@ -5,6 +5,9 @@
 //! - `components`: the reusable components.
 //! - `errors`: the banner every server error is reported to.
 //! - `weight`: weights in the user's unit.
+//! - `user_settings`: the user's settings, shared by every screen, loaded and saved there.
+//! - `settings`: the Settings page.
+//! - `prefs`: preferences kept on this device only.
 //! - `history`: the history screens (#33).
 //! - `session`: the workout session screens (#28).
 
@@ -30,10 +33,13 @@ mod errors;
 #[cfg(debug_assertions)]
 mod gallery;
 mod history;
+mod prefs;
 mod session;
+mod settings;
 mod shell;
 pub(crate) mod theme;
 pub mod unsaved;
+mod user_settings;
 #[cfg_attr(
     not(debug_assertions),
     allow(
@@ -55,7 +61,9 @@ use shell::Route;
 pub fn App() -> Element {
     shell::use_session_provider();
     errors::use_errors_provider();
-    weight::use_unit_provider();
+    let unit = weight::use_unit_provider();
+    let settings = user_settings::use_settings_provider(unit);
+    prefs::use_device_prefs_provider(settings);
     crate::offline::use_outbox_provider();
 
     rsx! {
