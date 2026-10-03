@@ -12,7 +12,7 @@ use super::components::{
     Sheet, Stepper, WeightStepper,
 };
 use super::errors::{BannerKind, use_errors};
-use super::plates::{PlateLoadout, PlateSetup, plate_view};
+use super::plates::{PlateLoadout, PlateSetup, PlateSource, plate_view};
 use super::shell::unverified_message;
 use super::weight::{use_unit, weight_text};
 use crate::api::error::FailureKind;
@@ -101,6 +101,8 @@ fn Showcase() -> Element {
                 Weight::from_kg(101.0).unwrap_or_default(),
                 &PlateSetup::defaults_for(unit),
             ),
+            source: PlateSource::Failed,
+            on_retry: move |()| { errors.show(BannerKind::Info, "Retrying."); },
         }
 
         Button {

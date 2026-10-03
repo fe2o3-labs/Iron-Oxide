@@ -13,7 +13,7 @@
 use dioxus::prelude::*;
 use iron_oxide_domain::{PlateInventory, PlateOutcome, Unit, Weight, calculate_plates};
 
-use super::components::{Chip, Sheet, WeightStepper};
+use super::components::{Button, ButtonVariant, Chip, Sheet, WeightStepper};
 use super::errors::use_errors;
 use super::weight::{use_unit, weight_number, weight_text};
 use crate::api::settings::{Settings, get_settings};
@@ -99,7 +99,8 @@ pub fn plate_view(target: Weight, setup: &PlateSetup) -> PlateView {
 }
 
 /// The line under the total when it is not the target: `"Target 101 kg · 1 kg under · or
-/// 102.5 kg"`. `None` when the target is exact.
+/// 102.5 kg"`, or `"… · the most you can load"` when nothing heavier can be loaded. `None` when the
+/// target is exact.
 #[must_use]
 pub fn miss_text(view: &PlateView, unit: Unit) -> Option<String> {
     let (gap, side) = match view.outcome {
@@ -112,8 +113,11 @@ pub fn miss_text(view: &PlateView, unit: Unit) -> Option<String> {
         weight_text(view.target, unit),
         weight_text(gap, unit)
     );
-    if let Some(other) = view.other {
-        text.push_str(&format!(" · or {}", weight_text(other, unit)));
+    match (view.other, view.outcome) {
+        (Some(other), _) => text.push_str(&format!(" · or {}", weight_text(other, unit))),
+        // Nothing heavier can be loaded.
+        (None, PlateOutcome::Under(_)) => text.push_str(" · the most you can load"),
+        (None, _) => {}
     }
     Some(text)
 }
@@ -150,12 +154,68 @@ pub fn tool_start(unit: Unit) -> Weight {
     .unwrap_or(Weight::ZERO)
 }
 
-/// The user's bar and plates: the defaults for their unit until the settings load, and if they
-/// cannot be loaded (the error is reported).
-pub fn use_plate_setup() -> PlateSetup {
+/// Where the bar and plates the calculator uses come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlateSource {
+    /// The settings are loading: the defaults stand in meanwhile.
+    Loading,
+    /// The user's own settings.
+    Settings,
+    /// The settings could not be loaded: the defaults stand in.
+    Failed,
+}
+
+/// The note the loadout shows when it does not use the user's own bar and plates, so that the
+/// defaults are never shown as if they were theirs.
+#[must_use]
+pub const fn source_note(source: PlateSource) -> Option<&'static str> {
+    match source {
+        PlateSource::Loading => Some("Using default plates while your settings load."),
+        PlateSource::Settings => None,
+        PlateSource::Failed => Some("Couldn't load your plates. Using defaults."),
+    }
+}
+
+/// The bar and plates to calculate with, where they come from, and a way to load them again.
+#[derive(Clone, Copy, PartialEq)]
+pub struct PlateSettings {
+    resource: Resource<Option<PlateSetup>>,
+    unit: Unit,
+}
+
+impl PlateSettings {
+    /// The bar and plates: the user's, or the defaults for their unit.
+    #[must_use]
+    pub fn setup(&self) -> PlateSetup {
+        self.resource
+            .read()
+            .clone()
+            .flatten()
+            .unwrap_or_else(|| PlateSetup::defaults_for(self.unit))
+    }
+
+    #[must_use]
+    pub fn source(&self) -> PlateSource {
+        match &*self.resource.read() {
+            None => PlateSource::Loading,
+            Some(Some(_)) => PlateSource::Settings,
+            Some(None) => PlateSource::Failed,
+        }
+    }
+
+    /// Loads the settings again.
+    pub fn retry(mut self) {
+        self.resource.restart();
+    }
+}
+
+/// The user's bar and plates from their settings. Until they load, and if they cannot be loaded
+/// (the error is reported), the defaults for the user's unit stand in, and
+/// [`PlateSettings::source`] says so.
+pub fn use_plate_settings() -> PlateSettings {
     let unit = use_unit();
     let errors = use_errors();
-    let settings = use_resource(move || async move {
+    let resource = use_resource(move || async move {
         match get_settings().await {
             Ok(settings) => Some(PlateSetup::from_settings(&settings)),
             Err(error) => {
@@ -164,8 +224,15 @@ pub fn use_plate_setup() -> PlateSetup {
             }
         }
     });
-    let loaded = settings.read().clone().flatten();
-    loaded.unwrap_or_else(|| PlateSetup::defaults_for(unit))
+    PlateSettings { resource, unit }
+}
+
+/// [`plate_view`], computed again only when the weight or the setup changes (a large inventory
+/// near the 2000 kg cap takes a moment).
+fn use_plate_view(weight: Weight, setup: PlateSetup) -> Memo<PlateView> {
+    use_memo(use_reactive((&weight, &setup), |(weight, setup)| {
+        plate_view(weight, &setup)
+    }))
 }
 
 /// The plate calculator for `weight`, with the user's bar and plates.
@@ -176,14 +243,19 @@ pub fn use_plate_setup() -> PlateSetup {
 #[allow(dead_code, reason = "opened by the session screen (#28)")]
 #[component]
 pub fn PlateCalculator(weight: Weight) -> Element {
-    let setup = use_plate_setup();
+    let settings = use_plate_settings();
+    let view = use_plate_view(weight, settings.setup());
     rsx! {
-        PlateLoadout { view: plate_view(weight, &setup) }
+        PlateLoadout {
+            view: view(),
+            source: settings.source(),
+            on_retry: move |()| settings.retry(),
+        }
     }
 }
 
-/// The plate calculator for `weight` in a bottom sheet over the page. Escape, the close button and
-/// a tap outside the sheet call `on_close`.
+/// The plate calculator for `weight` in a bottom sheet over the page (see [`Sheet`]: Escape, the
+/// back gesture, the close button and a tap outside the sheet call `on_close`).
 ///
 /// ```ignore
 /// let mut plates_open = use_signal(|| false);
@@ -202,13 +274,27 @@ pub fn PlateCalculatorSheet(weight: Weight, on_close: EventHandler<()>) -> Eleme
     }
 }
 
+/// The weight `/tools/plates` shows: the one the user picked in `unit`, else the start weight of
+/// the unit (so it follows a unit that loads late), never below the bar.
+#[must_use]
+pub fn tool_weight(picked: Option<(Unit, Weight)>, unit: Unit, bar: Weight) -> Weight {
+    let weight = match picked {
+        Some((picked_unit, weight)) if picked_unit == unit => weight,
+        _ => tool_start(unit),
+    };
+    weight.max(bar)
+}
+
 /// The `/tools/plates` page: pick a weight with the stepper, see the plates.
 #[component]
 pub fn PlateTool() -> Element {
     let unit = use_unit();
-    let setup = use_plate_setup();
-    let mut weight = use_signal(move || tool_start(unit));
-    let value = *weight.read();
+    let settings = use_plate_settings();
+    let setup = settings.setup();
+    let bar = setup.bar;
+    let mut picked = use_signal(|| None::<(Unit, Weight)>);
+    let value = tool_weight(picked(), unit, bar);
+    let view = use_plate_view(value, setup);
     rsx! {
         div { class: "io-page-header",
             span { class: "io-label", "Tools" }
@@ -217,18 +303,27 @@ pub fn PlateTool() -> Element {
         WeightStepper {
             value,
             step: tool_step(unit),
-            min: setup.bar,
-            on_change: move |next| weight.set(next),
+            min: bar,
+            on_change: move |next| picked.set(Some((unit, next))),
         }
-        PlateLoadout { view: plate_view(value, &setup) }
+        PlateLoadout {
+            view: view(),
+            source: settings.source(),
+            on_retry: move |()| settings.retry(),
+        }
     }
 }
 
 /// The loadout of a [`PlateView`]: the total, how far it is from the target, the per-side plates
 /// as chips and a drawing of one sleeve.
 #[component]
-pub fn PlateLoadout(view: PlateView) -> Element {
+pub fn PlateLoadout(
+    view: PlateView,
+    #[props(default = PlateSource::Settings)] source: PlateSource,
+    on_retry: Option<EventHandler<()>>,
+) -> Element {
     let unit = use_unit();
+    let note = source_note(source);
     let total = weight_number(view.total, unit);
     let status = if view.is_exact() { "Exact" } else { "Nearest" };
     let bar = weight_text(view.bar, unit);
@@ -266,6 +361,20 @@ pub fn PlateLoadout(view: PlateView) -> Element {
                 }
             }
             p { class: "io-muted io-hint", "Bar {bar}" }
+            if let Some(note) = note {
+                div {
+                    class: if source == PlateSource::Failed { "io-notice io-notice-error io-plates-note" } else { "io-notice io-plates-note" },
+                    role: "status",
+                    p { "{note}" }
+                    if let (PlateSource::Failed, Some(on_retry)) = (source, on_retry) {
+                        Button {
+                            variant: ButtonVariant::Secondary,
+                            onclick: move |_| on_retry.call(()),
+                            "Retry"
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -350,6 +459,10 @@ mod tests {
         assert_eq!(view.total, kg(20.0));
         assert!(view.per_side.is_empty());
         assert_eq!(view.outcome, PlateOutcome::Under(kg(40.0)));
+        assert_eq!(
+            miss_text(&view, Unit::Kg).as_deref(),
+            Some("Target 60 kg · 40 kg under · the most you can load")
+        );
     }
 
     #[test]
@@ -406,6 +519,43 @@ mod tests {
         assert_eq!(plate_height(Weight::ZERO), 32);
         assert!(plate_height(kg(20.0)) > plate_height(kg(10.0)));
         assert!(plate_height(kg(1.25)) >= 32);
+    }
+
+    #[test]
+    fn defaults_are_never_shown_silently() {
+        assert_eq!(source_note(PlateSource::Settings), None);
+        assert!(
+            source_note(PlateSource::Loading)
+                .unwrap()
+                .contains("default")
+        );
+        assert!(
+            source_note(PlateSource::Failed)
+                .unwrap()
+                .contains("Couldn't load")
+        );
+    }
+
+    #[test]
+    fn the_tool_weight_follows_the_unit_and_the_bar() {
+        let bar = kg(20.0);
+        // Not picked yet: the unit's start weight, also when the unit arrives late.
+        assert_eq!(tool_weight(None, Unit::Kg, bar), kg(100.0));
+        assert_eq!(tool_weight(None, Unit::Lb, lb(45.0)), lb(225.0));
+        // Picked in kg, then the unit turns out to be lb: back to the lb start.
+        assert_eq!(
+            tool_weight(Some((Unit::Kg, kg(102.5))), Unit::Kg, bar),
+            kg(102.5)
+        );
+        assert_eq!(
+            tool_weight(Some((Unit::Kg, kg(102.5))), Unit::Lb, bar),
+            lb(225.0)
+        );
+        // Never below the bar, also when the settings bring a heavier one.
+        assert_eq!(
+            tool_weight(Some((Unit::Kg, kg(20.0))), Unit::Kg, kg(25.0)),
+            kg(25.0)
+        );
     }
 
     #[test]
