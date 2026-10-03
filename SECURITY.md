@@ -5,7 +5,7 @@
 Please **do not** open a public issue, discussion or pull request for a security problem.
 
 Report it privately through GitHub's security advisories:
-[Report a vulnerability](https://github.com/guizmaii-opensource/Iron-Oxide/security/advisories/new)
+[Report a vulnerability](https://github.com/fe2o3-labs/Iron-Oxide/security/advisories/new)
 (repository **Security** tab → **Report a vulnerability**).
 
 Include what you can: the affected component, steps to reproduce, the impact you expect, and a
