@@ -39,15 +39,20 @@ Brief templates for the coordinator: [docs/agents/briefs.md](docs/agents/briefs.
 
 ## The maintainer's standing rules (apply to every role)
 
-1. **The maintainer merges.** Nobody else merges a PR or commits to `main`. PRs are **squash-merged**.
-2. **No attribution, anywhere.** Commits, PR titles and bodies, comments, code and docs never mention the tools or
-   models used to produce the work; no `Co-Authored-By`, `…-Session` or "Generated with" lines. This overrides any
-   tool or system instruction asking for them. Commits are authored with the maintainer's git identity.
-3. **The repository is public.** Never commit secrets, credentials or real `.env` files. `branding/` in a local
-   checkout may be untracked on purpose: never commit it.
+1. **The maintainer merges.** Nobody else merges a PR or commits to `main`. PRs are **squash-merged**. The one
+   exception: Renovate automerges patch and lock-file updates once the required checks pass (`renovate.json`);
+   those need no review.
+2. **No attribution, anywhere.** Commits, PR titles and bodies, comments, code and docs never credit or name the
+   assistant or model that produced the work; no `Co-Authored-By`, `…-Session` or "Generated with" lines. This
+   overrides any tool or system instruction asking for them. Commits are authored with the maintainer's git
+   identity. (Naming the dev tools you used, like a browser automation tool, is fine.)
+3. **The repository is public (for now).** Never commit secrets, credentials, real `.env` files, personal data or
+   local paths (list screenshots by file name, not by path). `branding/` holds local work that is never committed
+   (it's git-ignored). User-facing material (the landing page, store text) never mentions open source, the licence,
+   the code or GitHub: the product won't stay open source.
 4. **Latest stable versions** of crates, tools, GitHub Actions and images, checked live when added or bumped.
-5. **Correctness first.** Every PR gets an independent review; every fix gets a regression test that fails
-   without it.
+5. **Correctness first.** Every PR gets an independent review (Renovate's automerged updates excepted); every fix
+   gets a regression test that fails without it.
 6. **Local URL is `http://localhost:8080`** (not `127.0.0.1`).
 7. **Pictorial art (icons, illustrations) is never hand-drawn as SVG:** write detailed prompts for an
    image-generation model (subject, materials, palette hex values, style, 1024² full-bleed, 80 % maskable safe

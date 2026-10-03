@@ -1,7 +1,8 @@
 # UI work
 
 The maintainer chose the design direction **A · Forge** (dark + light, follows `prefers-color-scheme`,
-dark-first) on 2026-09-28; the reference boards and the token table are on #26. The implementation is the
+dark-first) on 2026-09-28: industrial, warm off-white on near-black, one orange accent, condensed display type for
+numbers. The token table is on #26 and in `app.css`; the merged screens are the living reference. The implementation is the
 single stylesheet `crates/iron-oxide-app/assets/app.css` (CSS custom properties per theme) and the components in
 `crates/iron-oxide-app/src/ui/components/`; the gallery at `/dev/components` (debug builds only) shows every
 component in both themes. Use them; don't fork or restyle them. Extend a component minimally when it lacks

@@ -101,20 +101,36 @@ reverts the fix locally and reruns the test).
 - **Explain plainly** with evidence and a recommendation. Don't narrate internals (agent ids, tool mechanics).
 - Keep messages short; the trackers hold the detail.
 
-## 7. Working files
+## 7. Agents, sessions and pauses
+
+- **Starting an agent:** one brief per ticket ([briefs.md](briefs.md)), run in the background; note in the
+  coordinator's working files which agent owns which branch(es) and tickets (a small table), so follow-ups go to
+  the right one.
+- **Resuming an agent:** message the agent that wrote the code (it keeps its context); review fixes, merges of
+  `main` and the next related ticket go to it. A finished agent costs nothing while idle; don't message it without
+  work. If it's gone (a new session), start a new one with the ticket, the PR and the reviews as its brief.
+- **The ping** is the push-notification tool: call it for every merge-ready PR even if it may be suppressed.
+- **Before overwriting #40's body**, re-fetch it (`gh issue view 40 --json body -q .body`) and apply your change
+  to that, so edits made elsewhere aren't lost.
+- **Automated GitHub reviews (Copilot)** may not run (quota): note it on the PR; our own reviews still apply.
+- **A pause** from the maintainer ("don't launch new things"): finish the PRs in flight (fixes, reviews, updates
+  from `main`), start nothing new, mark paused items ⏸ in #40 with the reason, and say what remains when resuming.
+
+## 8. Working files
 
 The coordinator keeps a scratch directory (outside the repository) with: a local copy of the #40 body, the
 implementer rules ([implementer.md](implementer.md) is the canonical version), the design boards for UI work,
 and per-agent folders for worktrees, build dirs, review texts and screenshots. If the scratch directory is
 lost, rebuild it from #40 (`gh issue view 40 --json body -q .body`) and these docs.
 
-## 8. Lessons learned in this project
+## 9. Lessons learned in this project
 
 - **Shared `CARGO_TARGET_DIR` between worktrees served stale binaries** (wrong dev server, wrong test binary) →
   one private target dir per branch, reused across updates, deleted after merge.
 - **Disk filled up twice** from build dirs → check free space before big builds; `make prune`; stop under
   ~12 GB free.
-- **git rerere replayed stale resolutions** across agents → rerere is disabled for this repo.
+- **git rerere replayed stale resolutions** across agents → disable it in the repository's git config
+  (`git config rerere.enabled false`) on the machine that runs the agents.
 - **An agent ran a merge in the main checkout** → `git -C <worktree>` for every git command.
 - **Worktrees inherited the main checkout's `DATABASE_URL`/`SESSION_KEY`** → unset them; own compose project
   and port.

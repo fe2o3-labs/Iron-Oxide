@@ -12,7 +12,8 @@ targets; this file covers the process.
 - Branch from `origin/main`, named `feat/<ticket>-<topic>`, `fix/<ticket>-<topic>`, `chore/…` or `docs/…`.
   Work in your own [git worktree](https://git-scm.com/docs/git-worktree) when several branches are in flight.
 - **Nothing is committed to `main` directly.** The `main` branch is protected: the required checks must pass,
-  and PRs are **squash-merged** by the maintainer.
+  and PRs are **squash-merged** by the maintainer. Exception: [Renovate](renovate.json) automerges patch and
+  lock-file updates once the required checks pass; minor and major updates wait for the maintainer.
 - A PR that builds on another, unmerged PR targets that PR's branch (a *stacked* PR). When the base is merged,
   GitHub retargets it to `main`.
 
@@ -45,7 +46,7 @@ targets; this file covers the process.
 
 ## Reviews
 
-Every PR gets:
+Every PR gets (Renovate's automerged updates excepted):
 
 1. A **check against the ticket**: does it do what the ticket asks, with tests, and nothing else?
 2. An **independent correctness review** by someone who didn't write it, posted as one PR review whose first
@@ -75,8 +76,14 @@ Anything found but out of scope becomes a new ticket, linked from the PR.
 - Several builds at once (worktrees) should each use their own `CARGO_TARGET_DIR`: a shared one can serve one
   worktree's stale binaries to another. Reuse the same directory across updates of one branch so builds stay
   warm, and delete it when the branch is merged. `make prune` trims old build artefacts.
-- A worktree must not inherit the main checkout's `DATABASE_URL` or `SESSION_KEY`; use a separate compose
-  project and port (`COMPOSE_PROJECT`, `PG_PORT`) for its database.
+- **A second checkout or worktree needs its own database and its own app port.** `make` reads `DATABASE_URL`,
+  `APP_BASE_URL`, `WEBAUTHN_ORIGIN` and `GOOGLE_REDIRECT_URL` from the environment and then from `.env`, so give the
+  worktree its own `.env` (`make env PRESET=localhost`, then edit it): `DATABASE_URL` on your `PG_PORT`, and the
+  three URLs on `http://localhost:<APP_PORT>` (passkeys check the origin, so they must match the port you serve
+  on). Run every `make` target with the same `COMPOSE_PROJECT=… PG_PORT=… APP_PORT=…`, and `unset` any
+  `DATABASE_URL` or `SESSION_KEY` exported in your shell.
+- Disable `git rerere` for this repository (`git config rerere.enabled false`): with several worktrees it replays
+  stale conflict resolutions.
 - Keep an eye on free disk space during large builds.
 
 ## Dependencies

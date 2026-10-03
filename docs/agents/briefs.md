@@ -7,7 +7,7 @@ Copy, fill the `<…>` parts, and keep the briefs short: the rules live in [impl
 
 ```text
 You implement ticket #<N> (<title>) of fe2o3-labs/Iron-Oxide. First read and follow CLAUDE.md,
-docs/agents/implementer.md (and docs/agents/ui.md for UI work), then `gh issue view <N> --comments` and
+docs/agents/implementer.md (and docs/agents/ui.md for UI work), then `gh issue view <N> -R fe2o3-labs/Iron-Oxide --comments` and
 <the docs and code the ticket relies on>.
 Branch `<feat|fix|chore|docs>/<N>-<topic>` from <origin/main | the base branch>, PR base <main | base branch>.
 Deliver: <what, as a checklist: behaviour, edge cases, tests, docs>.
@@ -33,7 +33,7 @@ Report back in ≤<6> lines.
 ## Fix round (to the same implementer, by message)
 
 ```text
-The review on PR #<P> (`gh pr view <P> --comments`, the review starting "Verdict: correctness defect(s) found")
+The review on PR #<P> (`gh pr view <P> -R fe2o3-labs/Iron-Oxide --comments`, the review starting "Verdict: correctness defect(s) found")
 found: <list>. Decisions: <how each must be fixed, or "reject X because …">.
 Fix in new commits (no force-push), each with a regression test that fails without the fix.
 make fmt / lint / test, push, CI green. Reply in ≤<4> lines.

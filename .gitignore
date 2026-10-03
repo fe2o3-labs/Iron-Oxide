@@ -39,3 +39,7 @@ node_modules/
 *.swo
 *~
 .DS_Store
+
+# Local work never committed (brand explorations, browser-automation logs)
+/branding/
+.playwright-mcp/

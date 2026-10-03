@@ -2,8 +2,8 @@
 
 A fresh agent, with no context from the session that produced the PR, reviews one PR (or one fix round) for
 **correctness only**. Follow [implementer.md](implementer.md) for the machine and safety rules (own detached
-worktree, `git -C`, private target dir and Postgres, no stash, no pkill), and delete everything you created
-when done.
+worktree, `git -C`, private target dir, own `.env`, Postgres and `APP_PORT`, no stash, no pkill), and delete
+everything you created when done.
 
 ## Scope
 
