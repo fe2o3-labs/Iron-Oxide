@@ -4,6 +4,8 @@
 //! (same id, values and time) and Done becomes "Retry save" with the steppers locked: resending
 //! the identical set is idempotent, whereas a new one could log the same set twice.
 
+use std::rc::Rc;
+
 use dioxus::prelude::*;
 use iron_oxide_domain::program::Exercise;
 use iron_oxide_domain::progression::{NextTargets, SetGoal};
@@ -12,6 +14,7 @@ use iron_oxide_domain::timer::{HoldTimer, IntervalPhase, IntervalTimer};
 use iron_oxide_domain::{LoggedSet, Reps, SessionOutcome, SetId, Weight};
 
 use super::flow::{self, Entry, Step};
+use super::rest::{self, Rest, RestScreen};
 use super::{Active, forget, note, platform, store_skipped, writes};
 use crate::api::error::{ApiFailure, FailureKind};
 use crate::auth::browser::sleep;
@@ -49,6 +52,15 @@ pub fn Workout(initial: Active, on_reload: EventHandler<()>) -> Element {
     // The lifter's changes to the current set. Tagged with their step, so a new step starts from
     // its own prefill.
     let mut edit = use_signal(|| None::<Edit>);
+    // The rest after the last set, resumed after a reload.
+    let mut rest = use_signal(|| {
+        let state = active.peek();
+        rest::restore(state.plan.session.id, &state.sets, platform::now())
+    });
+    // The screen stays on for the whole workout.
+    use_hook(|| Rc::new(platform::ScreenAwake::keep()));
+    // Any tap, or the page coming back, resumes a suspended or interrupted audio context.
+    use_hook(|| Rc::new(platform::KeepAudioReady::new()));
 
     let state = active.read();
     let plan = &state.plan;
@@ -184,6 +196,32 @@ pub fn Workout(initial: Active, on_reload: EventHandler<()>) -> Element {
         };
     };
 
+    if rest.read().is_some() {
+        let last = state.sets.last().cloned();
+        let (title, logged) = last
+            .as_ref()
+            .map(|set| flow::rest_header(plan, set))
+            .unwrap_or_default();
+        let after = last
+            .and_then(|set| {
+                plan.exercises
+                    .iter()
+                    .position(|planned| planned.exercise.id == set.exercise)
+            })
+            .unwrap_or(steps[index].exercise);
+        return rsx! {
+            RestScreen {
+                session: session_id,
+                rest,
+                title,
+                logged,
+                up_next: Some(flow::up_next(&steps, index, after, plan, unit)),
+                sound: state.settings.sound_enabled,
+            }
+            {sheet}
+        };
+    }
+
     let step = steps[index];
     let planned = &plan.exercises[step.exercise];
     let exercise = planned.exercise.clone();
@@ -206,6 +244,8 @@ pub fn Workout(initial: Active, on_reload: EventHandler<()>) -> Element {
         started: None,
     });
     let on_done = move |entry: Entry| {
+        // Inside the tap, before any await: lets iOS play the rest timer's beeps later.
+        platform::unlock_audio();
         if *busy.peek() {
             return;
         }
@@ -227,7 +267,13 @@ pub fn Workout(initial: Active, on_reload: EventHandler<()>) -> Element {
             match result {
                 Ok(()) => {
                     pending.set(None);
+                    let after = set.id;
                     active.write().sets.push(set);
+                    if let Some(length) = rest_length(&active.peek(), step) {
+                        let started = Rest::start(after, platform::now(), length);
+                        rest::store(session_id, &started);
+                        rest.set(Some(started));
+                    }
                     if let Some(id) = failed_banner.take() {
                         // The failure it reported is over (unless a newer banner replaced it).
                         errors.dismiss_if(id);
@@ -283,6 +329,20 @@ struct Edit {
     reps: i64,
     weight: Option<Weight>,
     started: Option<Timestamp>,
+}
+
+/// The rest after `done`, just logged, given the sets left (see [`flow::rest_after`]).
+fn rest_length(state: &Active, done: Step) -> Option<iron_oxide_domain::Seconds> {
+    let steps = flow::steps(&state.plan, state.settings.bar_weight);
+    let index = steps.iter().position(|step| *step == done)?;
+    let next = flow::current_step(&steps, &state.plan, &state.sets, &state.skipped);
+    flow::rest_after(
+        &state.plan,
+        &steps,
+        index,
+        next,
+        state.settings.default_rest,
+    )
 }
 
 /// The exercise at `position` in the plan.

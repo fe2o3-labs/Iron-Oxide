@@ -4,7 +4,8 @@
 //! - `writes`: every session write (start, save a set, finish), in one file so the offline outbox
 //!   (#30) can take them over.
 //! - `workout`: the active session screen.
-//! - `platform`: the browser clock and `localStorage`.
+//! - `rest`: the rest timer between sets (#29).
+//! - `platform`: the browser clock, `localStorage`, sound, vibration and the screen wake lock.
 //!
 //! The page loads on the client only (like the shell's sign-in check), so the server render shows
 //! the loading state and hydration matches. An in-progress session is resumed from the server: its
@@ -12,6 +13,7 @@
 
 mod flow;
 mod platform;
+mod rest;
 mod workout;
 mod writes;
 
@@ -179,6 +181,7 @@ fn store_skipped(session: SessionId, skipped: &BTreeSet<ExerciseId>) {
 /// Forgets what this device kept about `session`, once it has ended.
 fn forget(session: SessionId) {
     platform::remove(&skipped_key(session));
+    rest::clear(session);
 }
 
 /// The next workout, with its exercises, and the button that starts it.
@@ -197,6 +200,8 @@ fn StartCard(
     let bar_weight = settings.bar_weight;
 
     let start = move |_| {
+        // Inside the tap: lets iOS play the rest timer's beeps later.
+        platform::unlock_audio();
         if *busy.peek() {
             return;
         }
